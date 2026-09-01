@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "controller": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "const": 1},
+        "logLevel": {"type": "integer", "minimum": 0}
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["poolRoot", "kubeletRootDir"],
+      "properties": {
+        "poolRoot": {"type": "string", "pattern": "^/"},
+        "kubeletRootDir": {"type": "string", "pattern": "^/"},
+        "logLevel": {"type": "integer", "minimum": 0}
+      }
+    },
+    "helperPod": {
+      "type": "object",
+      "required": ["image", "timeout"],
+      "properties": {
+        "image": {"type": "string", "minLength": 1},
+        "timeout": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
+        "resources": {
+          "type": "object",
+          "required": ["requests", "limits"],
+          "properties": {
+            "requests": {
+              "type": "object",
+              "required": ["cpu", "memory"],
+              "properties": {
+                "cpu": {"type": "string", "minLength": 1},
+                "memory": {"type": "string", "minLength": 1}
+              }
+            },
+            "limits": {
+              "type": "object",
+              "required": ["cpu", "memory"],
+              "properties": {
+                "cpu": {"type": "string", "minLength": 1},
+                "memory": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    },
+    "storageClass": {
+      "type": "object",
+      "required": ["create", "name", "defaultClass", "reclaimPolicy"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string", "minLength": 1},
+        "defaultClass": {"type": "boolean"},
+        "reclaimPolicy": {"const": "Retain"}
+      }
+    }
+  }
+}

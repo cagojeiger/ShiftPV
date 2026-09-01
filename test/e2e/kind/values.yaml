@@ -1,0 +1,16 @@
+image:
+  repository: shiftpv
+  tag: dev
+  pullPolicy: IfNotPresent
+
+node:
+  poolRoot: /mnt/shiftpv
+  kubeletRootDir: /var/lib/kubelet
+  nodeSelector:
+    shiftpv.io/storage-node: "true"
+
+storageClass:
+  create: true
+  name: shiftpv
+  defaultClass: true
+  reclaimPolicy: Retain

@@ -1,0 +1,16 @@
+{{- if .Values.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "shiftpv.labels" . | nindent 4 }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: {{ .Values.storageClass.defaultClass | quote }}
+provisioner: csi.shiftpv.io
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+allowVolumeExpansion: false
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  shiftpv.io/capacity-enforcement: none
+{{- end }}

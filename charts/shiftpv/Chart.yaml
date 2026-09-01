@@ -1,0 +1,7 @@
+apiVersion: v2
+name: shiftpv
+description: CSI driver for directory-backed local volumes on mounted filesystems
+type: application
+version: 0.1.0
+appVersion: "0.1.0-dev"
+kubeVersion: ">=1.35.0-0"

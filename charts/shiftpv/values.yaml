@@ -1,0 +1,57 @@
+image:
+  repository: shiftpv
+  tag: dev
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+controller:
+  replicas: 1
+  logLevel: 2
+  resources: {}
+
+node:
+  poolRoot: /mnt/shiftpv
+  kubeletRootDir: /var/lib/kubelet
+  logLevel: 2
+  nodeSelector: {}
+  tolerations: []
+  resources: {}
+
+helperPod:
+  image: busybox:1.37
+  timeout: 2m
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+storageClass:
+  create: true
+  name: shiftpv
+  defaultClass: false
+  reclaimPolicy: Retain
+
+serviceAccount:
+  controller:
+    create: true
+    name: ""
+  node:
+    create: true
+    name: ""
+
+sidecars:
+  provisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
+    resources: {}
+  registrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0
+    resources: {}
+  livenessProbe:
+    image: registry.k8s.io/sig-storage/livenessprobe:v2.19.0
+    resources: {}
