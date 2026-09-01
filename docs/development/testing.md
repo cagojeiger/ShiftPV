@@ -48,14 +48,29 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 테스트는 성공과 실패 모두 cluster와 임시 host directory를 정리한다.
 `KEEP_CLUSTER=1`은 로컬 실패 진단에만 사용한다.
 
+## Linux mount integration
+
+```bash
+make linux-mount-integration
+```
+
+Linux에서만 실행하며 `sudo`와 util-linux의 `unshare`가 필요하다. 테스트 binary를
+별도 mount namespace에서 실행해 실제 bind mount의 publish/idempotency/unpublish를
+검증한다. 같은 namespace 안에서 UID/GID 65534인 자식 프로세스도 실행해 권한 없는
+mount가 실패하고, mount와 target을 남기지 않으며 source를 보존하는지 확인한다.
+
+권한이 필요한 실행은 이 격리된 테스트에만 한정되며 ShiftPV 제품 container의 권한이나
+배포 설정을 변경하지 않는다.
+
 ## CI
 
 [`ci.yaml`](../../.github/workflows/ci.yaml)은 pull request, `main` push와 수동 실행에서
-다음 두 job을 수행한다. `main`에 합치기 전에 둘 다 성공해야 한다.
+다음 세 job을 수행한다. `main`에 합치기 전에 모두 성공해야 한다.
 
 | Check | 포함 항목 |
 |-------|-----------|
 | `verify` | fast checks, 80% coverage gate와 coverage artifact |
+| `linux-mount` | 격리된 실제 mount namespace, bind mount와 권한 실패 정리 |
 | `kind-e2e` | pinned toolchain, image build와 전체 kind E2E; 실패 진단 artifact |
 
 CI의 특정 실행 결과가 해당 commit의 합격 증거다. [`validation/`](../validation/README.md)의

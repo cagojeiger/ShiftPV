@@ -56,6 +56,23 @@ jobs:
             .tmp/coverage.txt
           retention-days: 14
 
+  linux-mount:
+    name: linux-mount
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run isolated Linux mount integration
+        run: make linux-mount-integration
+
   kind-e2e:
     name: kind-e2e
     runs-on: ubuntu-24.04
