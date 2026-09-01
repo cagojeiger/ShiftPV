@@ -1,4 +1,4 @@
-.PHONY: verify fmt fmt-check mod-verify test coverage vet build image shellcheck helm-lint helm-template
+.PHONY: verify fmt fmt-check mod-verify test coverage vet build image shellcheck helm-lint helm-template linux-mount-integration
 
 VERSION ?= dev
 IMAGE ?= shiftpv:dev
@@ -41,7 +41,10 @@ image:
 	docker build --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(IMAGE) .
 
 shellcheck:
-	shellcheck test/e2e/kind/run.sh
+	shellcheck test/e2e/kind/run.sh test/integration/linux-mount/run.sh
+
+linux-mount-integration:
+	./test/integration/linux-mount/run.sh
 
 helm-lint:
 	helm lint charts/shiftpv
