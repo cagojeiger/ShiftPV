@@ -44,6 +44,10 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 7. 같은 namespace와 pool root로 재설치하면 같은 데이터를 다시 mount한다.
 8. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
    기본값이 유지되고, 명시적으로 `shiftpv`를 선택한 PVC만 ShiftPV로 provision된다.
+9. 고정 worker의 pool을 inode가 고갈된 tmpfs로 가려 provisioning이
+   `Unavailable`로 실패하고 reservation을 보존한 뒤, 복구 시 같은 volume으로 bind된다.
+10. 같은 volume의 pool을 read-only로 바꿔 deletion이 `Unavailable`로 실패할 때
+    reservation과 데이터를 보존하고, read-write 복구 후 삭제가 완료된다.
 
 테스트는 성공과 실패 모두 cluster와 임시 host directory를 정리한다.
 `KEEP_CLUSTER=1`은 로컬 실패 진단에만 사용한다.

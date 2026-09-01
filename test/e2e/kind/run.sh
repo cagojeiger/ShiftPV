@@ -217,5 +217,10 @@ if [[ "${COEXISTENCE_DRIVER}" != "csi.shiftpv.io" ]]; then
 fi
 kubectl exec shiftpv-coexistence -- grep -Fx 'ShiftPV StorageClass coexistence' /data/payload
 
+kubectl delete pod shiftpv-coexistence --wait=true
+kubectl delete pvc shiftpv-coexistence --wait=true
+CLUSTER_NAME="${CLUSTER_NAME}" WORKER_B_POOL="${WORKER_B_POOL}" \
+  "${ROOT_DIR}/test/e2e/kind/filesystem-faults.sh"
+
 echo "ShiftPV kind e2e passed"
 echo "PV=${PV_NAME} volume=${VOLUME_ID} node=${OWNER_NODE} checksum=${CHECKSUM_AFTER} controller_restart=${CONTROLLER_UID_AFTER} node_restart=${NODE_UID_AFTER}"

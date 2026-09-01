@@ -66,7 +66,7 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		return nil, err
 	}
 	if err := s.Operator.Create(ctx, nodeName, id); err != nil {
-		return nil, status.Errorf(codes.Internal, "prepare volume directory: %v", err)
+		return nil, directoryOperationError("prepare volume directory", err)
 	}
 
 	return volumeResponse(id, nodeName, capacity), nil
@@ -96,7 +96,7 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 		return nil, status.Error(codes.FailedPrecondition, "volume reservation has no owner node")
 	}
 	if err := s.Operator.Delete(ctx, nodeName, req.GetVolumeId()); err != nil {
-		return nil, status.Errorf(codes.Internal, "delete volume directory: %v", err)
+		return nil, directoryOperationError("delete volume directory", err)
 	}
 	if err := s.Client.CoreV1().ConfigMaps(s.Namespace).Delete(ctx, req.GetVolumeId(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return nil, kubernetesAPIError("delete volume reservation", err)
@@ -173,6 +173,15 @@ func kubernetesAPIError(operation string, err error) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		code = codes.DeadlineExceeded
 	case apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err), apierrors.IsServiceUnavailable(err):
+		code = codes.Unavailable
+	}
+	return status.Errorf(code, "%s: %v", operation, err)
+}
+
+func directoryOperationError(operation string, err error) error {
+	code := codes.Internal
+	var retryable interface{ Retryable() bool }
+	if errors.As(err, &retryable) && retryable.Retryable() {
 		code = codes.Unavailable
 	}
 	return status.Errorf(code, "%s: %v", operation, err)

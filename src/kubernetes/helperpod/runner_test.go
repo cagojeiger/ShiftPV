@@ -2,6 +2,7 @@ package helperpod
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,10 @@ func TestRunReportsFailedHelperPodAndCleansItUp(t *testing.T) {
 	err := runner.Delete(context.Background(), "worker-a", testVolumeID)
 	if err == nil || !strings.Contains(err.Error(), "operation failed") {
 		t.Fatalf("expected helper failure, got %v", err)
+	}
+	var retryable interface{ Retryable() bool }
+	if !errors.As(err, &retryable) || !retryable.Retryable() {
+		t.Fatalf("expected retryable helper failure, got %T: %v", err, err)
 	}
 	pods, listErr := client.CoreV1().Pods("shiftpv-system").List(context.Background(), metav1.ListOptions{})
 	if listErr != nil {
