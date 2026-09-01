@@ -66,10 +66,10 @@ MOUNT_STATE=enospc
 docker exec "${FAULT_NODE}" sh -ec '
   mkdir -p /mnt/shiftpv/volumes
   index=0
-  while ((index < 1000)) && touch "/mnt/shiftpv/fill-${index}" 2>/dev/null; do
+  while [ "${index}" -lt 1000 ] && touch "/mnt/shiftpv/fill-${index}" 2>/dev/null; do
     index=$((index + 1))
   done
-  if ((index == 1000)); then
+  if [ "${index}" -eq 1000 ]; then
     echo "tmpfs inode limit was not enforced" >&2
     exit 1
   fi
