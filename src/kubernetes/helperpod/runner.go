@@ -98,7 +98,7 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 		},
 	}, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("create helper Pod: %w", err)
+		return fmt.Errorf("create helper Pod: %w", classifyKubernetesAPIError(err))
 	}
 	defer func() {
 		_ = r.Client.CoreV1().Pods(r.Namespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{GracePeriodSeconds: &zero})
@@ -110,7 +110,7 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 			if apierrors.IsNotFound(getErr) {
 				return false, nil
 			}
-			return false, getErr
+			return false, classifyKubernetesAPIError(getErr)
 		}
 		switch current.Status.Phase {
 		case corev1.PodSucceeded:
@@ -125,6 +125,13 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 		return fmt.Errorf("wait for helper Pod on node %q: %w", nodeName, err)
 	}
 	return nil
+}
+
+func classifyKubernetesAPIError(err error) error {
+	if apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+		return retryableError{err: err}
+	}
+	return err
 }
 
 func boolPtr(value bool) *bool    { return &value }

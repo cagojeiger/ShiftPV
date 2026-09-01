@@ -8,8 +8,10 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -86,6 +88,48 @@ func TestRunTimesOutAndCleansUpPendingHelperPod(t *testing.T) {
 	}
 }
 
+func TestRunClassifiesPodCreateAPIErrors(t *testing.T) {
+	tests := helperPodAPIErrors()
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			client := fake.NewClientset()
+			client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, test.err
+			})
+
+			runner := validRunner(client)
+			err := runner.Create(context.Background(), "worker-a", testVolumeID)
+			if err == nil || !strings.Contains(err.Error(), "create helper Pod") {
+				t.Fatalf("expected helper Pod create error, got %v", err)
+			}
+			if got := isRetryable(err); got != test.retryable {
+				t.Fatalf("retryable = %v, want %v for %T: %v", got, test.retryable, test.err, err)
+			}
+		})
+	}
+}
+
+func TestRunClassifiesPodGetAPIErrors(t *testing.T) {
+	tests := helperPodAPIErrors()
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			client, _ := clientWithPodPhase(t, corev1.PodRunning, "")
+			client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, test.err
+			})
+
+			runner := validRunner(client)
+			err := runner.Delete(context.Background(), "worker-a", testVolumeID)
+			if err == nil || !strings.Contains(err.Error(), "wait for helper Pod") {
+				t.Fatalf("expected helper Pod get error, got %v", err)
+			}
+			if got := isRetryable(err); got != test.retryable {
+				t.Fatalf("retryable = %v, want %v for %T: %v", got, test.retryable, test.err, err)
+			}
+		})
+	}
+}
+
 func TestRunRejectsIncompleteConfiguration(t *testing.T) {
 	tests := map[string]Runner{
 		"relative pool": {
@@ -123,6 +167,27 @@ func TestRunRejectsIncompleteConfiguration(t *testing.T) {
 
 type createdPod struct {
 	pod *corev1.Pod
+}
+
+type apiErrorTest struct {
+	err       error
+	retryable bool
+}
+
+func helperPodAPIErrors() map[string]apiErrorTest {
+	pods := schema.GroupResource{Resource: "pods"}
+	return map[string]apiErrorTest{
+		"timeout":             {err: apierrors.NewTimeoutError("timed out", 1), retryable: true},
+		"server timeout":      {err: apierrors.NewServerTimeout(pods, "get", 1), retryable: true},
+		"too many requests":   {err: apierrors.NewTooManyRequests("slow down", 1), retryable: true},
+		"service unavailable": {err: apierrors.NewServiceUnavailable("offline"), retryable: true},
+		"forbidden":           {err: apierrors.NewForbidden(pods, "helper-1", errors.New("denied")), retryable: false},
+	}
+}
+
+func isRetryable(err error) bool {
+	var retryable interface{ Retryable() bool }
+	return errors.As(err, &retryable) && retryable.Retryable()
 }
 
 func clientWithPodPhase(t *testing.T, phase corev1.PodPhase, message string) (*fake.Clientset, *createdPod) {
