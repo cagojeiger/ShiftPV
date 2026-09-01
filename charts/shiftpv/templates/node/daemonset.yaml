@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "shiftpv.fullname" . }}-node
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shiftpv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "shiftpv.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: node
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "shiftpv.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: node
+    spec:
+      serviceAccountName: {{ include "shiftpv.nodeServiceAccount" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: shiftpv-node
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/shiftpv-node"]
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --node-name=$(NODE_NAME)
+            - --pool-root={{ .Values.node.poolRoot }}
+            - --target-root={{ .Values.node.kubeletRootDir }}/pods
+            - --v={{ .Values.node.logLevel }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: kubelet-pods
+              mountPath: {{ .Values.node.kubeletRootDir }}/pods
+              mountPropagation: Bidirectional
+            - name: pool
+              mountPath: {{ .Values.node.poolRoot }}
+          {{- with .Values.node.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: node-driver-registrar
+          image: {{ .Values.sidecars.registrar.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ .Values.node.kubeletRootDir }}/plugins/csi.shiftpv.io/csi.sock
+            - --v={{ .Values.node.logLevel }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsUser: 0
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+          {{- with .Values.sidecars.registrar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: liveness-probe
+          image: {{ .Values.sidecars.livenessProbe.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --health-port=9808
+            - --v={{ .Values.node.logLevel }}
+          ports:
+            - name: healthz
+              containerPort: 9808
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsUser: 0
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+          {{- with .Values.sidecars.livenessProbe.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: {{ .Values.node.kubeletRootDir }}/plugins/csi.shiftpv.io
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ .Values.node.kubeletRootDir }}/plugins_registry
+            type: Directory
+        - name: kubelet-pods
+          hostPath:
+            path: {{ .Values.node.kubeletRootDir }}/pods
+            type: Directory
+        - name: pool
+          hostPath:
+            path: {{ .Values.node.poolRoot }}
+            type: Directory
