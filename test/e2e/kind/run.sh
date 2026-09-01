@@ -66,19 +66,21 @@ docker build \
 kind load docker-image shiftpv:dev --name "${CLUSTER_NAME}"
 
 install_shiftpv() {
-  helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
-    --namespace shiftpv-system \
-    --create-namespace \
-    --values "${ROOT_DIR}/test/e2e/kind/values.yaml" \
-    --wait \
-    --timeout 5m
+	local default_class=${1:-true}
+	helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
+		--namespace shiftpv-system \
+		--create-namespace \
+		--values "${ROOT_DIR}/test/e2e/kind/values.yaml" \
+		--set "storageClass.defaultClass=${default_class}" \
+		--wait \
+		--timeout 5m
   kubectl -n shiftpv-system wait \
     --for=condition=Ready pod \
     -l app.kubernetes.io/instance=shiftpv \
     --timeout=5m
 }
 
-install_shiftpv
+install_shiftpv true
 DEFAULT_CLASS=$(kubectl get storageclass shiftpv \
   -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
 if [[ "${DEFAULT_CLASS}" != "true" ]]; then
@@ -129,15 +131,48 @@ case "${OWNER_NODE}" in
 esac
 test -f "${DATA_ROOT}/volumes/${VOLUME_ID}/payload"
 
-install_shiftpv
+install_shiftpv true
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
 kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
 CHECKSUM_AFTER=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
 
 if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER}" ]]; then
-  echo "checksum mismatch after Helm reinstall" >&2
-  exit 1
+	echo "checksum mismatch after Helm reinstall" >&2
+	exit 1
 fi
+
+# Reinstall with ShiftPV opt-in while an unrelated default class already exists.
+kubectl delete pod shiftpv-e2e --wait=true
+helm uninstall shiftpv --namespace shiftpv-system
+kubectl apply -f "${ROOT_DIR}/test/e2e/kind/existing-default-storageclass.yaml"
+install_shiftpv false
+
+EXISTING_DEFAULT=$(kubectl get storageclass existing-default \
+	-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+SHIFTPV_DEFAULT=$(kubectl get storageclass shiftpv \
+	-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+if [[ "${EXISTING_DEFAULT}" != "true" || "${SHIFTPV_DEFAULT}" != "false" ]]; then
+	echo "StorageClass default annotations changed unexpectedly: existing=${EXISTING_DEFAULT} shiftpv=${SHIFTPV_DEFAULT}" >&2
+	exit 1
+fi
+
+kubectl apply -f "${ROOT_DIR}/test/e2e/kind/implicit-pvc.yaml"
+kubectl wait \
+	--for=jsonpath='{.spec.storageClassName}'=existing-default \
+	pvc/existing-default-e2e \
+	--timeout=2m
+
+kubectl apply -f "${ROOT_DIR}/test/e2e/kind/coexistence-pvc.yaml"
+kubectl apply -f "${ROOT_DIR}/test/e2e/kind/coexistence-pod.yaml"
+kubectl wait --for=condition=Ready pod/shiftpv-coexistence --timeout=5m
+kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-coexistence --timeout=2m
+COEXISTENCE_PV=$(kubectl get pvc shiftpv-coexistence -o jsonpath='{.spec.volumeName}')
+COEXISTENCE_DRIVER=$(kubectl get "pv/${COEXISTENCE_PV}" -o jsonpath='{.spec.csi.driver}')
+if [[ "${COEXISTENCE_DRIVER}" != "csi.shiftpv.io" ]]; then
+	echo "explicit ShiftPV PVC used unexpected driver: ${COEXISTENCE_DRIVER}" >&2
+	exit 1
+fi
+kubectl exec shiftpv-coexistence -- grep -Fx 'ShiftPV StorageClass coexistence' /data/payload
 
 echo "ShiftPV kind e2e passed"
 echo "PV=${PV_NAME} volume=${VOLUME_ID} node=${OWNER_NODE} checksum=${CHECKSUM_AFTER}"

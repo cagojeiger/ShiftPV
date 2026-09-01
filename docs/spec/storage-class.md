@@ -33,6 +33,8 @@ Helm의 `storageClass.defaultClass`를 `true`로 설정하면 chart가
 `storageClassName`을 생략한 새 PVC도 Kubernetes admission에 의해 `shiftpv`를 선택하며,
 kind E2E는 이 PVC를 사용하는 Pod가 실제로 mount하고 데이터를 쓰는 과정까지 검증한다.
 기존 기본 StorageClass가 있는 cluster에서는 동시에 둘을 기본값으로 두지 않아야 한다.
+기본값인 `false`로 설치하면 chart는 기존 StorageClass의 annotation을 변경하지 않으며,
+workload는 `storageClassName: shiftpv`로 ShiftPV를 명시적으로 선택할 수 있다.
 
 ## Helm lifecycle
 

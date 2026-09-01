@@ -24,7 +24,9 @@ through `csi.shiftpv.io`, and starts a Pod that writes through the mounted RWO
 filesystem volume. It then verifies checksum retention after ordinary Pod
 recreation, stops the workload, uninstalls Helm, verifies that the
 PVC/PV/reservation/host file remain, reinstalls the same release, and verifies
-the checksum again.
+the checksum again. Finally, it installs an unrelated default StorageClass,
+reinstalls ShiftPV with `defaultClass=false`, verifies an implicit PVC keeps the
+existing default, and provisions an explicitly selected ShiftPV PVC and Pod.
 
 The cluster and its temporary host directories are removed on exit. Set
 `KEEP_CLUSTER=1` only while diagnosing a failure.
