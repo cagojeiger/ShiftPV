@@ -11,7 +11,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
@@ -21,17 +23,21 @@ type fakeDirectoryOperator struct {
 	createdID   string
 	deletedNode string
 	deletedID   string
+	createCalls int
+	deleteCalls int
 	createErr   error
 	deleteErr   error
 }
 
 func (f *fakeDirectoryOperator) Create(_ context.Context, node, id string) error {
+	f.createCalls++
 	f.createdNode = node
 	f.createdID = id
 	return f.createErr
 }
 
 func (f *fakeDirectoryOperator) Delete(_ context.Context, node, id string) error {
+	f.deleteCalls++
 	f.deletedNode = node
 	f.deletedID = id
 	return f.deleteErr
@@ -152,6 +158,74 @@ func TestCreateVolumeReportsDirectoryFailure(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeRetriesAfterAmbiguousReservationTimeout(t *testing.T) {
+	client := fake.NewClientset()
+	operator := &fakeDirectoryOperator{}
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator}
+	req := validCreateRequest("worker-a")
+	timedOut := false
+	client.PrependReactor("create", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if timedOut {
+			return false, nil, nil
+		}
+		timedOut = true
+		create := action.(k8stesting.CreateAction)
+		cm := create.GetObject().(*corev1.ConfigMap).DeepCopy()
+		if err := client.Tracker().Create(action.GetResource(), cm, action.GetNamespace()); err != nil {
+			return true, nil, err
+		}
+		return true, nil, apierrors.NewTimeoutError("reservation response timed out", 1)
+	})
+
+	if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected retryable Unavailable, got %v", err)
+	}
+	if operator.createCalls != 0 {
+		t.Fatalf("directory operation ran after ambiguous reservation response: %d calls", operator.createCalls)
+	}
+	response, err := service.CreateVolume(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetVolume().GetVolumeId() == "" || operator.createCalls != 1 {
+		t.Fatalf("retry did not converge: response=%#v createCalls=%d", response, operator.createCalls)
+	}
+}
+
+func TestCreateVolumePreservesDeadlineExceededCode(t *testing.T) {
+	client := fake.NewClientset()
+	client.PrependReactor("create", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}}
+
+	if _, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a")); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("expected DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestKubernetesAPIErrorPreservesRetryAndContextCodes(t *testing.T) {
+	tests := map[string]struct {
+		err  error
+		code codes.Code
+	}{
+		"canceled":          {err: context.Canceled, code: codes.Canceled},
+		"deadline exceeded": {err: context.DeadlineExceeded, code: codes.DeadlineExceeded},
+		"timeout":           {err: apierrors.NewTimeoutError("timed out", 1), code: codes.Unavailable},
+		"throttled":         {err: apierrors.NewTooManyRequests("slow down", 1), code: codes.Unavailable},
+		"unavailable":       {err: apierrors.NewServiceUnavailable("offline"), code: codes.Unavailable},
+		"other":             {err: errors.New("invalid response"), code: codes.Internal},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := status.Code(kubernetesAPIError("call Kubernetes", test.err)); got != test.code {
+				t.Fatalf("expected %s, got %s", test.code, got)
+			}
+		})
+	}
+}
+
 func TestDeleteVolumeRemovesDirectoryAndReservation(t *testing.T) {
 	id, err := volume.IDFromName("pvc-uid")
 	if err != nil {
@@ -203,6 +277,74 @@ func TestDeleteVolumePreservesReservationOnDirectoryFailure(t *testing.T) {
 	}
 	if _, getErr := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), id, metav1.GetOptions{}); getErr != nil {
 		t.Fatalf("reservation was removed after directory failure: %v", getErr)
+	}
+}
+
+func TestDeleteVolumeRetriesAfterReservationReadTimeout(t *testing.T) {
+	id, err := volume.IDFromName("pvc-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewClientset(reservation(id, "worker-a"))
+	operator := &fakeDirectoryOperator{}
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator}
+	timedOut := false
+	client.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if timedOut {
+			return false, nil, nil
+		}
+		timedOut = true
+		return true, nil, apierrors.NewServiceUnavailable("API server unavailable")
+	})
+
+	request := &csi.DeleteVolumeRequest{VolumeId: id}
+	if _, err := service.DeleteVolume(context.Background(), request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected retryable Unavailable, got %v", err)
+	}
+	if operator.deleteCalls != 0 {
+		t.Fatalf("directory was deleted before reading its reservation: %d calls", operator.deleteCalls)
+	}
+	if _, err := service.DeleteVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if operator.deleteCalls != 1 {
+		t.Fatalf("retry did not delete the directory exactly once: %d calls", operator.deleteCalls)
+	}
+}
+
+func TestDeleteVolumeConvergesAfterAmbiguousReservationDeleteTimeout(t *testing.T) {
+	id, err := volume.IDFromName("pvc-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewClientset(reservation(id, "worker-a"))
+	operator := &fakeDirectoryOperator{}
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator}
+	timedOut := false
+	client.PrependReactor("delete", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if timedOut {
+			return false, nil, nil
+		}
+		timedOut = true
+		deleteAction := action.(k8stesting.DeleteAction)
+		if err := client.Tracker().Delete(action.GetResource(), action.GetNamespace(), deleteAction.GetName()); err != nil {
+			return true, nil, err
+		}
+		return true, nil, apierrors.NewTimeoutError("reservation delete response timed out", 1)
+	})
+
+	request := &csi.DeleteVolumeRequest{VolumeId: id}
+	if _, err := service.DeleteVolume(context.Background(), request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected retryable Unavailable, got %v", err)
+	}
+	if operator.deleteCalls != 1 {
+		t.Fatalf("directory delete calls after ambiguous response: %d", operator.deleteCalls)
+	}
+	if _, err := service.DeleteVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if operator.deleteCalls != 1 {
+		t.Fatalf("idempotent retry repeated directory deletion: %d calls", operator.deleteCalls)
 	}
 }
 

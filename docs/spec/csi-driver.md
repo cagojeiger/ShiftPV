@@ -70,6 +70,10 @@ node다. 별도 PV annotation이나 외부 상태를 조회하지 않는다.
 ## Idempotency and deletion
 
 - 같은 `CreateVolume` 재시도는 ConfigMap 값이 같을 때 같은 ID/topology를 반환한다.
+- Kubernetes API의 timeout, server unavailable, throttling은 `Unavailable`로
+  반환한다. 호출 context의 deadline/cancellation은 해당 gRPC code를 유지한다.
+- reservation 생성이나 삭제의 응답이 유실되어 실제 반영 여부가 모호해도 다음
+  CSI 재시도는 현재 ConfigMap 상태를 읽어 동일 결과로 수렴한다.
 - 이미 올바르게 mount된 target publish와 이미 unmount된 unpublish는 성공한다.
 - `DeleteVolume`은 reservation의 owner node에서 directory를 제거한 다음
   reservation을 제거한다. 존재하지 않는 volume은 성공한다.

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -83,7 +84,7 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 		return &csi.DeleteVolumeResponse{}, nil
 	}
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "read volume reservation: %v", err)
+		return nil, kubernetesAPIError("read volume reservation", err)
 	}
 	nodeName := cm.Data["nodeName"]
 	if nodeName == "" {
@@ -93,7 +94,7 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 		return nil, status.Errorf(codes.Internal, "delete volume directory: %v", err)
 	}
 	if err := s.Client.CoreV1().ConfigMaps(s.Namespace).Delete(ctx, req.GetVolumeId(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return nil, status.Errorf(codes.Internal, "delete volume reservation: %v", err)
+		return nil, kubernetesAPIError("delete volume reservation", err)
 	}
 	return &csi.DeleteVolumeResponse{}, nil
 }
@@ -145,11 +146,11 @@ func (s *Service) reserve(ctx context.Context, id, requestName, nodeName string,
 		return nil
 	}
 	if !apierrors.IsAlreadyExists(err) {
-		return status.Errorf(codes.Internal, "reserve volume: %v", err)
+		return kubernetesAPIError("reserve volume", err)
 	}
 	existing, getErr := s.Client.CoreV1().ConfigMaps(s.Namespace).Get(ctx, id, metav1.GetOptions{})
 	if getErr != nil {
-		return status.Errorf(codes.Internal, "read existing volume reservation: %v", getErr)
+		return kubernetesAPIError("read existing volume reservation", getErr)
 	}
 	for key, value := range data {
 		if existing.Data[key] != value {
@@ -157,6 +158,19 @@ func (s *Service) reserve(ctx context.Context, id, requestName, nodeName string,
 		}
 	}
 	return nil
+}
+
+func kubernetesAPIError(operation string, err error) error {
+	code := codes.Internal
+	switch {
+	case errors.Is(err, context.Canceled):
+		code = codes.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		code = codes.DeadlineExceeded
+	case apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err), apierrors.IsServiceUnavailable(err):
+		code = codes.Unavailable
+	}
+	return status.Errorf(code, "%s: %v", operation, err)
 }
 
 func volumeResponse(id, nodeName string, capacity int64) *csi.CreateVolumeResponse {
