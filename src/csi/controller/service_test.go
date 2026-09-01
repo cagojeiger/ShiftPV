@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -226,6 +228,165 @@ func TestKubernetesAPIErrorPreservesRetryAndContextCodes(t *testing.T) {
 	}
 }
 
+func TestCreateWaitsForConcurrentDeleteOfSameVolume(t *testing.T) {
+	req := validCreateRequest("worker-a")
+	id, err := volume.IDFromName(req.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewClientset(reservationForCreateRequest(id, req))
+	operator := newBlockingDeleteOperator()
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator}
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, deleteErr := service.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: id})
+		deleteDone <- deleteErr
+	}()
+	<-operator.deleteStarted
+
+	createDone := make(chan error, 1)
+	createCalled := make(chan struct{})
+	go func() {
+		close(createCalled)
+		_, createErr := service.CreateVolume(context.Background(), req)
+		createDone <- createErr
+	}()
+	<-createCalled
+
+	select {
+	case <-operator.createStarted:
+		close(operator.allowDelete)
+		<-deleteDone
+		<-createDone
+		t.Fatal("CreateVolume reached the directory while DeleteVolume still owned the same volume lifecycle")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(operator.allowDelete)
+	if err := <-deleteDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-createDone; err != nil {
+		t.Fatal(err)
+	}
+	if !operator.exists() {
+		t.Fatal("serialized CreateVolume did not leave the directory present")
+	}
+	if _, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), id, metav1.GetOptions{}); err != nil {
+		t.Fatalf("serialized CreateVolume did not restore the reservation: %v", err)
+	}
+}
+
+func TestCreateVolumesWithDifferentIDsRunConcurrently(t *testing.T) {
+	client := fake.NewClientset()
+	operator := newBlockingCreateOperator()
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator}
+	requests := []*csi.CreateVolumeRequest{validCreateRequest("worker-a"), validCreateRequest("worker-b")}
+	requests[0].Name = "pvc-a"
+	requests[1].Name = "pvc-b"
+	done := make(chan error, len(requests))
+	for _, req := range requests {
+		req := req
+		go func() {
+			_, err := service.CreateVolume(context.Background(), req)
+			done <- err
+		}()
+	}
+
+	for range requests {
+		select {
+		case <-operator.createStarted:
+		case <-time.After(time.Second):
+			close(operator.allowCreate)
+			t.Fatal("different volume IDs were serialized")
+		}
+	}
+	close(operator.allowCreate)
+	for range requests {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestConcurrentCreatesForSameIDAreSerialized(t *testing.T) {
+	client := fake.NewClientset()
+	operator := newBlockingCreateOperator()
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator}
+	req := validCreateRequest("worker-a")
+	done := make(chan error, 2)
+	go func() {
+		_, err := service.CreateVolume(context.Background(), req)
+		done <- err
+	}()
+	<-operator.createStarted
+	secondCalled := make(chan struct{})
+	go func() {
+		close(secondCalled)
+		_, err := service.CreateVolume(context.Background(), req)
+		done <- err
+	}()
+	<-secondCalled
+
+	secondEnteredEarly := false
+	select {
+	case <-operator.createStarted:
+		secondEnteredEarly = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(operator.allowCreate)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if secondEnteredEarly {
+		t.Fatal("concurrent CreateVolume calls entered the same volume lifecycle together")
+	}
+}
+
+func TestConcurrentDeletesForSameIDRunDirectoryDeleteOnce(t *testing.T) {
+	id, err := volume.IDFromName("pvc-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewClientset(reservation(id, "worker-a"))
+	operator := newBlockingDeleteOperator()
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator}
+	done := make(chan error, 2)
+	deleteRequest := func() {
+		_, deleteErr := service.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: id})
+		done <- deleteErr
+	}
+	go deleteRequest()
+	<-operator.deleteStarted
+	secondCalled := make(chan struct{})
+	go func() {
+		close(secondCalled)
+		deleteRequest()
+	}()
+	<-secondCalled
+
+	secondEnteredEarly := false
+	select {
+	case <-operator.deleteStarted:
+		secondEnteredEarly = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(operator.allowDelete)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if secondEnteredEarly {
+		t.Fatal("concurrent DeleteVolume calls entered the same volume lifecycle together")
+	}
+	if operator.exists() {
+		t.Fatal("directory remained after serialized deletion")
+	}
+}
+
 func TestDeleteVolumeRemovesDirectoryAndReservation(t *testing.T) {
 	id, err := volume.IDFromName("pvc-uid")
 	if err != nil {
@@ -409,6 +570,69 @@ func reservation(id, node string) *corev1.ConfigMap {
 		ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: "shiftpv-system"},
 		Data:       map[string]string{"nodeName": node},
 	}
+}
+
+func reservationForCreateRequest(id string, req *csi.CreateVolumeRequest) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: "shiftpv-system"},
+		Data: map[string]string{
+			"requestName": req.Name,
+			"volumeID":    id,
+			"nodeName":    req.AccessibilityRequirements.Preferred[0].Segments[TopologyKey],
+			"capacity":    "67108864",
+		},
+	}
+}
+
+type blockingDirectoryOperator struct {
+	mu            sync.Mutex
+	directory     bool
+	deleteStarted chan struct{}
+	createStarted chan struct{}
+	allowDelete   chan struct{}
+	allowCreate   chan struct{}
+}
+
+func newBlockingDeleteOperator() *blockingDirectoryOperator {
+	return &blockingDirectoryOperator{
+		directory:     true,
+		deleteStarted: make(chan struct{}, 1),
+		createStarted: make(chan struct{}, 1),
+		allowDelete:   make(chan struct{}),
+	}
+}
+
+func newBlockingCreateOperator() *blockingDirectoryOperator {
+	return &blockingDirectoryOperator{
+		createStarted: make(chan struct{}, 2),
+		allowCreate:   make(chan struct{}),
+	}
+}
+
+func (o *blockingDirectoryOperator) Create(context.Context, string, string) error {
+	o.createStarted <- struct{}{}
+	if o.allowCreate != nil {
+		<-o.allowCreate
+	}
+	o.mu.Lock()
+	o.directory = true
+	o.mu.Unlock()
+	return nil
+}
+
+func (o *blockingDirectoryOperator) Delete(context.Context, string, string) error {
+	o.deleteStarted <- struct{}{}
+	<-o.allowDelete
+	o.mu.Lock()
+	o.directory = false
+	o.mu.Unlock()
+	return nil
+}
+
+func (o *blockingDirectoryOperator) exists() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.directory
 }
 
 func validCreateRequest(node string) *csi.CreateVolumeRequest {
