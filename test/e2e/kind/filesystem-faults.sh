@@ -10,11 +10,12 @@ MOUNT_STATE=normal
 
 restore_pool_mount() {
   case "${MOUNT_STATE}" in
-    enospc)
+    enospc | tmpfs_rw)
       docker exec "${FAULT_NODE}" umount /mnt/shiftpv >/dev/null 2>&1 || true
       ;;
-    readonly)
-      docker exec "${FAULT_NODE}" mount -o remount,bind,rw /mnt/shiftpv >/dev/null 2>&1 || true
+    tmpfs_readonly)
+      docker exec "${FAULT_NODE}" mount -o remount,rw /mnt/shiftpv >/dev/null 2>&1 || true
+      docker exec "${FAULT_NODE}" umount /mnt/shiftpv >/dev/null 2>&1 || true
       ;;
   esac
   MOUNT_STATE=normal
@@ -96,10 +97,10 @@ if docker exec "${FAULT_NODE}" test -d "/mnt/shiftpv/volumes/${RESERVATION_NAME}
   exit 1
 fi
 
-# Removing the overlay restores the real pool. The retained reservation makes
-# the next CreateVolume call idempotent and the pending claim must converge.
-docker exec "${FAULT_NODE}" umount /mnt/shiftpv
-MOUNT_STATE=normal
+# Free the fault files without replacing the mounted filesystem. The retained
+# reservation makes the next CreateVolume call idempotent on the same tmpfs.
+docker exec "${FAULT_NODE}" sh -ec 'rm -f /mnt/shiftpv/fill-*'
+MOUNT_STATE=tmpfs_rw
 kubectl wait --for=condition=Ready pod/shiftpv-filesystem-fault --timeout=5m
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-filesystem-fault --timeout=2m
 
@@ -110,14 +111,14 @@ if [[ "${VOLUME_ID}" != "${RESERVATION_NAME}" ]]; then
   exit 1
 fi
 kubectl exec shiftpv-filesystem-fault -- grep -Fx 'ShiftPV filesystem fault recovery' /data/payload
-test -f "${WORKER_B_POOL}/volumes/${VOLUME_ID}/payload"
+docker exec "${FAULT_NODE}" test -f "/mnt/shiftpv/volumes/${VOLUME_ID}/payload"
 
-# Stop the writer, remount the real bind pool read-only in the kind worker, and
-# request deletion. DeleteVolume must fail retryably without dropping metadata
-# or data, then finish after the mount is restored read-write.
+# Stop the writer, remount the tmpfs filesystem read-only, and request deletion.
+# DeleteVolume must fail retryably without dropping metadata or data, then
+# finish after the filesystem is restored read-write.
 kubectl delete pod shiftpv-filesystem-fault --wait=true
-docker exec "${FAULT_NODE}" mount -o remount,bind,ro /mnt/shiftpv
-MOUNT_STATE="readonly"
+docker exec "${FAULT_NODE}" mount -o remount,ro /mnt/shiftpv
+MOUNT_STATE=tmpfs_readonly
 if docker exec "${FAULT_NODE}" touch /mnt/shiftpv/.shiftpv-readonly-probe 2>/dev/null; then
   echo "pool remount did not become read-only" >&2
   exit 1
@@ -128,12 +129,15 @@ kubectl wait --for=delete pvc/shiftpv-filesystem-fault --timeout=2m
 wait_for_unavailable_event PersistentVolume "${FAULT_PV}"
 kubectl get "pv/${FAULT_PV}" >/dev/null
 kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
-test -f "${WORKER_B_POOL}/volumes/${VOLUME_ID}/payload"
+docker exec "${FAULT_NODE}" test -f "/mnt/shiftpv/volumes/${VOLUME_ID}/payload"
 
-docker exec "${FAULT_NODE}" mount -o remount,bind,rw /mnt/shiftpv
-MOUNT_STATE=normal
+docker exec "${FAULT_NODE}" mount -o remount,rw /mnt/shiftpv
+MOUNT_STATE=tmpfs_rw
 kubectl wait --for=delete "pv/${FAULT_PV}" --timeout=5m
 kubectl -n shiftpv-system wait --for=delete "configmap/${VOLUME_ID}" --timeout=2m
+docker exec "${FAULT_NODE}" test ! -e "/mnt/shiftpv/volumes/${VOLUME_ID}"
+docker exec "${FAULT_NODE}" umount /mnt/shiftpv
+MOUNT_STATE=normal
 test ! -e "${WORKER_B_POOL}/volumes/${VOLUME_ID}"
 kubectl delete storageclass shiftpv-filesystem-fault --wait=true
 
