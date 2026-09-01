@@ -101,6 +101,13 @@ fi
 # reservation makes the next CreateVolume call idempotent on the same tmpfs.
 docker exec "${FAULT_NODE}" sh -ec 'rm -f /mnt/shiftpv/fill-*'
 MOUNT_STATE=tmpfs_rw
+FAULT_NODE_POD=$(kubectl -n shiftpv-system get pod \
+  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=node \
+  --field-selector "spec.nodeName=${FAULT_NODE}" \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n shiftpv-system delete "pod/${FAULT_NODE_POD}" \
+  --grace-period=0 --force --wait=true
+kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=5m
 kubectl wait --for=condition=Ready pod/shiftpv-filesystem-fault --timeout=5m
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-filesystem-fault --timeout=2m
 
