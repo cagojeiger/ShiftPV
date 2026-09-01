@@ -60,7 +60,8 @@ kind create cluster \
 
 docker build \
   --target combined \
-  --build-arg VERSION=dev \
+  --build-arg CONTROLLER_VERSION=dev \
+  --build-arg NODE_VERSION=dev \
   -f "${ROOT_DIR}/build/package/Dockerfile" \
   -t shiftpv:dev \
   "${ROOT_DIR}"

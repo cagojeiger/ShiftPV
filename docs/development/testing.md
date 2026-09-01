@@ -83,12 +83,22 @@ mount가 실패하고, mount와 target을 남기지 않으며 source를 보존�
 Controller와 Node Plugin 이미지는 같은 source version에서 독립적으로 빌드한다.
 
 ```sh
-make image VERSION=dev
+make image
 ```
 
-기본 출력은 `shiftpv-controller:dev`와 `shiftpv-node:dev`다. 하나만 빌드할
-때는 `make image-controller` 또는 `make image-node`를 사용하고, 현재 Helm 및
-kind 전환 호환용 통합 이미지는 `make image-combined`로만 명시적으로 빌드한다.
+[`versions/controller`](../../versions/controller)와
+[`versions/node`](../../versions/node)가 각 이미지와 바이너리에 들어가는 버전의
+독립 source of truth다. 기본 출력은 각 파일의 값을 tag로 사용한다. 하나만 빌드할
+때는 `make image-controller` 또는 `make image-node`를 사용한다.
+
+```sh
+make image-controller CONTROLLER_VERSION=0.2.0
+make image-node NODE_VERSION=0.1.3
+```
+
+현재 Helm 및 kind 전환 호환용 통합 이미지는 `make image-combined`로만 명시적으로
+빌드한다. 통합 이미지 자체의 제품 버전은 없으며, 내부 두 바이너리는 각 component
+version을 유지한다.
 
 CI는 두 독립 이미지를 각각 빌드하고 기본 entrypoint의 `--help` 실행을 확인한다.
 이미지 registry push와 Helm image reference 분리는 이 단계의 범위가 아니다.

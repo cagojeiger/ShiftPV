@@ -63,18 +63,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component:
-          - controller
-          - node
+        include:
+          - component: controller
+            version_arg: CONTROLLER_VERSION
+          - component: node
+            version_arg: NODE_VERSION
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
       - name: Build image
         run: |
+          version=$(<"versions/${{ matrix.component }}")
           docker build \
             --target "${{ matrix.component }}" \
-            --build-arg VERSION=ci \
+            --build-arg "${{ matrix.version_arg }}=${version}" \
             --tag "shiftpv-${{ matrix.component }}:ci" \
             --file build/package/Dockerfile \
             .

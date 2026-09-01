@@ -1,13 +1,16 @@
-.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined shellcheck helm-lint helm-template linux-mount-integration
+.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check shellcheck helm-lint helm-template linux-mount-integration
 
-VERSION ?= dev
-CONTROLLER_IMAGE ?= shiftpv-controller:dev
-NODE_IMAGE ?= shiftpv-node:dev
+CONTROLLER_VERSION_FILE ?= versions/controller
+NODE_VERSION_FILE ?= versions/node
+CONTROLLER_VERSION ?= $(shell cat $(CONTROLLER_VERSION_FILE))
+NODE_VERSION ?= $(shell cat $(NODE_VERSION_FILE))
+CONTROLLER_IMAGE ?= shiftpv-controller:$(CONTROLLER_VERSION)
+NODE_IMAGE ?= shiftpv-node:$(NODE_VERSION)
 IMAGE ?= shiftpv:dev
 COVERAGE_MIN ?= 80
 COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/node/... ./src/volume/... ./test/...
 
-verify: fmt-check mod-verify coverage vet build shellcheck helm-lint helm-template
+verify: fmt-check mod-verify coverage vet build image-version-check shellcheck helm-lint helm-template
 
 fmt:
 	gofmt -w $$(find src test -name '*.go' -type f)
@@ -41,14 +44,20 @@ build:
 
 image: image-controller image-node
 
-image-controller:
-	docker build --target controller --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(CONTROLLER_IMAGE) .
+image-controller: image-version-check
+	docker build --target controller --build-arg CONTROLLER_VERSION=$(CONTROLLER_VERSION) -f build/package/Dockerfile -t $(CONTROLLER_IMAGE) .
 
-image-node:
-	docker build --target node --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(NODE_IMAGE) .
+image-node: image-version-check
+	docker build --target node --build-arg NODE_VERSION=$(NODE_VERSION) -f build/package/Dockerfile -t $(NODE_IMAGE) .
 
-image-combined:
-	docker build --target combined --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(IMAGE) .
+image-combined: image-version-check
+	docker build --target combined --build-arg CONTROLLER_VERSION=$(CONTROLLER_VERSION) --build-arg NODE_VERSION=$(NODE_VERSION) -f build/package/Dockerfile -t $(IMAGE) .
+
+image-version-check:
+	@for file in $(CONTROLLER_VERSION_FILE) $(NODE_VERSION_FILE); do \
+		test -f "$$file" || { echo "image version file not found: $$file" >&2; exit 1; }; \
+		grep -Eq '^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$$' "$$file" || { echo "invalid image version in $$file" >&2; exit 1; }; \
+	done
 
 shellcheck:
 	shellcheck test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/integration/linux-mount/run.sh

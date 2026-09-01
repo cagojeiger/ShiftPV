@@ -2,7 +2,6 @@ FROM golang:1.25.7 AS build-base
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=dev
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
@@ -10,15 +9,17 @@ RUN go mod download
 COPY src ./src
 
 FROM build-base AS build-controller
+ARG CONTROLLER_VERSION=dev
 RUN export GOOS="${TARGETOS:-$(go env GOOS)}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" \
     && CGO_ENABLED=0 go build \
-    -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+    -trimpath -ldflags="-s -w -X main.version=${CONTROLLER_VERSION}" \
     -o /out/shiftpv-controller ./src/cmd/controller
 
 FROM build-base AS build-node
+ARG NODE_VERSION=dev
 RUN export GOOS="${TARGETOS:-$(go env GOOS)}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" \
     && CGO_ENABLED=0 go build \
-    -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+    -trimpath -ldflags="-s -w -X main.version=${NODE_VERSION}" \
     -o /out/shiftpv-node ./src/cmd/node
 
 FROM debian:bookworm-slim AS runtime-base
