@@ -31,9 +31,10 @@ type DirectoryOperator interface {
 
 type Service struct {
 	csi.UnimplementedControllerServer
-	Client    kubernetes.Interface
-	Namespace string
-	Operator  DirectoryOperator
+	Client     kubernetes.Interface
+	Namespace  string
+	Operator   DirectoryOperator
+	lifecycles volumeLifecycles
 }
 
 func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
@@ -58,6 +59,8 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	unlock := s.lifecycles.lock(id)
+	defer unlock()
 
 	if err := s.reserve(ctx, id, req.GetName(), nodeName, capacity); err != nil {
 		return nil, err
@@ -79,6 +82,8 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 	if s.Client == nil || s.Operator == nil || s.Namespace == "" {
 		return nil, status.Error(codes.Internal, "controller is not configured")
 	}
+	unlock := s.lifecycles.lock(req.GetVolumeId())
+	defer unlock()
 	cm, err := s.Client.CoreV1().ConfigMaps(s.Namespace).Get(ctx, req.GetVolumeId(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return &csi.DeleteVolumeResponse{}, nil
