@@ -59,6 +59,7 @@ kind create cluster \
   --config "${WORK_DIR}/cluster.yaml"
 
 docker build \
+  --target combined \
   --build-arg VERSION=dev \
   -f "${ROOT_DIR}/build/package/Dockerfile" \
   -t shiftpv:dev \

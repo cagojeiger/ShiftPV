@@ -76,6 +76,22 @@ mount가 실패하고, mount와 target을 남기지 않으며 source를 보존�
 | `verify` | fast checks, 80% coverage gate와 coverage artifact |
 | `linux-mount` | 격리된 실제 mount namespace, bind mount와 권한 실패 정리 |
 | `kind-e2e` | pinned toolchain, image build와 전체 kind E2E; 실패 진단 artifact |
+| `image-controller`, `image-node` | 독립 runtime image 빌드와 각 entrypoint smoke test |
+
+## Container image builds
+
+Controller와 Node Plugin 이미지는 같은 source version에서 독립적으로 빌드한다.
+
+```sh
+make image VERSION=dev
+```
+
+기본 출력은 `shiftpv-controller:dev`와 `shiftpv-node:dev`다. 하나만 빌드할
+때는 `make image-controller` 또는 `make image-node`를 사용하고, 현재 Helm 및
+kind 전환 호환용 통합 이미지는 `make image-combined`로만 명시적으로 빌드한다.
+
+CI는 두 독립 이미지를 각각 빌드하고 기본 entrypoint의 `--help` 실행을 확인한다.
+이미지 registry push와 Helm image reference 분리는 이 단계의 범위가 아니다.
 
 CI의 특정 실행 결과가 해당 commit의 합격 증거다. [`validation/`](../validation/README.md)의
 문서는 재현 환경과 관찰 결과를 남기는 기록이며, 최신 commit의 CI 상태를 대신하지 않는다.

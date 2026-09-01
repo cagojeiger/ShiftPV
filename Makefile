@@ -1,6 +1,8 @@
-.PHONY: verify fmt fmt-check mod-verify test coverage vet build image shellcheck helm-lint helm-template linux-mount-integration
+.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined shellcheck helm-lint helm-template linux-mount-integration
 
 VERSION ?= dev
+CONTROLLER_IMAGE ?= shiftpv-controller:dev
+NODE_IMAGE ?= shiftpv-node:dev
 IMAGE ?= shiftpv:dev
 COVERAGE_MIN ?= 80
 COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/node/... ./src/volume/... ./test/...
@@ -37,8 +39,16 @@ vet:
 build:
 	go build ./src/cmd/controller ./src/cmd/node
 
-image:
-	docker build --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(IMAGE) .
+image: image-controller image-node
+
+image-controller:
+	docker build --target controller --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(CONTROLLER_IMAGE) .
+
+image-node:
+	docker build --target node --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(NODE_IMAGE) .
+
+image-combined:
+	docker build --target combined --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(IMAGE) .
 
 shellcheck:
 	shellcheck test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/integration/linux-mount/run.sh
