@@ -56,7 +56,7 @@ image-combined: image-version-check
 image-version-check:
 	@for file in $(CONTROLLER_VERSION_FILE) $(NODE_VERSION_FILE); do \
 		test -f "$$file" || { echo "image version file not found: $$file" >&2; exit 1; }; \
-		grep -Eq '^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$$' "$$file" || { echo "invalid image version in $$file" >&2; exit 1; }; \
+		grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' "$$file" || { echo "image version must use numeric major.minor.patch format: $$file" >&2; exit 1; }; \
 	done
 
 release-workflow-test:

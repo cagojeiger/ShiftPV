@@ -55,4 +55,19 @@ if (
   exit 1
 fi
 
+git -C "${fixture}" tag -d controller/v0.1.0 >/dev/null
+printf '%s\n' 0.2.0-rc.1 >"${fixture}/versions/controller"
+git -C "${fixture}" add versions/controller
+git -C "${fixture}" commit -qm invalid-version
+invalid_sha="$(git -C "${fixture}" rev-parse HEAD)"
+invalid_output="${fixture}/invalid-output"
+if (
+  cd "${fixture}"
+  RELEASE_SHA="${invalid_sha}" CURRENT_MAIN_SHA="${invalid_sha}" GITHUB_OUTPUT="${invalid_output}" \
+    build/ci/resolve-image-release.sh
+); then
+  echo "expected a non-numeric release version to be rejected" >&2
+  exit 1
+fi
+
 echo "release resolver tests passed"
