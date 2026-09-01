@@ -37,10 +37,12 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 1. ShiftPV가 기본 StorageClass로 선언된다.
 2. `storageClassName`이 없는 PVC가 `shiftpv`를 선택하고 Bound가 된다.
 3. PV의 CSI driver가 `csi.shiftpv.io`이고 Pod가 volume을 mount해 데이터를 쓴다.
-4. Pod 재생성 후 checksum이 유지된다.
-5. workload를 중지하고 Helm을 제거해도 PVC, PV, reservation과 데이터가 남는다.
-6. 같은 namespace와 pool root로 재설치하면 같은 데이터를 다시 mount한다.
-7. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
+4. Controller Pod와 owner node의 Node Plugin Pod를 강제 교체해도 실행 중 데이터와
+   이후 Pod 재생성 checksum이 유지된다.
+5. Pod 재생성 후 checksum이 유지된다.
+6. workload를 중지하고 Helm을 제거해도 PVC, PV, reservation과 데이터가 남는다.
+7. 같은 namespace와 pool root로 재설치하면 같은 데이터를 다시 mount한다.
+8. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
    기본값이 유지되고, 명시적으로 `shiftpv`를 선택한 PVC만 ShiftPV로 provision된다.
 
 테스트는 성공과 실패 모두 cluster와 임시 host directory를 정리한다.

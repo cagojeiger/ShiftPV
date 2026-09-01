@@ -21,8 +21,10 @@ The script builds and loads `shiftpv:dev` and installs the Helm chart with
 ShiftPV marked as the default StorageClass. It creates a PVC without
 `storageClassName`, verifies Kubernetes defaults it to `shiftpv`, provisions it
 through `csi.shiftpv.io`, and starts a Pod that writes through the mounted RWO
-filesystem volume. It then verifies checksum retention after ordinary Pod
-recreation, stops the workload, uninstalls Helm, verifies that the
+filesystem volume. It force-replaces the controller Pod and the node plugin Pod
+on the volume owner node, verifies both UIDs change without losing the mounted
+data, then verifies checksum retention after ordinary Pod recreation. It stops
+the workload, uninstalls Helm, verifies that the
 PVC/PV/reservation/host file remain, reinstalls the same release, and verifies
 the checksum again. Finally, it installs an unrelated default StorageClass,
 reinstalls ShiftPV with `defaultClass=false`, verifies an implicit PVC keeps the
