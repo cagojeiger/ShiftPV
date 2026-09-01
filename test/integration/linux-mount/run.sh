@@ -15,6 +15,7 @@ done
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shiftpv-linux-mount.XXXXXX")"
 trap 'rm -rf "${temp_dir}"' EXIT
+chmod 0755 "${temp_dir}"
 
 test_binary="${temp_dir}/bind-mount.test"
 parent_mount_namespace="$(readlink /proc/self/ns/mnt)"
