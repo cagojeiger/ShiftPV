@@ -74,6 +74,9 @@ node다. 별도 PV annotation이나 외부 상태를 조회하지 않는다.
   반환한다. 호출 context의 deadline/cancellation은 해당 gRPC code를 유지한다.
 - reservation 생성이나 삭제의 응답이 유실되어 실제 반영 여부가 모호해도 다음
   CSI 재시도는 현재 ConfigMap 상태를 읽어 동일 결과로 수렴한다.
+- helper Pod가 directory 작업 중 실패하면 외부 파일시스템의 일시 장애로 취급해
+  `Unavailable`을 반환한다. Create 실패는 reservation을, Delete 실패는
+  reservation과 directory를 보존해 다음 CSI 재시도가 같은 상태에서 계속된다.
 - 제공 chart는 Controller replica를 1개로 고정한다. Controller는 같은 volume
   ID의 Create/Delete lifecycle을 직렬화하고 서로 다른 volume ID는 병렬 처리한다.
 - 이미 올바르게 mount된 target publish와 이미 unmount된 unpublish는 성공한다.
@@ -91,3 +94,5 @@ node다. 별도 PV annotation이나 외부 상태를 조회하지 않는다.
 - Pod가 volume을 mount해 데이터를 쓰고 재생성 후 동일 checksum 확인
 - workload 중지 후 Helm uninstall 시 PVC/PV/reservation/data 유지
 - 같은 namespace/poolRoot에 재설치하고 Pod를 다시 만들면 checksum 유지
+- worker pool의 실제 ENOSPC/read-only 장애에서 `Unavailable`, 상태 보존과 복구 후
+  재시도 수렴 확인

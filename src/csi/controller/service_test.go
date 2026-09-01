@@ -31,6 +31,10 @@ type fakeDirectoryOperator struct {
 	deleteErr   error
 }
 
+type retryableDirectoryError struct{ error }
+
+func (retryableDirectoryError) Retryable() bool { return true }
+
 func (f *fakeDirectoryOperator) Create(_ context.Context, node, id string) error {
 	f.createCalls++
 	f.createdNode = node
@@ -157,6 +161,16 @@ func TestCreateVolumeReportsDirectoryFailure(t *testing.T) {
 	}
 	if _, getErr := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), id, metav1.GetOptions{}); getErr != nil {
 		t.Fatalf("expected reservation to remain retryable: %v", getErr)
+	}
+}
+
+func TestCreateVolumeMapsRetryableDirectoryFailureToUnavailable(t *testing.T) {
+	operator := &fakeDirectoryOperator{createErr: retryableDirectoryError{errors.New("filesystem unavailable")}}
+	service := &Service{Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: operator}
+
+	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected Unavailable, got %v", err)
 	}
 }
 
@@ -438,6 +452,24 @@ func TestDeleteVolumePreservesReservationOnDirectoryFailure(t *testing.T) {
 	}
 	if _, getErr := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), id, metav1.GetOptions{}); getErr != nil {
 		t.Fatalf("reservation was removed after directory failure: %v", getErr)
+	}
+}
+
+func TestDeleteVolumeMapsRetryableDirectoryFailureToUnavailable(t *testing.T) {
+	id, err := volume.IDFromName("pvc-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewClientset(reservation(id, "worker-a"))
+	operator := &fakeDirectoryOperator{deleteErr: retryableDirectoryError{errors.New("filesystem unavailable")}}
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator}
+
+	_, err = service.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: id})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected Unavailable, got %v", err)
+	}
+	if _, getErr := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), id, metav1.GetOptions{}); getErr != nil {
+		t.Fatalf("reservation was removed after retryable directory failure: %v", getErr)
 	}
 }
 

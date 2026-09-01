@@ -18,7 +18,7 @@ nodes:
         kind: JoinConfiguration
         nodeRegistration:
           kubeletExtraArgs:
-            node-labels: "shiftpv.io/storage-node=true"
+            node-labels: "shiftpv.io/storage-node=true,shiftpv.io/fault-node=true"
     extraMounts:
       - hostPath: "__WORKER_B_POOL__"
         containerPath: /mnt/shiftpv

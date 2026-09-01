@@ -29,6 +29,12 @@ PVC/PV/reservation/host file remain, reinstalls the same release, and verifies
 the checksum again. Finally, it installs an unrelated default StorageClass,
 reinstalls ShiftPV with `defaultClass=false`, verifies an implicit PVC keeps the
 existing default, and provisions an explicitly selected ShiftPV PVC and Pod.
+It then overlays one worker pool with an inode-exhausted tmpfs to exercise a
+real ENOSPC provisioning failure and remounts the recovered pool read-only to
+exercise deletion failure. Both failures must surface as retryable
+`Unavailable` operations, preserve reservation/data state, and converge after
+the pool is restored. Deletion uses a test-only `Delete` reclaim policy; the
+chart's `Retain` policy is unchanged.
 
 The cluster and its temporary host directories are removed on exit. Set
 `KEEP_CLUSTER=1` only while diagnosing a failure.

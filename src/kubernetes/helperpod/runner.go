@@ -17,6 +17,12 @@ import (
 
 const mountPath = "/pool"
 
+type retryableError struct{ err error }
+
+func (e retryableError) Error() string { return e.err.Error() }
+func (e retryableError) Unwrap() error { return e.err }
+func (retryableError) Retryable() bool { return true }
+
 type Runner struct {
 	Client    kubernetes.Interface
 	Namespace string
@@ -110,7 +116,7 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 		case corev1.PodSucceeded:
 			return true, nil
 		case corev1.PodFailed:
-			return false, fmt.Errorf("helper Pod failed: %s", current.Status.Message)
+			return false, retryableError{err: fmt.Errorf("helper Pod failed: %s", current.Status.Message)}
 		default:
 			return false, nil
 		}

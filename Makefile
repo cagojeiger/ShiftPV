@@ -41,7 +41,7 @@ image:
 	docker build --build-arg VERSION=$(VERSION) -f build/package/Dockerfile -t $(IMAGE) .
 
 shellcheck:
-	shellcheck test/e2e/kind/run.sh test/integration/linux-mount/run.sh
+	shellcheck test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/integration/linux-mount/run.sh
 
 linux-mount-integration:
 	./test/integration/linux-mount/run.sh

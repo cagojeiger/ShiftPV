@@ -1,0 +1,10 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: shiftpv-filesystem-fault
+provisioner: csi.shiftpv.io
+reclaimPolicy: Delete
+allowVolumeExpansion: false
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  shiftpv.io/capacity-enforcement: none
