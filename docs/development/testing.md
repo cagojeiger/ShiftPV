@@ -101,7 +101,19 @@ make image-node NODE_VERSION=0.1.3
 version을 유지한다.
 
 CI는 두 독립 이미지를 각각 빌드하고 기본 entrypoint의 `--help` 실행을 확인한다.
-이미지 registry push와 Helm image reference 분리는 이 단계의 범위가 아니다.
+
+Component version file이 `main`에서 변경되고 CI가 성공하면 해당 이미지만 GHCR에
+독립적으로 배포한다.
+
+| Version source | Image | Release tag |
+|----------------|-------|-------------|
+| `versions/controller` | `ghcr.io/cagojeiger/shiftpv-controller:<version>` | `controller/v<version>` |
+| `versions/node` | `ghcr.io/cagojeiger/shiftpv-node:<version>` | `node/v<version>` |
+
+각 version tag와 `latest`는 `linux/amd64`, `linux/arm64`를 포함하는 multi-platform
+manifest다. Release branch는 version file 변경을 준비하는 용도이며, merge된 `main`
+commit의 CI 성공이 실제 이미지 배포를 trigger한다. Helm image reference 분리는 아직
+별도 작업이다.
 
 CI의 특정 실행 결과가 해당 commit의 합격 증거다. [`validation/`](../validation/README.md)의
 문서는 재현 환경과 관찰 결과를 남기는 기록이며, 최신 commit의 CI 상태를 대신하지 않는다.
