@@ -1,0 +1,214 @@
+name: Release Images
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: release-images-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+
+jobs:
+  resolve:
+    name: Resolve image releases
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.release.outputs.should_release }}
+      components: ${{ steps.release.outputs.components }}
+      builds: ${{ steps.release.outputs.builds }}
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+
+      - name: Resolve changed component versions
+        id: release
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          CURRENT_MAIN_SHA="$(git rev-parse refs/remotes/origin/main)" \
+            build/ci/resolve-image-release.sh
+
+  build:
+    name: Build ${{ matrix.component }} (${{ matrix.platform }})
+    needs: resolve
+    if: ${{ needs.resolve.outputs.should_release == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.builds) }}
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Resolve image name
+        id: image
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/shiftpv-${COMPONENT}" >>"${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push platform image by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: build/package/Dockerfile
+          target: ${{ matrix.component }}
+          platforms: ${{ matrix.platform }}
+          build-args: ${{ matrix.version_arg }}=${{ matrix.version }}
+          cache-from: type=gha,scope=shiftpv-${{ matrix.component }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=shiftpv-${{ matrix.component }}-${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+
+      - name: Verify published platform image
+        env:
+          COMPONENT: ${{ matrix.component }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          docker run --rm "${IMAGE}@${DIGEST}" --help
+          if [[ "${COMPONENT}" == controller ]]; then
+            expected=/shiftpv-controller
+            unexpected=/shiftpv-node
+          else
+            expected=/shiftpv-node
+            unexpected=/shiftpv-controller
+          fi
+          docker run --rm --entrypoint /bin/sh "${IMAGE}@${DIGEST}" \
+            -ec "test -x '${expected}' && test ! -e '${unexpected}'"
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.component }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ matrix.component }} v${{ matrix.version }}
+    needs: [resolve, build]
+    if: ${{ needs.resolve.outputs.should_release == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.components) }}
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Download component digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: digest-${{ matrix.component }}-*
+          merge-multiple: true
+
+      - name: Resolve image name
+        id: image
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/shiftpv-${COMPONENT}" >>"${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-platform manifest
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          images=()
+          for digest in *; do
+            images+=("${IMAGE}@sha256:${digest}")
+          done
+          if [[ "${#images[@]}" -ne 2 ]]; then
+            echo "::error::expected two platform digests, found ${#images[@]}"
+            exit 1
+          fi
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:latest" \
+            "${images[@]}"
+
+      - name: Verify multi-platform manifest
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" \
+            | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' \
+            | sort -u > /tmp/actual-platforms
+          printf '%s\n' linux/amd64 linux/arm64 > /tmp/expected-platforms
+          diff -u /tmp/expected-platforms /tmp/actual-platforms
+
+      - name: Create component release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPONENT: ${{ matrix.component }}
+          TAG: ${{ matrix.tag }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+          else
+            gh release create "${TAG}" \
+              --target "${RELEASE_SHA}" \
+              --title "shiftpv-${COMPONENT} v${VERSION}" \
+              --generate-notes
+          fi

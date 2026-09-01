@@ -56,6 +56,49 @@ jobs:
             .tmp/coverage.txt
           retention-days: 14
 
+  image-build:
+    name: image-${{ matrix.component }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: controller
+            version_arg: CONTROLLER_VERSION
+          - component: node
+            version_arg: NODE_VERSION
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build image
+        run: |
+          version=$(<"versions/${{ matrix.component }}")
+          docker build \
+            --target "${{ matrix.component }}" \
+            --build-arg "${{ matrix.version_arg }}=${version}" \
+            --tag "shiftpv-${{ matrix.component }}:ci" \
+            --file build/package/Dockerfile \
+            .
+
+      - name: Verify entrypoint
+        run: docker run --rm "shiftpv-${{ matrix.component }}:ci" --help
+
+      - name: Verify image boundary
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          if [[ "${COMPONENT}" == "controller" ]]; then
+            expected=/shiftpv-controller
+            unexpected=/shiftpv-node
+          else
+            expected=/shiftpv-node
+            unexpected=/shiftpv-controller
+          fi
+          docker run --rm --entrypoint /bin/sh "shiftpv-${COMPONENT}:ci" \
+            -ec "test -x '${expected}' && test ! -e '${unexpected}'"
+
   linux-mount:
     name: linux-mount
     runs-on: ubuntu-24.04
