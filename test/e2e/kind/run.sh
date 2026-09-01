@@ -107,6 +107,49 @@ if [[ "${PV_DRIVER}" != "csi.shiftpv.io" ]]; then
   exit 1
 fi
 
+# Force replacement of both controller and owner-node plugin Pods while the
+# workload keeps the volume mounted. Their Kubernetes UIDs must change.
+CONTROLLER_POD_BEFORE=$(kubectl -n shiftpv-system get pod \
+  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=controller \
+  -o jsonpath='{.items[0].metadata.name}')
+CONTROLLER_UID_BEFORE=$(kubectl -n shiftpv-system get "pod/${CONTROLLER_POD_BEFORE}" \
+  -o jsonpath='{.metadata.uid}')
+kubectl -n shiftpv-system delete "pod/${CONTROLLER_POD_BEFORE}" \
+  --grace-period=0 --force --wait=true
+kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m
+CONTROLLER_UID_AFTER=$(kubectl -n shiftpv-system get pod \
+  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=controller \
+  -o jsonpath='{.items[0].metadata.uid}')
+if [[ "${CONTROLLER_UID_BEFORE}" == "${CONTROLLER_UID_AFTER}" ]]; then
+  echo "controller Pod UID did not change after forced replacement" >&2
+  exit 1
+fi
+
+NODE_POD_BEFORE=$(kubectl -n shiftpv-system get pod \
+  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=node \
+  --field-selector "spec.nodeName=${OWNER_NODE}" \
+  -o jsonpath='{.items[0].metadata.name}')
+NODE_UID_BEFORE=$(kubectl -n shiftpv-system get "pod/${NODE_POD_BEFORE}" \
+  -o jsonpath='{.metadata.uid}')
+kubectl -n shiftpv-system delete "pod/${NODE_POD_BEFORE}" \
+  --grace-period=0 --force --wait=true
+kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=5m
+NODE_UID_AFTER=$(kubectl -n shiftpv-system get pod \
+  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=node \
+  --field-selector "spec.nodeName=${OWNER_NODE}" \
+  -o jsonpath='{.items[0].metadata.uid}')
+if [[ "${NODE_UID_BEFORE}" == "${NODE_UID_AFTER}" ]]; then
+  echo "owner-node plugin Pod UID did not change after forced replacement" >&2
+  exit 1
+fi
+
+kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=2m
+CHECKSUM_AFTER_RESTARTS=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
+if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_RESTARTS}" ]]; then
+  echo "checksum mismatch after controller and node plugin replacement" >&2
+  exit 1
+fi
+
 # Verify ordinary kubelet unpublish/publish before testing the Helm boundary.
 kubectl delete pod shiftpv-e2e --wait=true
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
@@ -175,4 +218,4 @@ fi
 kubectl exec shiftpv-coexistence -- grep -Fx 'ShiftPV StorageClass coexistence' /data/payload
 
 echo "ShiftPV kind e2e passed"
-echo "PV=${PV_NAME} volume=${VOLUME_ID} node=${OWNER_NODE} checksum=${CHECKSUM_AFTER}"
+echo "PV=${PV_NAME} volume=${VOLUME_ID} node=${OWNER_NODE} checksum=${CHECKSUM_AFTER} controller_restart=${CONTROLLER_UID_AFTER} node_restart=${NODE_UID_AFTER}"
