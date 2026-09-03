@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-mobility-e2e}
+NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
+KEEP_CLUSTER=${KEEP_CLUSTER:-0}
+
+for command in docker kind kubectl helm sed; do
+	command -v "${command}" >/dev/null || {
+		echo "required command not found: ${command}" >&2
+		exit 1
+	}
+done
+
+mkdir -p "${ROOT_DIR}/.tmp"
+WORK_DIR=$(mktemp -d "${ROOT_DIR}/.tmp/shiftpv-mobility.XXXXXX")
+WORKER_A_POOL="${WORK_DIR}/worker-a"
+WORKER_B_POOL="${WORK_DIR}/worker-b"
+mkdir -p "${WORKER_A_POOL}" "${WORKER_B_POOL}"
+export KUBECONFIG="${WORK_DIR}/kubeconfig"
+
+cleanup() {
+	if [[ "${KEEP_CLUSTER}" == "1" ]]; then
+		echo "keeping cluster ${CLUSTER_NAME}, kubeconfig ${KUBECONFIG}, and data under ${WORK_DIR}"
+		return
+	fi
+	kind delete cluster --name "${CLUSTER_NAME}" >/dev/null 2>&1 || true
+	rm -rf -- "${WORK_DIR}"
+}
+trap cleanup EXIT
+
+sed \
+	-e "s|__WORKER_A_POOL__|${WORKER_A_POOL}|g" \
+	-e "s|__WORKER_B_POOL__|${WORKER_B_POOL}|g" \
+	"${ROOT_DIR}/test/e2e/kind/cluster.yaml.tpl" >"${WORK_DIR}/cluster.yaml"
+sed \
+	-e "s|__WORKER_A_NODE__|${CLUSTER_NAME}-worker|g" \
+	-e "s|__WORKER_B_NODE__|${CLUSTER_NAME}-worker2|g" \
+	"${ROOT_DIR}/test/e2e/kind/pools.yaml.tpl" >"${WORK_DIR}/pools.yaml"
+
+kind create cluster --name "${CLUSTER_NAME}" --image "${NODE_IMAGE}" --config "${WORK_DIR}/cluster.yaml"
+docker build \
+	--target combined \
+	--build-arg CONTROLLER_VERSION=dev \
+	--build-arg NODE_VERSION=dev \
+	-f "${ROOT_DIR}/build/package/Dockerfile" \
+	-t shiftpv:dev \
+	"${ROOT_DIR}"
+kind load docker-image shiftpv:dev --name "${CLUSTER_NAME}"
+
+helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
+	--namespace shiftpv-system \
+	--create-namespace \
+	--values "${ROOT_DIR}/test/e2e/kind/values.yaml" \
+	--set mobility.interval=10s \
+	--wait \
+	--timeout 5m
+kubectl apply -f "${WORK_DIR}/pools.yaml"
+kubectl -n shiftpv-system wait --for=condition=Ready pod \
+	-l app.kubernetes.io/instance=shiftpv --timeout=5m
+
+BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
+sed \
+	-e "s|__SOURCE_NODE__|${BLOCKED_SOURCE_NODE}|g" \
+	"${ROOT_DIR}/test/e2e/kind/mobility/manifests/blocked-workload.yaml.tpl" >"${WORK_DIR}/blocked-workload.yaml"
+kubectl apply -f "${WORK_DIR}/blocked-workload.yaml"
+kubectl -n shiftpv-mobility-blocked rollout status deployment/source-only --timeout=5m
+kubectl -n shiftpv-mobility-blocked wait --for=jsonpath='{.status.phase}'=Bound pvc/source-only --timeout=2m
+BLOCKED_PV=$(kubectl -n shiftpv-mobility-blocked get pvc source-only -o jsonpath='{.spec.volumeName}')
+BLOCKED_VOLUME=$(kubectl get "pv/${BLOCKED_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
+kubectl cordon "${BLOCKED_SOURCE_NODE}"
+for _ in {1..300}; do
+	BLOCKED_MOVE=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${BLOCKED_VOLUME}')].metadata.name}" 2>/dev/null || true)
+	if [[ -n "${BLOCKED_MOVE}" ]]; then
+		BLOCKED_PHASE=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		[[ "${BLOCKED_PHASE}" == "Blocked" ]] && break
+	fi
+	sleep 1
+done
+test "${BLOCKED_PHASE:-}" = "Blocked"
+test "$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.reason}')" = "UnsupportedSchedulingConstraint"
+test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.phase}')" = "Blocked"
+test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.ownerNode}')" = "${BLOCKED_SOURCE_NODE}"
+test -f "${WORKER_A_POOL}/volumes/${BLOCKED_VOLUME}/payload"
+test ! -e "${WORKER_B_POOL}/volumes/${BLOCKED_VOLUME}"
+kubectl uncordon "${BLOCKED_SOURCE_NODE}"
+
+echo "ShiftPV blocked mobility E2E passed: volume=${BLOCKED_VOLUME} move=${BLOCKED_MOVE} reason=UnsupportedSchedulingConstraint"
+
+kubectl apply -f "${ROOT_DIR}/test/e2e/kind/mobility/manifests/wffc-workload.yaml"
+kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=5m
+kubectl -n shiftpv-mobility-test wait --for=jsonpath='{.status.phase}'=Bound pvc/wffc --timeout=2m
+
+PVC_UID=$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.metadata.uid}')
+PV_NAME=$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.spec.volumeName}')
+VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
+OLD_POD=$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.name}')
+OLD_POD_UID=$(kubectl -n shiftpv-mobility-test get pod "${OLD_POD}" -o jsonpath='{.metadata.uid}')
+SOURCE_NODE=$(kubectl -n shiftpv-mobility-test get pod "${OLD_POD}" -o jsonpath='{.spec.nodeName}')
+CHECKSUM_BEFORE=$(kubectl -n shiftpv-mobility-test exec "${OLD_POD}" -- sha256sum /data/payload | awk '{print $1}')
+
+if [[ "${SOURCE_NODE}" == "${CLUSTER_NAME}-worker" ]]; then
+	DESTINATION_NODE="${CLUSTER_NAME}-worker2"
+else
+	DESTINATION_NODE="${CLUSTER_NAME}-worker"
+fi
+
+kubectl cordon "${SOURCE_NODE}"
+for _ in {1..120}; do
+	MOVE_NAME=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${VOLUME_ID}')].metadata.name}" 2>/dev/null || true)
+	[[ -n "${MOVE_NAME}" ]] && break
+	sleep 1
+done
+test -n "${MOVE_NAME}"
+
+restart_at_phase() {
+	local phase=$1
+	for _ in {1..300}; do
+		local current
+		current=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [[ "${current}" == "${phase}" ]]; then
+			if [[ "${phase}" == "Committing" ]]; then
+				local committed_owner
+				committed_owner=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}' 2>/dev/null || true)
+				if [[ "${committed_owner}" != "${DESTINATION_NODE}" ]]; then
+					sleep 0.1
+					continue
+				fi
+			fi
+			local pod uid_before uid_after
+			pod=$(kubectl -n shiftpv-system get pod -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')
+			uid_before=$(kubectl -n shiftpv-system get "pod/${pod}" -o jsonpath='{.metadata.uid}')
+			kubectl -n shiftpv-system delete "pod/${pod}" --grace-period=0 --force --wait=true
+			kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m
+			uid_after=$(kubectl -n shiftpv-system get pod -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.uid}')
+			test "${uid_before}" != "${uid_after}"
+			echo "controller restart injected at ${phase}: ${uid_before} -> ${uid_after}"
+			return
+		fi
+		[[ "${current}" == "Blocked" || "${current}" == "Succeeded" ]] && return 1
+		sleep 0.2
+	done
+	echo "phase ${phase} was not observed" >&2
+	return 1
+}
+
+restart_at_phase Copying
+restart_at_phase Promoting
+restart_at_phase Committing
+
+for _ in {1..600}; do
+	MOVE_PHASE=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+	[[ "${MOVE_PHASE}" == "Succeeded" || "${MOVE_PHASE}" == "Blocked" ]] && break
+	sleep 1
+done
+if [[ "${MOVE_PHASE}" != "Succeeded" ]]; then
+	kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2
+	exit 1
+fi
+
+kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=5m
+NEW_POD=$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.name}')
+NEW_POD_UID=$(kubectl -n shiftpv-mobility-test get pod "${NEW_POD}" -o jsonpath='{.metadata.uid}')
+test "${NEW_POD_UID}" != "${OLD_POD_UID}"
+test "$(kubectl -n shiftpv-mobility-test get pod "${NEW_POD}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
+
+CHECKSUM_AFTER=$(kubectl -n shiftpv-mobility-test exec "${NEW_POD}" -- sha256sum /data/payload | awk '{print $1}')
+test "${CHECKSUM_BEFORE}" = "${CHECKSUM_AFTER}"
+test "$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
+test "$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = "Ready"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
+if [[ "${DESTINATION_NODE}" == "${CLUSTER_NAME}-worker" ]]; then
+	DESTINATION_POOL="${WORKER_A_POOL}"
+	SOURCE_POOL="${WORKER_B_POOL}"
+else
+	DESTINATION_POOL="${WORKER_B_POOL}"
+	SOURCE_POOL="${WORKER_A_POOL}"
+fi
+test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
+test -f "${SOURCE_POOL}/.shiftpv/retired/${MOVE_NAME}/payload"
+
+echo "ShiftPV closed-loop mobility E2E passed"
+echo "volume=${VOLUME_ID} pv=${PV_NAME} move=${MOVE_NAME} source=${SOURCE_NODE} destination=${DESTINATION_NODE} checksum=${CHECKSUM_AFTER}"

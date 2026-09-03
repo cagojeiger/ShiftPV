@@ -2,29 +2,48 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
-    "image": {
-      "type": "object",
-      "required": ["repository", "tag", "pullPolicy"],
-      "properties": {
-        "repository": {"type": "string", "minLength": 1},
-        "tag": {"type": "string", "minLength": 1},
-        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
-      }
-    },
     "controller": {
       "type": "object",
+      "required": ["replicas", "image"],
       "properties": {
         "replicas": {"type": "integer", "const": 1},
-        "logLevel": {"type": "integer", "minimum": 0}
+        "logLevel": {"type": "integer", "minimum": 0},
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag", "pullPolicy"],
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "tag": {"type": "string", "minLength": 1},
+            "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+          }
+        }
+      }
+    },
+    "mobility": {
+      "type": "object",
+      "required": ["enabled", "interval", "webhookPort", "helperImage"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "interval": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
+        "webhookPort": {"type": "integer", "minimum": 1024, "maximum": 65535},
+        "helperImage": {"type": "string", "minLength": 1}
       }
     },
     "node": {
       "type": "object",
-      "required": ["poolRoot", "kubeletRootDir"],
+      "required": ["kubeletRootDir", "image"],
       "properties": {
-        "poolRoot": {"type": "string", "pattern": "^/"},
         "kubeletRootDir": {"type": "string", "pattern": "^/"},
-        "logLevel": {"type": "integer", "minimum": 0}
+        "logLevel": {"type": "integer", "minimum": 0},
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag", "pullPolicy"],
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "tag": {"type": "string", "minLength": 1},
+            "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+          }
+        }
       }
     },
     "helperPod": {

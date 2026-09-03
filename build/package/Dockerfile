@@ -28,6 +28,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 FROM runtime-base AS controller
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends rsync \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build-controller /out/shiftpv-controller /shiftpv-controller
 USER 65532:65532
 ENTRYPOINT ["/shiftpv-controller"]
@@ -40,11 +43,11 @@ COPY --from=build-node /out/shiftpv-node /shiftpv-node
 USER 0:0
 ENTRYPOINT ["/shiftpv-node"]
 
-# Keep the current single-image Helm and kind flow working until the chart is
-# switched to the independent controller and node image references.
+# Local kind tests use one loaded image while release builds keep controller
+# and node runtimes independent.
 FROM runtime-base AS combined
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends mount \
+    && apt-get install -y --no-install-recommends mount rsync \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build-controller /out/shiftpv-controller /shiftpv-controller
 COPY --from=build-node /out/shiftpv-node /shiftpv-node

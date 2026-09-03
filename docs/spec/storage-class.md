@@ -1,6 +1,6 @@
 # StorageClass Contract
 
-ShiftPV StorageClass는 참여 node의 고정 pool root에서 directory-backed volume을
+ShiftPV StorageClass는 참여 node의 등록된 Pool mount path에서 directory-backed volume을
 provision한다.
 
 ```yaml
@@ -24,8 +24,9 @@ parameters:
 | expansion | `false` | resize를 지원하지 않음 |
 | access/volume mode | RWO Filesystem만 | node-local directory volume |
 
-유일한 parameter는 `shiftpv.io/capacity-enforcement: none`이다. 누락, 알 수 없는
-parameter, 다른 값은 `InvalidArgument`로 거부한다. requested capacity는 PV capacity와
+사용자가 설정하는 유일한 parameter는 `shiftpv.io/capacity-enforcement: none`이다.
+external-provisioner가 내부적으로 추가하는 PVC/PV metadata parameter를 제외한 알 수 없는
+parameter와 다른 값은 `InvalidArgument`로 거부한다. requested capacity는 PV capacity와
 reservation의 idempotency 비교에 쓰지만 directory write를 제한하지 않는다.
 
 Helm의 `storageClass.defaultClass`를 `true`로 설정하면 chart가
@@ -41,7 +42,7 @@ workload는 `storageClassName: shiftpv`로 ShiftPV를 명시적으로 선택할 
 Helm은 StorageClass를 소유하지만 이 StorageClass로 만들어진 PVC/PV는 소유하지
 않는다. uninstall 전에 사용 Pod를 중지해야 하며 uninstall 중에는 새 mount나 Pod
 재시작이 불가능하다. PVC/PV, reservation ConfigMap, host data directory는 남는다.
-같은 namespace와 pool root로 reinstall하면 retained PV를 다시 publish할 수 있다.
+같은 namespace와 동일한 Pool 등록으로 reinstall하면 retained PV를 다시 publish할 수 있다.
 
 PVC를 삭제해도 `Retain` PV는 `Released`가 되고 data directory는 남는다. 현재
 버전은 이를 자동 reclaim하지 않는다. `DeleteVolume`을 호출하는 별도 Delete-policy

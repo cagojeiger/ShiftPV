@@ -8,7 +8,7 @@ CONTROLLER_IMAGE ?= shiftpv-controller:$(CONTROLLER_VERSION)
 NODE_IMAGE ?= shiftpv-node:$(NODE_VERSION)
 IMAGE ?= shiftpv:dev
 COVERAGE_MIN ?= 80
-COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/node/... ./src/volume/... ./test/...
+COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/mobility/... ./src/node/... ./src/volume/... ./test/...
 
 verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template
 
@@ -63,7 +63,7 @@ release-workflow-test:
 	./test/release/resolve-image-release.sh
 
 shellcheck:
-	shellcheck build/ci/resolve-image-release.sh test/release/resolve-image-release.sh test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/integration/linux-mount/run.sh
+	shellcheck build/ci/resolve-image-release.sh test/release/resolve-image-release.sh test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility/run.sh test/integration/linux-mount/run.sh
 
 actionlint:
 	@if command -v actionlint >/dev/null 2>&1; then \
@@ -80,3 +80,11 @@ helm-lint:
 
 helm-template:
 	helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >/dev/null
+	@rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
+		--set controller.image.repository=controller --set controller.image.tag=test \
+		--set node.image.repository=node --set node.image.tag=test \
+		--set mobility.helperImage=helper:test)"; \
+		printf '%s\n' "$$rendered" | grep -q 'image: "controller:test"'; \
+		printf '%s\n' "$$rendered" | grep -q 'image: "node:test"'; \
+		printf '%s\n' "$$rendered" | grep -q -- '--mobility-helper-image=helper:test'; \
+		printf '%s\n' "$$rendered" | grep -q 'mountPropagation: HostToContainer'

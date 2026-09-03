@@ -1,0 +1,80 @@
+{{- if .Values.mobility.enabled }}
+{{- $name := include "shiftpv.fullname" . -}}
+{{- $secretName := printf "%s-webhook-tls" $name -}}
+{{- $serviceName := printf "%s-webhook" $name -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- $caCert := "" -}}
+{{- $tlsCert := "" -}}
+{{- $tlsKey := "" -}}
+{{- if and $existing (index $existing.data "ca.crt") (index $existing.data "tls.crt") (index $existing.data "tls.key") -}}
+{{- $caCert = index $existing.data "ca.crt" -}}
+{{- $tlsCert = index $existing.data "tls.crt" -}}
+{{- $tlsKey = index $existing.data "tls.key" -}}
+{{- else -}}
+{{- $ca := genCA "shiftpv-webhook-ca" 3650 -}}
+{{- $dnsName := printf "%s.%s.svc" $serviceName .Release.Namespace -}}
+{{- $cert := genSignedCert $dnsName nil (list $dnsName (printf "%s.%s.svc.cluster.local" $serviceName .Release.Namespace)) 365 $ca -}}
+{{- $caCert = $ca.Cert | b64enc -}}
+{{- $tlsCert = $cert.Cert | b64enc -}}
+{{- $tlsKey = $cert.Key | b64enc -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shiftpv.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $caCert | quote }}
+  tls.crt: {{ $tlsCert | quote }}
+  tls.key: {{ $tlsKey | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shiftpv.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "shiftpv.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: https
+      port: 443
+      targetPort: webhook
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ $name }}-mobility
+  labels:
+    {{- include "shiftpv.labels" . | nindent 4 }}
+webhooks:
+  - name: mobility.shiftpv.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 3
+    clientConfig:
+      service:
+        name: {{ $serviceName }}
+        namespace: {{ .Release.Namespace }}
+        path: /mutate
+        port: 443
+      caBundle: {{ $caCert | quote }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        shiftpv.io/admission: enabled
+{{- end }}

@@ -1,11 +1,18 @@
-image:
-  repository: shiftpv
-  tag: dev
-  pullPolicy: IfNotPresent
+controller:
+  image:
+    repository: shiftpv
+    tag: dev
+    pullPolicy: IfNotPresent
+
+mobility:
+  helperImage: shiftpv:dev
 
 node:
-  poolRoot: /mnt/shiftpv
   kubeletRootDir: /var/lib/kubelet
+  image:
+    repository: shiftpv
+    tag: dev
+    pullPolicy: IfNotPresent
   nodeSelector:
     shiftpv.io/storage-node: "true"
 

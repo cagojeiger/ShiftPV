@@ -2,7 +2,8 @@
 
 This test creates a dedicated Kubernetes 1.35.8 cluster with one control-plane
 node and two workers. Each worker mounts a different temporary host directory at
-`/mnt/shiftpv`; a shared directory would not prove node-local behavior.
+different node-local paths (`/mnt/shiftpv` and `/srv/shiftpv-b`); a shared
+directory or one global path would not prove the registered-pool contract.
 
 Requirements:
 

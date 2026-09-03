@@ -1,0 +1,55 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: shiftpvvolumes.shiftpv.io
+spec:
+  group: shiftpv.io
+  scope: Cluster
+  names:
+    plural: shiftpvvolumes
+    singular: shiftpvvolume
+    kind: ShiftPVVolume
+    shortNames: [sv]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Owner
+          type: string
+          jsonPath: .status.ownerNode
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [volumeID]
+              properties:
+                volumeID:
+                  type: string
+                  pattern: ^shiftpv-[a-f0-9]{32}$
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: volumeID is immutable
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Ready, Moving, Blocked]
+                ownerNode:
+                  type: string
+                activeMove:
+                  type: string
+                publishedNodes:
+                  type: array
+                  items:
+                    type: string
+                  x-kubernetes-list-type: set
+      subresources:
+        status: {}

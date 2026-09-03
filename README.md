@@ -22,7 +22,9 @@ The current implementation provides:
 - `Retain` and `WaitForFirstConsumer` StorageClass
 - optional cluster-default StorageClass annotation
 - deterministic volume IDs and namespace-scoped reservation ConfigMaps
-- owner-node topology and publish validation
+- explicit node Pool registration with per-node mount paths and dynamic owner publish guard
+- automatic healthy-node cordon cold migration with Placement Hold, authenticated rsync,
+  dynamic owner CAS and restart-safe reconciliation
 - Helm installation and recovery after Helm uninstall/reinstall
 - isolated two-worker kind E2E validation
 
@@ -30,15 +32,24 @@ The current implementation provides:
 
 - Kubernetes 1.35 or newer
 - Linux nodes with privileged DaemonSet and HostPath access
-- a writable local filesystem or directory prepared at the same configured path
-  on every participating node; the default is `/mnt/shiftpv`
+- a writable local filesystem prepared on every participating node; each node's
+  absolute mount path is declared by its `ShiftPVPool`
 
 Each participating node must use a distinct local path. ShiftPV does not create,
 format, mount, inspect or repair filesystems.
 
+Register every participating node explicitly with a `ShiftPVPool` CR after
+installing the chart.
+
+Automatic mobility applies only to workload namespaces explicitly labeled
+`shiftpv.io/admission=enabled`.
+
 ## Limitations
 
-- data remains on one owner node and is not copied to another node
+- data has exactly one authoritative owner; automatic movement is planned cold migration from
+  a healthy cordoned node, not failover from an unavailable node
+- automatic mobility supports one controller-owned consumer and one RWO Filesystem ShiftPV PVC;
+  `Blocked` is terminal and waiting phases have no deadline
 - no replication, HA, failover, backup or snapshot
 - RWO Filesystem only; no RWX or raw block
 - no volume expansion

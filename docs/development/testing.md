@@ -21,9 +21,17 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 - owner node 불일치, unsafe target, read-only/raw-block publish 거부
 - bind mount 멱등성, unmount 실패와 target 보존
 - helper Pod 성공/실패와 항상 실행되는 cleanup
+- mobility admission의 owner pin, Placement Hold 멱등성, invalid state fail-closed
+- mobility FSM의 모든 phase closure, illegal transition과 action failure terminal 처리
+- Move/Volume status CAS와 Controller action 재실행 멱등성
 - CSI capability 광고 범위와 Markdown 내부 링크
 
 ## kind E2E
+
+각 kind E2E 실행은 임시 작업 디렉터리의 전용 `KUBECONFIG`를 사용한다. 따라서 서로
+다른 cluster name으로 기본 E2E와 mobility E2E를 동시에 실행해도 전역 kubectl context를
+공유하거나 바꾸지 않는다. `KEEP_CLUSTER=1`이면 출력된 kubeconfig와 작업 디렉터리를
+후속 조사에 사용한다.
 
 ```bash
 ./test/e2e/kind/run.sh
@@ -41,7 +49,7 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
    이후 Pod 재생성 checksum이 유지된다.
 5. Pod 재생성 후 checksum이 유지된다.
 6. workload를 중지하고 Helm을 제거해도 PVC, PV, reservation과 데이터가 남는다.
-7. 같은 namespace와 pool root로 재설치하면 같은 데이터를 다시 mount한다.
+7. 같은 namespace와 Pool 등록으로 재설치하면 같은 데이터를 다시 mount한다.
 8. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
    기본값이 유지되고, 명시적으로 `shiftpv`를 선택한 PVC만 ShiftPV로 provision된다.
 9. 고정 worker의 pool을 inode가 고갈된 tmpfs로 가려 provisioning이
@@ -51,6 +59,18 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 
 테스트는 성공과 실패 모두 cluster와 임시 host directory를 정리한다.
 `KEEP_CLUSTER=1`은 로컬 실패 진단에만 사용한다.
+
+## kind mobility E2E
+
+```bash
+./test/e2e/kind/mobility/run.sh
+```
+
+별도 2-worker cluster에서 제품 admission, reconciler, CSI publish guard와 rsync helper를 함께
+실행한다. source-only selector는 data promotion 없이 `Blocked`가 되고 source owner와
+payload가 유지되어야 한다. 정상 cordon 이동은 `Copying`과 `Committing` 중 Controller
+Pod를 강제 교체해도 같은 Move가 `Succeeded`로 수렴해야 한다. PVC UID, PV, volume handle,
+checksum, destination final과 source retired directory도 검증한다.
 
 ## Linux mount integration
 
@@ -69,13 +89,14 @@ mount가 실패하고, mount와 target을 남기지 않으며 source를 보존�
 ## CI
 
 [`ci.yaml`](../../.github/workflows/ci.yaml)은 pull request, `main` push와 수동 실행에서
-다음 세 job을 수행한다. `main`에 합치기 전에 모두 성공해야 한다.
+다음 job을 수행한다. `main`에 합치기 전에 모두 성공해야 한다.
 
 | Check | 포함 항목 |
 |-------|-----------|
 | `verify` | fast checks, 80% coverage gate와 coverage artifact |
 | `linux-mount` | 격리된 실제 mount namespace, bind mount와 권한 실패 정리 |
 | `kind-e2e` | pinned toolchain, image build와 전체 kind E2E; 실패 진단 artifact |
+| `kind-mobility-e2e` | automatic mobility의 Blocked/Succeeded와 Controller restart recovery |
 | `image-controller`, `image-node` | 독립 runtime image 빌드와 각 entrypoint smoke test |
 
 ## Container image builds
@@ -96,9 +117,9 @@ make image-controller CONTROLLER_VERSION=0.2.0
 make image-node NODE_VERSION=0.1.3
 ```
 
-현재 Helm 및 kind 전환 호환용 통합 이미지는 `make image-combined`로만 명시적으로
-빌드한다. 통합 이미지 자체의 제품 버전은 없으며, 내부 두 바이너리는 각 component
-version을 유지한다.
+kind 검증용 통합 이미지는 `make image-combined`로만 명시적으로 빌드한다. 통합 이미지
+자체의 제품 버전은 없으며, 내부 두 바이너리는 각 component version을 유지한다. Helm
+chart는 `controller.image.*`, `node.image.*`와 `mobility.helperImage`를 독립적으로 받는다.
 
 CI는 두 독립 이미지를 각각 빌드하고 기본 entrypoint의 `--help` 실행을 확인한다.
 
@@ -112,8 +133,7 @@ Component version file이 `main`에서 변경되고 CI가 성공하면 해당 �
 
 각 version tag와 `latest`는 `linux/amd64`, `linux/arm64`를 포함하는 multi-platform
 manifest다. Release branch는 version file 변경을 준비하는 용도이며, merge된 `main`
-commit의 CI 성공이 실제 이미지 배포를 trigger한다. Helm image reference 분리는 아직
-별도 작업이다.
+commit의 CI 성공이 실제 이미지 배포를 trigger한다.
 
 CI의 특정 실행 결과가 해당 commit의 합격 증거다. [`validation/`](../validation/README.md)의
 문서는 재현 환경과 관찰 결과를 남기는 기록이며, 최신 commit의 CI 상태를 대신하지 않는다.

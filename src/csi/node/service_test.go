@@ -10,7 +10,35 @@ import (
 	"google.golang.org/grpc/status"
 
 	controllercsi "github.com/cagojeiger/ShiftPV/src/csi/controller"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 )
+
+type fakePoolRegistry struct {
+	pool volumeapi.Pool
+	err  error
+}
+
+func (f fakePoolRegistry) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+	return f.pool, f.err
+}
+
+type fakeVolumeRegistry struct {
+	state         volumeapi.State
+	getErr        error
+	setErr        error
+	publishedNode string
+	published     bool
+}
+
+func (f *fakeVolumeRegistry) Get(context.Context, string) (volumeapi.State, error) {
+	return f.state, f.getErr
+}
+
+func (f *fakeVolumeRegistry) SetPublished(_ context.Context, _ string, node string, published bool) error {
+	f.publishedNode = node
+	f.published = published
+	return f.setErr
+}
 
 type fakeBinder struct {
 	publishedSource string
@@ -44,8 +72,89 @@ func TestNodePublishUsesCanonicalOwnerPath(t *testing.T) {
 	}
 }
 
+func TestNodePublishUsesRegisteredNodeMountPath(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(binder)
+	service.HostRoot = "/host"
+	service.Pools = fakePoolRegistry{pool: volumeapi.Pool{NodeName: "worker-a", MountPath: "/srv/storage-a"}}
+	if _, err := service.NodePublishVolume(context.Background(), validPublishRequest()); err != nil {
+		t.Fatal(err)
+	}
+	want := "/host/srv/storage-a/volumes/shiftpv-0123456789abcdef0123456789abcdef"
+	if binder.publishedSource != want {
+		t.Fatalf("published source = %q, want %q", binder.publishedSource, want)
+	}
+}
+
+func TestNodePublishUsesDynamicOwnerAndRecordsPublication(t *testing.T) {
+	binder := &fakeBinder{}
+	registry := &fakeVolumeRegistry{state: volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: "worker-a"}}
+	service := configuredService(binder)
+	service.Volumes = registry
+	request := validPublishRequest()
+	request.VolumeContext[controllercsi.NodeContextKey] = "stale-owner"
+
+	if _, err := service.NodePublishVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if binder.publishedSource == "" || registry.publishedNode != "worker-a" || !registry.published {
+		t.Fatalf("publish was not recorded: binder=%#v registry=%#v", binder, registry)
+	}
+}
+
+func TestNodePublishFailsClosedForDynamicVolumeState(t *testing.T) {
+	for name, test := range map[string]struct {
+		registry *fakeVolumeRegistry
+		wantCode codes.Code
+	}{
+		"moving": {
+			registry: &fakeVolumeRegistry{state: volumeapi.State{Phase: volumeapi.PhaseMoving, OwnerNode: "worker-a"}},
+			wantCode: codes.FailedPrecondition,
+		},
+		"blocked": {
+			registry: &fakeVolumeRegistry{state: volumeapi.State{Phase: volumeapi.PhaseBlocked, OwnerNode: "worker-a"}},
+			wantCode: codes.FailedPrecondition,
+		},
+		"wrong owner": {
+			registry: &fakeVolumeRegistry{state: volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: "worker-b"}},
+			wantCode: codes.FailedPrecondition,
+		},
+		"registry unavailable": {
+			registry: &fakeVolumeRegistry{getErr: errors.New("API timeout")},
+			wantCode: codes.Unavailable,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			binder := &fakeBinder{}
+			service := configuredService(binder)
+			service.Volumes = test.registry
+			_, err := service.NodePublishVolume(context.Background(), validPublishRequest())
+			if status.Code(err) != test.wantCode {
+				t.Fatalf("expected %s, got %v", test.wantCode, err)
+			}
+			if binder.publishedSource != "" {
+				t.Fatalf("fail-closed request reached binder: %#v", binder)
+			}
+		})
+	}
+}
+
+func TestNodePublishReportsPublicationStateFailure(t *testing.T) {
+	binder := &fakeBinder{}
+	registry := &fakeVolumeRegistry{
+		state:  volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: "worker-a"},
+		setErr: errors.New("API timeout"),
+	}
+	service := configuredService(binder)
+	service.Volumes = registry
+	_, err := service.NodePublishVolume(context.Background(), validPublishRequest())
+	if status.Code(err) != codes.Unavailable || binder.publishedSource == "" {
+		t.Fatalf("expected mounted-but-unrecorded retry signal, binder=%#v err=%v", binder, err)
+	}
+}
+
 func TestNodePublishRejectsWrongOwner(t *testing.T) {
-	service := &Service{NodeName: "worker-a", PoolRoot: "/mnt/shiftpv", TargetRoot: "/var/lib/kubelet/pods", Binder: &fakeBinder{}}
+	service := configuredService(&fakeBinder{})
 	_, err := service.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
 		VolumeId:         "shiftpv-0123456789abcdef0123456789abcdef",
 		TargetPath:       "/var/lib/kubelet/pods/uid/volumes/csi/mount",
@@ -58,7 +167,7 @@ func TestNodePublishRejectsWrongOwner(t *testing.T) {
 }
 
 func TestNodeGetInfoPublishesTopology(t *testing.T) {
-	service := &Service{NodeName: "worker-a", PoolRoot: "/mnt/shiftpv", TargetRoot: "/var/lib/kubelet/pods", Binder: &fakeBinder{}}
+	service := configuredService(&fakeBinder{})
 	response, err := service.NodeGetInfo(context.Background(), &csi.NodeGetInfoRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -149,6 +258,28 @@ func TestNodeUnpublishValidatesAndDelegates(t *testing.T) {
 	}
 }
 
+func TestNodeUnpublishRecordsDynamicPublicationState(t *testing.T) {
+	binder := &fakeBinder{}
+	registry := &fakeVolumeRegistry{}
+	service := configuredService(binder)
+	service.Volumes = registry
+	request := &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "shiftpv-0123456789abcdef0123456789abcdef",
+		TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount",
+	}
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if registry.publishedNode != "worker-a" || registry.published {
+		t.Fatalf("unpublish was not recorded: %#v", registry)
+	}
+
+	registry.setErr = errors.New("API timeout")
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected Unavailable when unpublish state cannot be recorded, got %v", err)
+	}
+}
+
 func TestNodeUnpublishRejectsUnsafeTarget(t *testing.T) {
 	service := configuredService(&fakeBinder{})
 	_, err := service.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
@@ -194,7 +325,8 @@ func TestNodeCapabilitiesAdvertiseNoOptionalServices(t *testing.T) {
 func configuredService(binder Binder) *Service {
 	return &Service{
 		NodeName:   "worker-a",
-		PoolRoot:   "/mnt/shiftpv",
+		HostRoot:   "/",
+		Pools:      fakePoolRegistry{pool: volumeapi.Pool{NodeName: "worker-a", MountPath: "/mnt/shiftpv"}},
 		TargetRoot: "/var/lib/kubelet/pods",
 		Binder:     binder,
 	}

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -26,7 +27,9 @@ func (retryableError) Retryable() bool { return true }
 type Runner struct {
 	Client    kubernetes.Interface
 	Namespace string
-	PoolRoot  string
+	Pools     interface {
+		PoolForNode(context.Context, string) (volumeapi.Pool, error)
+	}
 	Image     string
 	Timeout   time.Duration
 	Resources corev1.ResourceRequirements
@@ -52,7 +55,11 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 	if nodeName == "" {
 		return fmt.Errorf("node name is required")
 	}
-	if !filepath.IsAbs(r.PoolRoot) {
+	poolRoot, err := r.poolRoot(ctx, nodeName)
+	if err != nil {
+		return err
+	}
+	if !filepath.IsAbs(poolRoot) {
 		return fmt.Errorf("pool root must be absolute")
 	}
 	if r.Client == nil {
@@ -91,7 +98,7 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 			Volumes: []corev1.Volume{{
 				Name: "pool",
 				VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
-					Path: r.PoolRoot,
+					Path: poolRoot,
 					Type: &hostPathType,
 				}},
 			}},
@@ -125,6 +132,17 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 		return fmt.Errorf("wait for helper Pod on node %q: %w", nodeName, err)
 	}
 	return nil
+}
+
+func (r *Runner) poolRoot(ctx context.Context, nodeName string) (string, error) {
+	if r.Pools == nil {
+		return "", fmt.Errorf("ShiftPVPool registry is required")
+	}
+	pool, err := r.Pools.PoolForNode(ctx, nodeName)
+	if err != nil {
+		return "", fmt.Errorf("resolve ShiftPVPool for node %q: %w", nodeName, err)
+	}
+	return pool.MountPath, nil
 }
 
 func classifyKubernetesAPIError(err error) error {

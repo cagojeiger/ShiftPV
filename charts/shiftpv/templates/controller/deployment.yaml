@@ -8,6 +8,8 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   replicas: {{ .Values.controller.replicas }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "shiftpv.name" . }}
@@ -31,19 +33,26 @@ spec:
       {{- end }}
       containers:
         - name: shiftpv-controller
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           command: ["/shiftpv-controller"]
           args:
             - --endpoint=unix:///run/csi/csi.sock
             - --namespace=$(POD_NAMESPACE)
-            - --pool-root={{ .Values.node.poolRoot }}
             - --helper-image={{ .Values.helperPod.image }}
             - --helper-timeout={{ .Values.helperPod.timeout }}
             - --helper-cpu-request={{ .Values.helperPod.resources.requests.cpu }}
             - --helper-memory-request={{ .Values.helperPod.resources.requests.memory }}
             - --helper-cpu-limit={{ .Values.helperPod.resources.limits.cpu }}
             - --helper-memory-limit={{ .Values.helperPod.resources.limits.memory }}
+            - --mobility-enabled={{ .Values.mobility.enabled }}
+            {{- if .Values.mobility.enabled }}
+            - --mobility-interval={{ .Values.mobility.interval }}
+            - --mobility-helper-image={{ .Values.mobility.helperImage }}
+            - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}
+            - --webhook-tls-cert-file=/var/run/shiftpv-webhook/tls.crt
+            - --webhook-tls-key-file=/var/run/shiftpv-webhook/tls.key
+            {{- end }}
             - --v={{ .Values.controller.logLevel }}
           env:
             - name: POD_NAMESPACE
@@ -59,6 +68,24 @@ spec:
           volumeMounts:
             - name: socket
               mountPath: /run/csi
+            {{- if .Values.mobility.enabled }}
+            - name: webhook-tls
+              mountPath: /var/run/shiftpv-webhook
+              readOnly: true
+            {{- end }}
+          {{- if .Values.mobility.enabled }}
+          ports:
+            - name: webhook
+              containerPort: {{ .Values.mobility.webhookPort }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: webhook
+              scheme: HTTPS
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+          {{- end }}
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -69,7 +96,7 @@ spec:
             - --csi-address=/run/csi/csi.sock
             - --leader-election=true
             - --leader-election-namespace=$(POD_NAMESPACE)
-            - --strict-topology
+            - --extra-create-metadata=true
             - --timeout=2m
             - --v={{ .Values.controller.logLevel }}
           env:
@@ -122,3 +149,8 @@ spec:
       volumes:
         - name: socket
           emptyDir: {}
+        {{- if .Values.mobility.enabled }}
+        - name: webhook-tls
+          secret:
+            secretName: {{ include "shiftpv.fullname" . }}-webhook-tls
+        {{- end }}
