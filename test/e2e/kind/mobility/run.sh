@@ -5,6 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-mobility-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
+PHASE_TIMEOUT_SECONDS=${PHASE_TIMEOUT_SECONDS:-180}
 
 for command in docker kind kubectl helm sed; do
 	command -v "${command}" >/dev/null || {
@@ -18,7 +19,7 @@ WORK_DIR=$(mktemp -d "${ROOT_DIR}/.tmp/shiftpv-mobility.XXXXXX")
 WORKER_A_POOL="${WORK_DIR}/worker-a"
 WORKER_B_POOL="${WORK_DIR}/worker-b"
 mkdir -p "${WORKER_A_POOL}" "${WORKER_B_POOL}"
-export KUBECONFIG="${WORK_DIR}/kubeconfig"
+export KUBECONFIG="${E2E_KUBECONFIG:-${WORK_DIR}/kubeconfig}"
 
 cleanup() {
 	if [[ "${KEEP_CLUSTER}" == "1" ]]; then
@@ -116,8 +117,9 @@ test -n "${MOVE_NAME}"
 
 restart_at_phase() {
 	local phase=$1
-	for _ in {1..300}; do
-		local current
+	local deadline=$((SECONDS + PHASE_TIMEOUT_SECONDS))
+	local current=""
+	while ((SECONDS < deadline)); do
 		current=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
 		if [[ "${current}" == "${phase}" ]]; then
 			if [[ "${phase}" == "Committing" ]]; then
@@ -141,7 +143,8 @@ restart_at_phase() {
 		[[ "${current}" == "Blocked" || "${current}" == "Succeeded" ]] && return 1
 		sleep 0.2
 	done
-	echo "phase ${phase} was not observed" >&2
+	echo "phase ${phase} was not observed within ${PHASE_TIMEOUT_SECONDS}s; current=${current}" >&2
+	kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2 || true
 	return 1
 }
 

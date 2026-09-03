@@ -29,7 +29,7 @@ WORKER_A_POOL="${WORK_DIR}/worker-a"
 WORKER_B_POOL="${WORK_DIR}/worker-b"
 DOCKER_CONFIG_DIR="${WORK_DIR}/docker-config"
 mkdir -p "${WORKER_A_POOL}" "${WORKER_B_POOL}" "${DOCKER_CONFIG_DIR}"
-export KUBECONFIG="${WORK_DIR}/kubeconfig"
+export KUBECONFIG="${E2E_KUBECONFIG:-${WORK_DIR}/kubeconfig}"
 
 # Avoid inheriting a desktop-specific credential helper when using an isolated
 # Docker engine such as Colima. DOCKER_HOST preserves the engine selected before

@@ -120,6 +120,9 @@ jobs:
     name: kind-e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
+      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -194,6 +197,9 @@ jobs:
     name: kind-mobility-e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
+      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
