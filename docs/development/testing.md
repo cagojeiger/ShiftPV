@@ -24,6 +24,14 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 - mobility admission의 owner pin, Placement Hold 멱등성, invalid state fail-closed
 - mobility FSM의 모든 phase closure, illegal transition과 action failure terminal 처리
 - Move/Volume status CAS와 Controller action 재실행 멱등성
+- uninstall guard의 PV/PVC/Volume/Move 검출, terminal Move 제외와 API 오류 fail-closed
+- uninstall quiesce 중 새 CreateVolume 거부, 진행 중 CreateVolume drain/acknowledgement,
+  실패 rollback과 provisioning 재개
+- lifecycle admission의 read-only DELETE/dry-run 거부, UID-bound permit 승인과 API 오류
+  fail-closed
+- admission 인증서의 최초 생성, 멱등 reconcile, serving/CA 갱신, Secret 삭제 복구,
+  dual-CA 전환 중 API 실패, unmanaged resource 거부, hot reload와 mobility 비활성화/
+  재활성화 정책 전환, owner UID 검증과 uninstall 중 validation 재생성 차단
 - CSI capability 광고 범위와 Markdown 내부 링크
 
 ## kind E2E
@@ -48,13 +56,16 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 4. Controller Pod와 owner node의 Node Plugin Pod를 강제 교체해도 실행 중 데이터와
    이후 Pod 재생성 checksum이 유지된다.
 5. Pod 재생성 후 checksum이 유지된다.
-6. workload를 중지하고 Helm을 제거해도 PVC, PV, reservation과 데이터가 남는다.
-7. 같은 namespace와 Pool 등록으로 재설치하면 같은 데이터를 다시 mount한다.
-8. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
+6. ShiftPV workload가 실행 중이면 Helm 제거가 실패하고 release와 mount가 유지된다.
+7. workload를 중지해도 retained PVC/PV/Volume이 남아 있으면 제거가 실패한다.
+8. lifecycle `ValidatingWebhookConfiguration`을 명시적으로 제거하고 `--no-hooks`로
+   긴급 제거한 뒤에도 PVC, PV, reservation과 데이터가 남는다.
+9. 같은 namespace와 Pool 등록으로 재설치하면 같은 데이터를 다시 mount한다.
+10. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
    기본값이 유지되고, 명시적으로 `shiftpv`를 선택한 PVC만 ShiftPV로 provision된다.
-9. 고정 worker의 pool을 inode가 고갈된 tmpfs로 가려 provisioning이
+11. 고정 worker의 pool을 inode가 고갈된 tmpfs로 가려 provisioning이
    `Unavailable`로 실패하고 reservation을 보존한 뒤, 복구 시 같은 volume으로 bind된다.
-10. 같은 volume의 pool을 read-only로 바꿔 deletion이 `Unavailable`로 실패할 때
+12. 같은 volume의 pool을 read-only로 바꿔 deletion이 `Unavailable`로 실패할 때
     reservation과 데이터를 보존하고, read-write 복구 후 삭제가 완료된다.
 
 테스트는 성공과 실패 모두 cluster와 임시 host directory를 정리한다.
@@ -70,7 +81,24 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 실행한다. source-only selector는 data promotion 없이 `Blocked`가 되고 source owner와
 payload가 유지되어야 한다. 정상 cordon 이동은 `Copying`과 `Committing` 중 Controller
 Pod를 강제 교체해도 같은 Move가 `Succeeded`로 수렴해야 한다. PVC UID, PV, volume handle,
-checksum, destination final과 source retired directory도 검증한다.
+checksum, destination final과 source retired directory도 검증한다. Controller가 생성한
+TLS Secret의 네 key, Service/CSIDriver owner reference, webhook `caBundle` 일치, restart 시
+certificate 유지와 `mobility.enabled=false` 전환 시 Service/Secret/webhook이 유지되면서
+webhook이 `failurePolicy=Ignore`와 항상 false인 match condition으로 비활성화되는지도
+함께 확인한다.
+
+## kind Argo CD E2E
+
+```bash
+./test/e2e/kind/argocd/run.sh
+```
+
+별도 `shiftpv-argocd-e2e` cluster에 pinned Argo CD 3.5.2와 cluster-local Helm
+repository를 설치한다. 의존 storage가 없는 Application 삭제 성공, 실제 mount된
+ShiftPV volume이 있을 때 `PreDelete` 실패와 `DeletionError`, lifecycle validation에 의한
+CSI workload/StorageClass/checksum 보존, blocker 제거 후 동일 삭제 요청의 자동 재시도
+완료를 검증한다. cluster 이름,
+kubeconfig, worker directory와 image tag가 기본/mobility E2E와 겹치지 않는다.
 
 ## Linux mount integration
 
@@ -97,11 +125,14 @@ mount가 실패하고, mount와 target을 남기지 않으며 source를 보존�
 | `linux-mount` | 격리된 실제 mount namespace, bind mount와 권한 실패 정리 |
 | `kind-e2e` | pinned toolchain, image build와 전체 kind E2E; 실패 진단 artifact |
 | `kind-mobility-e2e` | automatic mobility의 Blocked/Succeeded와 Controller restart recovery |
+| `kind-argocd-e2e` | Argo CD Application 삭제 허용, lifecycle admission 거부, 보존과 재시도 수렴 |
 | `image-controller`, `image-node` | 독립 runtime image 빌드와 각 entrypoint smoke test |
 
 ## Container image builds
 
 Controller와 Node Plugin 이미지는 같은 source version에서 독립적으로 빌드한다.
+Controller image에는 `shiftpv-controller`와 pre-delete용 `shiftpv-uninstall-guard`가
+함께 들어가며 Node image에는 두 binary를 포함하지 않는다.
 
 ```sh
 make image

@@ -57,6 +57,21 @@ helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--set mobility.interval=10s \
 	--wait \
 	--timeout 5m
+WEBHOOK_SECRET=shiftpv-webhook-tls
+WEBHOOK_SERVICE=shiftpv-webhook
+WEBHOOK_CONFIGURATION=shiftpv-mobility
+for key in 'ca\.crt' 'ca\.key' 'tls\.crt' 'tls\.key'; do
+	test -n "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o "jsonpath={.data.${key}}")"
+done
+SERVICE_UID=$(kubectl -n shiftpv-system get service/shiftpv-webhook -o jsonpath='{.metadata.uid}')
+DRIVER_UID=$(kubectl get csidriver/csi.shiftpv.io -o jsonpath='{.metadata.uid}')
+test "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.metadata.ownerReferences[0].kind}')" = "Service"
+test "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.metadata.ownerReferences[0].uid}')" = "${SERVICE_UID}"
+test "$(kubectl get "mutatingwebhookconfiguration/${WEBHOOK_CONFIGURATION}" -o jsonpath='{.metadata.ownerReferences[0].kind}')" = "CSIDriver"
+test "$(kubectl get "mutatingwebhookconfiguration/${WEBHOOK_CONFIGURATION}" -o jsonpath='{.metadata.ownerReferences[0].uid}')" = "${DRIVER_UID}"
+WEBHOOK_CA=$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.ca\.crt}')
+test "${WEBHOOK_CA}" = "$(kubectl get "mutatingwebhookconfiguration/${WEBHOOK_CONFIGURATION}" -o jsonpath='{.webhooks[0].clientConfig.caBundle}')"
+WEBHOOK_CERT_BEFORE=$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')
 kubectl apply -f "${WORK_DIR}/pools.yaml"
 kubectl -n shiftpv-system wait --for=condition=Ready pod \
 	-l app.kubernetes.io/instance=shiftpv --timeout=5m
@@ -184,6 +199,19 @@ else
 fi
 test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
 test -f "${SOURCE_POOL}/.shiftpv/retired/${MOVE_NAME}/payload"
+test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
+
+helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
+	--namespace shiftpv-system \
+	--reuse-values \
+	--set mobility.enabled=false \
+	--wait \
+	--timeout 5m
+kubectl -n shiftpv-system get "service/${WEBHOOK_SERVICE}" >/dev/null
+kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" >/dev/null
+test "$(kubectl get "mutatingwebhookconfiguration/${WEBHOOK_CONFIGURATION}" -o jsonpath='{.webhooks[0].failurePolicy}')" = "Ignore"
+test "$(kubectl get "mutatingwebhookconfiguration/${WEBHOOK_CONFIGURATION}" -o jsonpath='{.webhooks[0].matchConditions[0].expression}')" = "false"
+test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
 
 echo "ShiftPV closed-loop mobility E2E passed"
-echo "volume=${VOLUME_ID} pv=${PV_NAME} move=${MOVE_NAME} source=${SOURCE_NODE} destination=${DESTINATION_NODE} checksum=${CHECKSUM_AFTER}"
+echo "volume=${VOLUME_ID} pv=${PV_NAME} move=${MOVE_NAME} source=${SOURCE_NODE} destination=${DESTINATION_NODE} checksum=${CHECKSUM_AFTER}; webhook certificates reconciled and disabled admission is inert"

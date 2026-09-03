@@ -40,9 +40,32 @@ workload는 `storageClassName: shiftpv`로 ShiftPV를 명시적으로 선택할 
 ## Helm lifecycle
 
 Helm은 StorageClass를 소유하지만 이 StorageClass로 만들어진 PVC/PV는 소유하지
-않는다. uninstall 전에 사용 Pod를 중지해야 하며 uninstall 중에는 새 mount나 Pod
-재시작이 불가능하다. PVC/PV, reservation ConfigMap, host data directory는 남는다.
-같은 namespace와 동일한 Pool 등록으로 reinstall하면 retained PV를 다시 publish할 수 있다.
+않는다. chart의 `pre-delete` guard는 먼저 CSI provisioning을 quiesce하고 이미 실행 중인
+`CreateVolume`이 끝났다는 Controller acknowledgement를 기다린다. 그 뒤 ShiftPV PV,
+ShiftPV StorageClass를 참조하는 PVC,
+모든 `ShiftPVVolume`, 진행 중인 `ShiftPVMove`가 하나라도 남아 있으면 uninstall을
+거부한다. Kubernetes API나 CR 조회 실패도 fail-closed로 거부한다. 거부된 경우
+quiesce attempt가 취소되고 Controller가 provisioning과 lifecycle validation reconcile을
+재개하며, Controller, Node Plugin, RBAC와 StorageClass는 그대로 유지된다.
+
+정상 제거는 workload를 중지하고 move를 terminal phase로 수렴시킨 다음 PVC/PV와
+ShiftPVVolume metadata를 명시적으로 정리한 뒤 수행한다. `Retain`이므로 PVC/PV
+metadata 정리만으로 host data directory를 자동 삭제하지 않는다.
+
+보존된 PVC/PV/CR과 data를 나중에 같은 설정으로 복구해야 하는 경우에는 운영자가
+위험을 인수하고 lifecycle `ValidatingWebhookConfiguration`을 먼저 삭제한 뒤
+`helm uninstall shiftpv --namespace shiftpv-system --no-hooks`로 guard를 우회할 수 있다.
+이 경로에서는 PVC/PV, reservation ConfigMap, ShiftPV CR과 host data가 남지만 driver가
+없는 동안 새 mount와 Pod 재시작은 실패한다. 같은 namespace와 동일한 Pool 등록으로
+reinstall한 후 workload를 재시작해야 한다.
+
+Argo CD 3.3+ `PreDelete` annotation도 같은 Job에 선언되어 전체 Application 삭제에서는
+동일한 검사가 실행된다. lifecycle validation webhook은 hook 경쟁이나 직접 Kubernetes
+DELETE에서도 보호 label이 붙은 driver resource의 제거를 거부한다. admission handler는
+상태를 변경하지 않으며 guard가 quiesce와 검사를 끝내 생성한 유효 permit만 승인한다.
+일반 sync의 prune은 `PreDelete` 단계가 아니므로 ShiftPV는 별도 Application으로 관리하고
+제거는 Application 삭제 절차로 제한해야 한다. 이 경로는 Argo CD 3.5.2를 사용한 별도
+kind E2E에서 삭제 허용, 거부와 blocker 해소 후 재시도까지 검증한다.
 
 PVC를 삭제해도 `Retain` PV는 `Released`가 되고 data directory는 남는다. 현재
 버전은 이를 자동 reclaim하지 않는다. `DeleteVolume`을 호출하는 별도 Delete-policy

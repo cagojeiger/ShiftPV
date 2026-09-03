@@ -88,6 +88,18 @@ func TestCreateVolumeIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeRejectsProvisioningDuringUninstallQuiesce(t *testing.T) {
+	operator := &fakeDirectoryOperator{}
+	service := &Service{Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: operator, ProvisioningGate: rejectingProvisioningGate{}}
+	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("CreateVolume code = %s, want Unavailable: %v", status.Code(err), err)
+	}
+	if operator.createCalls != 0 {
+		t.Fatal("quiesced CreateVolume reached the directory operator")
+	}
+}
+
 func TestCreateVolumeTopologyFollowsMobilityOptIn(t *testing.T) {
 	for name, test := range map[string]struct {
 		namespace *corev1.Namespace
@@ -705,6 +717,12 @@ type blockingDirectoryOperator struct {
 	createStarted chan struct{}
 	allowDelete   chan struct{}
 	allowCreate   chan struct{}
+}
+
+type rejectingProvisioningGate struct{}
+
+func (rejectingProvisioningGate) Enter() (func(), error) {
+	return nil, errors.New("quiescing")
 }
 
 func newBlockingDeleteOperator() *blockingDirectoryOperator {

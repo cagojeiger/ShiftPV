@@ -13,7 +13,10 @@ ARG CONTROLLER_VERSION=dev
 RUN export GOOS="${TARGETOS:-$(go env GOOS)}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" \
     && CGO_ENABLED=0 go build \
     -trimpath -ldflags="-s -w -X main.version=${CONTROLLER_VERSION}" \
-    -o /out/shiftpv-controller ./src/cmd/controller
+    -o /out/shiftpv-controller ./src/cmd/controller \
+    && CGO_ENABLED=0 go build \
+    -trimpath -ldflags="-s -w" \
+    -o /out/shiftpv-uninstall-guard ./src/cmd/uninstall-guard
 
 FROM build-base AS build-node
 ARG NODE_VERSION=dev
@@ -32,6 +35,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends rsync \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build-controller /out/shiftpv-controller /shiftpv-controller
+COPY --from=build-controller /out/shiftpv-uninstall-guard /shiftpv-uninstall-guard
 USER 65532:65532
 ENTRYPOINT ["/shiftpv-controller"]
 
@@ -50,6 +54,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends mount rsync \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build-controller /out/shiftpv-controller /shiftpv-controller
+COPY --from=build-controller /out/shiftpv-uninstall-guard /shiftpv-uninstall-guard
 COPY --from=build-node /out/shiftpv-node /shiftpv-node
 USER 65532:65532
 ENTRYPOINT ["/shiftpv-controller"]

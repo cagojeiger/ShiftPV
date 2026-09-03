@@ -89,6 +89,28 @@ install_shiftpv() {
 }
 
 install_shiftpv true
+
+# Lifecycle admission is read-only. A direct dry-run DELETE must not mint an
+# uninstall permit even when no storage dependency exists.
+if kubectl -n shiftpv-system delete deployment shiftpv-controller --dry-run=server; then
+	echo "direct dry-run DELETE unexpectedly bypassed the uninstall guard" >&2
+	exit 1
+fi
+kubectl -n shiftpv-system get deployment/shiftpv-controller >/dev/null
+if kubectl -n shiftpv-system get configmap/shiftpv-uninstall-permit >/dev/null 2>&1; then
+	echo "direct dry-run DELETE created uninstall state" >&2
+	exit 1
+fi
+
+# Pool registration alone is safe to retain. With no PVC/PV/Volume/Move, the
+# hook must allow a normal uninstall and delete its successful Job.
+helm uninstall shiftpv --namespace shiftpv-system --timeout 2m
+if kubectl -n shiftpv-system get job shiftpv-uninstall-guard >/dev/null 2>&1; then
+  echo "successful uninstall guard Job was not deleted" >&2
+  exit 1
+fi
+install_shiftpv true
+
 DEFAULT_CLASS=$(kubectl get storageclass shiftpv \
   -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
 if [[ "${DEFAULT_CLASS}" != "true" ]]; then
@@ -168,8 +190,38 @@ if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_RECREATED}" ]]; then
   exit 1
 fi
 
+# A failed pre-delete hook must leave the release and the running workload intact.
+if helm uninstall shiftpv --namespace shiftpv-system --timeout 2m; then
+  echo "Helm uninstall unexpectedly succeeded while a ShiftPV workload was running" >&2
+  exit 1
+fi
+helm status shiftpv --namespace shiftpv-system >/dev/null
+kubectl -n shiftpv-system get deployment/shiftpv-controller >/dev/null
+kubectl -n shiftpv-system get daemonset/shiftpv-node >/dev/null
+kubectl get validatingwebhookconfiguration shiftpv-lifecycle >/dev/null
+kubectl -n shiftpv-system wait --for=delete configmap/shiftpv-uninstall-permit --timeout=30s
+kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -F 'ShiftPV uninstall denied'
+CHECKSUM_AFTER_DENIAL=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
+if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_DENIAL}" ]]; then
+  echo "checksum mismatch after denied Helm uninstall" >&2
+  exit 1
+fi
+
+# Stopping the Pod is not enough: retained PVC/PV/Volume state still requires an
+# explicit recovery decision. A second denial also exercises hook replacement.
 kubectl delete pod shiftpv-e2e --wait=true
-helm uninstall shiftpv --namespace shiftpv-system
+if helm uninstall shiftpv --namespace shiftpv-system --timeout 2m; then
+  echo "Helm uninstall unexpectedly succeeded while retained ShiftPV resources existed" >&2
+  exit 1
+fi
+helm status shiftpv --namespace shiftpv-system >/dev/null
+kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -F 'PersistentVolume'
+
+# The break-glass path deliberately bypasses hooks. Remove the failed hook Job,
+# which Helm does not own, so the subsequent reinstall starts without leftovers.
+kubectl -n shiftpv-system delete job shiftpv-uninstall-guard --ignore-not-found --wait=true
+kubectl delete validatingwebhookconfiguration shiftpv-lifecycle --ignore-not-found --wait=true
+helm uninstall shiftpv --namespace shiftpv-system --no-hooks
 
 kubectl get pvc shiftpv-e2e >/dev/null
 kubectl get "pv/${PV_NAME}" >/dev/null
@@ -194,7 +246,8 @@ fi
 
 # Reinstall with ShiftPV opt-in while an unrelated default class already exists.
 kubectl delete pod shiftpv-e2e --wait=true
-helm uninstall shiftpv --namespace shiftpv-system
+kubectl delete validatingwebhookconfiguration shiftpv-lifecycle --ignore-not-found --wait=true
+helm uninstall shiftpv --namespace shiftpv-system --no-hooks
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/existing-default-storageclass.yaml"
 install_shiftpv false
 

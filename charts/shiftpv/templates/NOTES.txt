@@ -7,9 +7,14 @@ Mobility: {{ .Values.mobility.enabled }}
 Register each participating node with a ShiftPVPool.
 {{- if .Values.mobility.enabled }}
 Opt in workload namespaces with: kubectl label namespace <name> shiftpv.io/admission=enabled
+The Controller creates, renews, and hot-reloads the admission TLS certificate.
 {{- end }}
 
 PVCs, PVs, Pool/Volume/Move CRs, volume reservation ConfigMaps, and data
-directories are not Helm-owned. Before uninstalling, wait for active Moves to
-become Succeeded or Blocked and stop workloads that use ShiftPV volumes. Reinstall
-into the same namespace with the same Pool registrations to recover retained volumes.
+directories are not Helm-owned. The pre-delete guard rejects uninstall while
+ShiftPV PV/PVC/Volume or an active Move remains. It quiesces new provisioning
+before inspection and resumes it automatically when the guard fails. For
+emergency recovery only,
+delete `validatingwebhookconfiguration/{{ include "shiftpv.validationWebhookConfigurationName" . }}`
+before using `helm uninstall {{ .Release.Name }} --namespace {{ .Release.Namespace }} --no-hooks`.
+This bypass leaves retained storage metadata and data in place.

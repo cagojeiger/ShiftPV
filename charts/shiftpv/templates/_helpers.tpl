@@ -14,11 +14,16 @@
 {{- end }}
 {{- end }}
 
-{{- define "shiftpv.labels" -}}
+{{- define "shiftpv.baseLabels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 app.kubernetes.io/name: {{ include "shiftpv.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{- define "shiftpv.labels" -}}
+{{ include "shiftpv.baseLabels" . }}
+shiftpv.io/uninstall-protected: "true"
 {{- end }}
 
 {{- define "shiftpv.controllerServiceAccount" -}}
@@ -27,4 +32,28 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
 {{- define "shiftpv.nodeServiceAccount" -}}
 {{- default (printf "%s-node" (include "shiftpv.fullname" .)) .Values.serviceAccount.node.name }}
+{{- end }}
+
+{{- define "shiftpv.uninstallGuardName" -}}
+{{- printf "%s-uninstall-guard" (include "shiftpv.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "shiftpv.uninstallPermitName" -}}
+{{- printf "%s-uninstall-permit" (include "shiftpv.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "shiftpv.webhookServiceName" -}}
+{{- printf "%s-webhook" (include "shiftpv.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "shiftpv.webhookSecretName" -}}
+{{- printf "%s-webhook-tls" (include "shiftpv.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "shiftpv.webhookConfigurationName" -}}
+{{- printf "%s-mobility" (include "shiftpv.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "shiftpv.validationWebhookConfigurationName" -}}
+{{- printf "%s-lifecycle" (include "shiftpv.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}

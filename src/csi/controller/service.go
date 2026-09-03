@@ -42,13 +42,18 @@ type VolumeRegistry interface {
 	PoolNodes(context.Context) ([]string, error)
 }
 
+type ProvisioningGate interface {
+	Enter() (func(), error)
+}
+
 type Service struct {
 	csi.UnimplementedControllerServer
-	Client     kubernetes.Interface
-	Namespace  string
-	Operator   DirectoryOperator
-	Volumes    VolumeRegistry
-	lifecycles volumeLifecycles
+	Client           kubernetes.Interface
+	Namespace        string
+	Operator         DirectoryOperator
+	Volumes          VolumeRegistry
+	ProvisioningGate ProvisioningGate
+	lifecycles       volumeLifecycles
 }
 
 func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
@@ -72,6 +77,13 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	id, err := volume.IDFromName(req.GetName())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if s.ProvisioningGate != nil {
+		leave, err := s.ProvisioningGate.Enter()
+		if err != nil {
+			return nil, status.Error(codes.Unavailable, err.Error())
+		}
+		defer leave()
 	}
 	unlock := s.lifecycles.lock(id)
 	defer unlock()

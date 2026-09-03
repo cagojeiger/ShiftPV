@@ -49,6 +49,26 @@ the opt-in boundary receive owner-only PV topology and do not depend on the
 webhook. The Controller Deployment is fixed to one replica with `Recreate`
 strategy so two mobility reconcilers do not overlap.
 
+The Controller creates and reconciles the webhook TLS Secret, mobility
+`MutatingWebhookConfiguration`, and lifecycle `ValidatingWebhookConfiguration`;
+Helm renders only the stable webhook Service.
+It checks once per minute, renews the 90-day serving certificate 30 days before
+expiry, and rotates the ten-year CA one year before expiry. TLS handshakes read the
+latest in-memory certificate, so renewal does not require a Pod restart. During CA
+rotation the old and new CA are temporarily published together before trust is
+converged to the new CA. If the Secret is lost, the Controller recovers the old
+trust root from the current webhook configuration before switching certificates.
+These periods are fixed product contracts rather than chart values.
+
+Changing `mobility.enabled` from `true` to `false` stops the mobility reconciler
+but keeps the webhook Service, TLS Secret, HTTPS endpoint, and webhook
+configuration. The Controller makes that configuration inert with a match
+condition that is always false and changes `failurePolicy` to `Ignore`. This
+avoids a Service/configuration deletion-order dependency in Helm and Argo CD.
+Re-enabling mobility restores `failurePolicy=Fail` and removes the disabling
+condition. The Controller refuses to update same-named certificate resources
+without ShiftPV managed labels and expected owner references.
+
 The CSI driver name, topology key, `WaitForFirstConsumer`, `Retain`, RWO
 filesystem support, and disabled expansion are fixed product contracts.
 
@@ -59,7 +79,7 @@ Key configurable values:
 | `controller.image.*` | Controller and CSI provisioner-facing binary image |
 | `node.image.*` | Node Plugin binary image |
 | `mobility.helperImage` | rsync-capable helper image; the Controller image satisfies this contract |
-| `mobility.enabled`, `mobility.interval`, `mobility.webhookPort` | cordon reconciler and admission endpoint |
+| `mobility.enabled`, `mobility.interval`, `mobility.webhookPort` | cordon reconciler and admission policy; the HTTPS endpoint remains available while disabled |
 | `node.kubeletRootDir` | kubelet state root, normally `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | participating node selection |
 | `helperPod.image`, `helperPod.timeout`, `helperPod.resources` | node-local directory helper |
@@ -71,13 +91,62 @@ Helm release per cluster.
 
 ## Uninstall and recovery
 
-Stop volume-using workloads before uninstalling. `helm uninstall` removes the
-driver workloads, RBAC, `CSIDriver`, and chart-created `StorageClass`; it does
-not delete CRDs, user PVCs/PVs, Pool/Volume/Move CRs, dynamically-created
-reservation ConfigMaps, or data directories. It does remove the webhook
-configuration and TLS Secret. Existing Pods must not be treated as safely mounted
-while the node plugin is absent, and an active Move must reach `Succeeded` or
-`Blocked` before uninstall.
+The chart runs a fail-closed pre-delete Job and lifecycle validation webhook. A
+normal `helm uninstall`, Argo CD Application deletion, or direct Kubernetes
+deletion of protected ShiftPV components is denied
+while any ShiftPV PV, PVC using the configured StorageClass, `ShiftPVVolume`, or
+non-terminal `ShiftPVMove` exists. Kubernetes API inspection errors also deny
+the operation. The webhook protects the labeled CSI Deployment, DaemonSet,
+Service, ServiceAccounts, RBAC, StorageClass, and CSIDriver even if an Argo CD
+PreDelete hook creation race advances resource pruning. A denial leaves the
+release and CSI workloads in place; inspect it with
+`kubectl -n <namespace> logs job/<release>-uninstall-guard`.
+
+The guard first creates a five-minute `quiescing` state owned by the current
+`CSIDriver` UID. The Controller then rejects new CSI `CreateVolume` calls and
+waits for already-running provisioning calls to drain before acknowledging that
+specific attempt. Certificate reconciliation is fenced by the same state, so it
+cannot recreate lifecycle validation during teardown. Only after acknowledgement
+does the guard inspect dependencies, remove lifecycle validation, and change the
+state to `granted`. This keeps the remaining Helm or Argo CD deletion independent
+of Service and RBAC deletion order. A rapid reinstall gets a new `CSIDriver` UID,
+so it cannot inherit the old state.
+
+If inspection or teardown preparation fails, the guard cancels its attempt and
+the Controller resumes provisioning and lifecycle validation reconciliation.
+Both `quiescing` and `granted` states expire after five minutes. The lifecycle
+webhook itself is read-only: a direct or dry-run DELETE cannot mint permission,
+and a direct DELETE is denied even with no storage dependency unless the guard
+has completed the quiesce protocol.
+
+For a normal decommission, stop workloads, let Moves become `Succeeded` or
+`Blocked`, and explicitly remove the PVC/PV and ShiftPVVolume metadata before
+uninstalling. The `Retain` policy means metadata cleanup does not automatically
+remove host data.
+
+For emergency recovery, an operator can explicitly remove lifecycle validation
+and then bypass the Helm hook with:
+
+```sh
+kubectl get validatingwebhookconfiguration \
+  -l app.kubernetes.io/managed-by=shiftpv-controller,app.kubernetes.io/component=lifecycle-admission
+kubectl delete validatingwebhookconfiguration <name-from-above>
+helm uninstall <release> --namespace <namespace> --no-hooks
+```
+
+This removes the driver workloads, RBAC, `CSIDriver`, chart-created StorageClass,
+and the remaining Controller-managed mobility webhook and TLS Secret through
+owner garbage collection. It does not delete CRDs, user PVCs/PVs,
+Pool/Volume/Move CRs, dynamically-created reservation ConfigMaps, or data
+directories. Existing Pods must not be treated as safely mounted while the node
+plugin is absent.
+
+The same Job is an Argo CD 3.3+ `PreDelete` hook for whole-Application deletion,
+while the lifecycle validation webhook is the authoritative deletion barrier.
+Argo CD does not run `PreDelete` during ordinary sync pruning. Direct
+`kubectl delete` bypasses Helm/Argo hooks but still reaches lifecycle admission
+for protected resources. Manage ShiftPV as a dedicated Application and use
+Application deletion as its normal removal path.
 
 Reinstall the release into the same namespace, restore the same Pool CRs and
 mount paths, wait for controller and node Pods to become ready, and then restart
