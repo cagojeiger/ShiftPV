@@ -1,0 +1,156 @@
+name: Release Helm Chart
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: release-chart-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+
+jobs:
+  resolve:
+    name: Resolve chart release
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    outputs:
+      should_release: ${{ steps.release.outputs.should_release }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+
+      - name: Resolve chart release
+        id: release
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          CURRENT_MAIN_SHA="$(git rev-parse refs/remotes/origin/main)" \
+            build/ci/resolve-chart-release.sh
+
+  publish:
+    name: Publish shiftpv v${{ needs.resolve.outputs.version }}
+    needs: resolve
+    if: needs.resolve.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Install Helm
+        env:
+          HELM_VERSION: v3.15.2
+        run: |
+          set -euo pipefail
+          asset="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/bin"
+          curl -fsSL "https://get.helm.sh/${asset}" -o "${RUNNER_TEMP}/${asset}"
+          curl -fsSL "https://get.helm.sh/${asset}.sha256sum" -o "${RUNNER_TEMP}/${asset}.sha256sum"
+          cd "${RUNNER_TEMP}"
+          sha256sum -c "${asset}.sha256sum"
+          tar -xzf "${asset}"
+          mv linux-amd64/helm "${RUNNER_TEMP}/bin/helm"
+          echo "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+
+      - name: Package chart
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/chart"
+          helm lint charts/shiftpv
+          helm package charts/shiftpv --destination "${RUNNER_TEMP}/chart"
+          test -f "${RUNNER_TEMP}/chart/shiftpv-${VERSION}.tgz"
+          cd "${RUNNER_TEMP}/chart"
+          sha256sum "shiftpv-${VERSION}.tgz" >"shiftpv-${VERSION}.tgz.sha256"
+
+      - name: Check out chart repository
+        uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+          path: chart-repository
+
+      - name: Update chart repository
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          package="shiftpv-${VERSION}.tgz"
+          if [[ -f "chart-repository/${package}" ]]; then
+            cmp "${RUNNER_TEMP}/chart/${package}" "chart-repository/${package}" || {
+              echo "::error::published chart ${package} is immutable; bump charts/shiftpv/Chart.yaml" >&2
+              exit 1
+            }
+          else
+            cp "${RUNNER_TEMP}/chart/${package}" chart-repository/
+          fi
+          helm repo index chart-repository \
+            --url https://cagojeiger.github.io/ShiftPV
+          touch chart-repository/.nojekyll
+
+      - name: Publish chart repository
+        working-directory: chart-repository
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .nojekyll index.yaml "shiftpv-${VERSION}.tgz"
+          if ! git diff --cached --quiet; then
+            git commit -m "Publish shiftpv chart v${VERSION}"
+            git push origin HEAD:gh-pages
+          fi
+
+      - name: Create chart release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+          else
+            gh release create "${TAG}" \
+              --target "${RELEASE_SHA}" \
+              --title "shiftpv Helm chart v${VERSION}" \
+              --notes "Install with: helm repo add shiftpv https://cagojeiger.github.io/ShiftPV" \
+              --latest=false \
+              "${RUNNER_TEMP}/chart/shiftpv-${VERSION}.tgz" \
+              "${RUNNER_TEMP}/chart/shiftpv-${VERSION}.tgz.sha256"
+          fi
+
+      - name: Verify public chart repository
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          for attempt in $(seq 1 30); do
+            helm repo remove shiftpv >/dev/null 2>&1 || true
+            if helm repo add shiftpv https://cagojeiger.github.io/ShiftPV >/dev/null 2>&1 && \
+              helm repo update shiftpv >/dev/null 2>&1 && \
+              helm show chart shiftpv/shiftpv --version "${VERSION}" >/dev/null 2>&1; then
+              helm show chart shiftpv/shiftpv --version "${VERSION}"
+              exit 0
+            fi
+            echo "waiting for GitHub Pages chart repository (${attempt}/30)"
+            sleep 10
+          done
+          echo "::error::chart v${VERSION} was not available from GitHub Pages" >&2
+          exit 1
