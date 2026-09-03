@@ -45,6 +45,20 @@ installing the chart.
 Automatic mobility applies only to workload namespaces explicitly labeled
 `shiftpv.io/admission=enabled`.
 
+## Install with Helm
+
+```bash
+helm repo add shiftpv https://cagojeiger.github.io/ShiftPV
+helm repo update shiftpv
+helm install shiftpv shiftpv/shiftpv \
+  --namespace shiftpv-system --create-namespace
+```
+
+The chart does not register storage paths. After installation, create one
+`ShiftPVPool` for each participating node using an already-mounted writable
+host path. The chart version and the controller/node image versions are released
+independently.
+
 ## Limitations
 
 - data has exactly one authoritative owner; automatic movement is planned cold migration from

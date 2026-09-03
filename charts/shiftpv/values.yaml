@@ -6,8 +6,8 @@ controller:
   replicas: 1
   logLevel: 2
   image:
-    repository: shiftpv
-    tag: dev
+    repository: ghcr.io/cagojeiger/shiftpv-controller
+    tag: 0.1.1
     pullPolicy: IfNotPresent
   resources: {}
 
@@ -15,14 +15,14 @@ mobility:
   enabled: true
   interval: 2s
   webhookPort: 9443
-  helperImage: shiftpv:dev
+  helperImage: ghcr.io/cagojeiger/shiftpv-controller:0.1.1
 
 node:
   kubeletRootDir: /var/lib/kubelet
   logLevel: 2
   image:
-    repository: shiftpv
-    tag: dev
+    repository: ghcr.io/cagojeiger/shiftpv-node
+    tag: 0.1.1
     pullPolicy: IfNotPresent
   nodeSelector: {}
   tolerations: []

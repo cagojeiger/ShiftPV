@@ -12,9 +12,17 @@ The chart never creates, formats, mounts, or repairs those filesystems. Initial
 V1 records PVC capacity but does not enforce a hard write limit.
 
 ```bash
-helm install shiftpv ./charts/shiftpv \
+helm repo add shiftpv https://cagojeiger.github.io/ShiftPV
+helm repo update shiftpv
+helm install shiftpv shiftpv/shiftpv \
   --namespace shiftpv-system --create-namespace
 ```
+
+For repository development, replace `shiftpv/shiftpv` with
+`./charts/shiftpv`. Chart versions and component image versions are independent:
+this chart starts at `0.1.0` and its defaults select the separately released
+controller and node images. Override those image values together only when
+testing an unpublished build.
 
 After installation, explicitly register one `ShiftPVPool` for every participating
 node before provisioning volumes. `spec.mountPath` is the runtime authority used
