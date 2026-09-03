@@ -83,6 +83,7 @@ Key configurable values:
 | `node.kubeletRootDir` | kubelet state root, normally `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | participating node selection |
 | `helperPod.image`, `helperPod.timeout`, `helperPod.resources` | node-local directory helper |
+| `lifecycle.uninstallMode` | uninstall owner: `helm` (default, fail fast) or `argocd` (wait and retry) |
 | `storageClass.create`, `storageClass.name`, `storageClass.defaultClass` | StorageClass publication and explicit default-class opt-in |
 | `controller.resources`, `node.resources`, `sidecars.*.resources` | workload resources |
 
@@ -91,8 +92,11 @@ Helm release per cluster.
 
 ## Uninstall and recovery
 
-The chart runs a fail-closed pre-delete Job and lifecycle validation webhook. A
-normal `helm uninstall`, Argo CD Application deletion, or direct Kubernetes
+The chart runs a fail-closed pre-delete Job and lifecycle validation webhook.
+Keep the default `lifecycle.uninstallMode=helm` for Helm-owned releases. Set
+`lifecycle.uninstallMode=argocd` in an Argo CD Application so a blocked
+PreDelete Job remains active and retries bounded quiesce attempts until storage
+dependencies are removed. A normal `helm uninstall`, Argo CD Application deletion, or direct Kubernetes
 deletion of protected ShiftPV components is denied
 while any ShiftPV PV, PVC using the configured StorageClass, `ShiftPVVolume`, or
 non-terminal `ShiftPVMove` exists. Kubernetes API inspection errors also deny
@@ -114,6 +118,8 @@ so it cannot inherit the old state.
 
 If inspection or teardown preparation fails, the guard cancels its attempt and
 the Controller resumes provisioning and lifecycle validation reconciliation.
+Argo CD mode waits five seconds and begins a fresh bounded attempt; Helm mode
+returns the failure immediately.
 Both `quiescing` and `granted` states expire after five minutes. The lifecycle
 webhook itself is read-only: a direct or dry-run DELETE cannot mint permission,
 and a direct DELETE is denied even with no storage dependency unless the guard
@@ -141,8 +147,8 @@ Pool/Volume/Move CRs, dynamically-created reservation ConfigMaps, or data
 directories. Existing Pods must not be treated as safely mounted while the node
 plugin is absent.
 
-The same Job is an Argo CD 3.3+ `PreDelete` hook for whole-Application deletion,
-while the lifecycle validation webhook is the authoritative deletion barrier.
+In `argocd` mode the Job is an Argo CD 3.3+ `PreDelete` hook for whole-Application
+deletion, while the lifecycle validation webhook is the authoritative deletion barrier.
 Argo CD does not run `PreDelete` during ordinary sync pruning. Direct
 `kubectl delete` bypasses Helm/Argo hooks but still reaches lifecycle admission
 for protected resources. Manage ShiftPV as a dedicated Application and use

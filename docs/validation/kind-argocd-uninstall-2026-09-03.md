@@ -23,17 +23,16 @@
    then the Job removed lifecycle validation, granted the teardown, and the
    Application, StorageClass and chart resources were deleted.
 3. After reinstalling, a real RWO PVC was provisioned and mounted on the worker.
-4. Deleting the Application created a failing `shiftpv-uninstall-guard` Job.
+4. Deleting the Application created a long-running `shiftpv-uninstall-guard` Job.
    Even when concurrent Argo CD reconciliation advanced resource pruning,
    lifecycle admission rejected protected deletes. The Application remained
-   with `DeletionError`; Controller, Node Plugin, StorageClass, and lifecycle
-   validation remained present. Failed attempts did not leave a `granted`
-   uninstall state; Argo CD could create a fresh `quiescing` attempt while
-   retrying the pending deletion.
+   pending; Controller, Node Plugin, StorageClass, and lifecycle validation
+   remained present. Failed attempts did not leave a `granted` uninstall state;
+   the same Job created fresh bounded `quiescing` attempts while waiting.
 5. The mounted payload SHA-256 before and after denial was identical:
    `81db0b52d390ac140bd43d6d2c77a40d293f37e0cc3cdc36f75ee76ed9c52394`.
-6. After deleting the Pod, PVC, retained PV and `ShiftPVVolume`, Argo CD retried
-   the same pending deletion and removed the Application and chart resources.
+6. After deleting the Pod, PVC, retained PV and `ShiftPVVolume`, the running Job
+   completed the same pending deletion and removed the Application and chart resources.
 7. The `Retain` host payload remained after metadata and Application deletion.
 
 The final suite completed with `ShiftPV Argo CD uninstall guard E2E passed`.

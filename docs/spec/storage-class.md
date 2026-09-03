@@ -59,13 +59,16 @@ metadata 정리만으로 host data directory를 자동 삭제하지 않는다.
 없는 동안 새 mount와 Pod 재시작은 실패한다. 같은 namespace와 동일한 Pool 등록으로
 reinstall한 후 workload를 재시작해야 한다.
 
-Argo CD 3.3+ `PreDelete` annotation도 같은 Job에 선언되어 전체 Application 삭제에서는
-동일한 검사가 실행된다. lifecycle validation webhook은 hook 경쟁이나 직접 Kubernetes
+Argo CD가 release를 소유하면 Helm values에 `lifecycle.uninstallMode=argocd`를 명시한다.
+이때 Job은 Argo CD 3.3+ `PreDelete` hook으로 실행되며 blocker가 있는 동안 5초 간격으로
+독립된 quiesce attempt를 반복한다. blocker가 제거되면 실행 중인 Job이 안전 검사를
+통과하여 같은 Application 삭제를 완료한다. 기본 `helm` mode는 dependency가 있으면
+즉시 실패한다. lifecycle validation webhook은 hook 경쟁이나 직접 Kubernetes
 DELETE에서도 보호 label이 붙은 driver resource의 제거를 거부한다. admission handler는
 상태를 변경하지 않으며 guard가 quiesce와 검사를 끝내 생성한 유효 permit만 승인한다.
 일반 sync의 prune은 `PreDelete` 단계가 아니므로 ShiftPV는 별도 Application으로 관리하고
 제거는 Application 삭제 절차로 제한해야 한다. 이 경로는 Argo CD 3.5.2를 사용한 별도
-kind E2E에서 삭제 허용, 거부와 blocker 해소 후 재시도까지 검증한다.
+kind E2E에서 삭제 허용, 대기와 blocker 해소 후 자동 수렴까지 검증한다.
 
 PVC를 삭제해도 `Retain` PV는 `Released`가 되고 data directory는 남는다. 현재
 버전은 이를 자동 reclaim하지 않는다. `DeleteVolume`을 호출하는 별도 Delete-policy

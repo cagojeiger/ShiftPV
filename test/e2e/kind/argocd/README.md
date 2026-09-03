@@ -7,11 +7,12 @@ fail-closed hook plus authoritative lifecycle-admission contract:
 
 1. An Application with no dependent ShiftPV storage is deleted successfully.
 2. An Application with a mounted ShiftPV volume remains in deletion while the
-   guard Job fails and lifecycle admission rejects protected resource deletion.
+   `argocd` mode guard Job stays Running and lifecycle admission rejects
+   protected resource deletion.
 3. The Controller, Node Plugin, StorageClass, and mounted checksum remain intact
    after that denial.
-4. Removing the PVC/PV/Volume blockers lets Argo CD retry, grant the bounded
-   uninstall permit, remove lifecycle validation, and complete the same
+4. Removing the PVC/PV/Volume blockers lets the running Job complete a fresh
+   uninstall attempt, remove lifecycle validation, and finish the same
    Application deletion.
 
 Run from the repository root:

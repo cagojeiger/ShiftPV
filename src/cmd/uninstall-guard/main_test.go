@@ -91,6 +91,52 @@ func TestRunCancelsQuiesceWhenValidationRemovalFails(t *testing.T) {
 	}
 }
 
+func TestRunWithRetryCompletesAfterBlockerIsRemoved(t *testing.T) {
+	client := uninstallClient()
+	client.Tracker().Add(&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data"}, Spec: corev1.PersistentVolumeSpec{
+		PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: uninstallcheck.DriverName, VolumeHandle: "volume"}},
+	}})
+	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
+	gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() { _ = gate.Run(ctx) }()
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+
+	removed := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_ = client.CoreV1().PersistentVolumes().Delete(context.Background(), "pv-data", metav1.DeleteOptions{})
+		close(removed)
+	}()
+	if err := runWithRetry(ctx, checker, store, "shiftpv-lifecycle", 200*time.Millisecond, time.Millisecond); err != nil {
+		t.Fatalf("runWithRetry: %v", err)
+	}
+	<-removed
+	if granted, err := store.Granted(context.Background()); err != nil || !granted {
+		t.Fatalf("Granted = %v, %v", granted, err)
+	}
+}
+
+func TestRunWithRetryValidatesDurationsAndStops(t *testing.T) {
+	client := uninstallClient()
+	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	if err := runWithRetry(context.Background(), checker, store, "shiftpv-lifecycle", 0, time.Millisecond); err == nil {
+		t.Fatal("zero attempt timeout was accepted")
+	}
+	if err := runWithRetry(context.Background(), checker, store, "shiftpv-lifecycle", time.Second, 0); err == nil {
+		t.Fatal("zero retry interval was accepted")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := runWithRetry(ctx, checker, store, "shiftpv-lifecycle", time.Second, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "retry interrupted") {
+		t.Fatalf("canceled retry error = %v", err)
+	}
+}
+
 func uninstallClient() *fake.Clientset {
 	driver := &storagev1.CSIDriver{ObjectMeta: metav1.ObjectMeta{Name: uninstallcheck.DriverName, UID: types.UID("driver-uid")}}
 	validation := &admissionregistrationv1.ValidatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{

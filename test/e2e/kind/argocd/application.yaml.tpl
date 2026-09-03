@@ -21,6 +21,8 @@ spec:
             pullPolicy: Never
         mobility:
           enabled: false
+        lifecycle:
+          uninstallMode: argocd
         node:
           image:
             repository: __IMAGE_REPOSITORY__

@@ -24,8 +24,12 @@ Kubernetes finalizer는 finalizer가 붙은 개별 object의 삭제만 지연한
   - phase가 `Succeeded` 또는 `Blocked`가 아닌 `ShiftPVMove`
 - Kubernetes API 또는 ShiftPV CR 조회가 실패하거나 시간 제한을 넘으면 안전 여부를
   증명할 수 없으므로 제거를 거부한다.
-- 같은 Job을 Helm `pre-delete`와 Argo CD 3.3+ `PreDelete` hook으로 선언한다. Argo CD의
-  `PreDelete`는 전체 Application 삭제에만 적용하며 일반 sync prune을 가로채지 않는다.
+- `lifecycle.uninstallMode=helm`은 기본값이며 Helm `pre-delete` Job이 한 번 검사하고
+  dependency가 있으면 빠르게 실패한다.
+- Argo CD가 release를 소유하면 `lifecycle.uninstallMode=argocd`를 명시한다. 이 모드는
+  Argo CD 3.3+ `PreDelete` Job 안에서 짧고 독립적인 quiesce attempt를 반복한다. blocker가
+  제거되면 같은 Application 삭제가 별도 hook 재시도 없이 자동 완료된다. `PreDelete`는
+  전체 Application 삭제에만 적용하며 일반 sync prune을 가로채지 않는다.
 - hook 실행과 별개로 lifecycle validation webhook은 보호 label이 붙은 ShiftPV
   Deployment, DaemonSet, Service, ServiceAccount, RBAC, StorageClass와 CSIDriver의 DELETE를
   같은 검사 규칙으로 승인하거나 거부한다. API 조회 오류도 거부한다.
@@ -56,7 +60,10 @@ Kubernetes finalizer는 finalizer가 붙은 개별 object의 삭제만 지연한
 
 - 활성 workload뿐 아니라 사용하지 않는 retained PV/Volume도 정리 또는 명시적 우회
   없이는 chart 제거를 막는다.
-- 거부된 hook Job은 진단 log를 위해 남고 다음 제거 시도 전에 교체된다.
+- Helm에서 거부된 hook Job은 진단 log를 위해 남고 다음 제거 시도 전에 교체된다.
+- Argo CD mode의 hook은 blocker가 있는 동안 Running 상태로 남는다. 각 실패한 quiesce
+  attempt는 취소하고 5초 뒤 새 attempt를 시작하므로 permit TTL을 무기한 연장하지 않는다.
+  Job은 24시간의 상한을 가진다.
 - guard 성공 후 hook Job은 삭제된다.
 - `quiescing`과 `granted` 상태는 모두 최대 5분만 유효하다. 실패한 guard는 즉시
   자기 attempt를 취소하고, 비정상 종료로 상태가 남아도 만료 후 Controller가

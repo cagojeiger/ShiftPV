@@ -72,6 +72,17 @@ func main() {
 	if err != nil {
 		klog.Fatalf("create dynamic Kubernetes client: %v", err)
 	}
+	admissionConfig := rest.CopyConfig(config)
+	admissionConfig.QPS = 50
+	admissionConfig.Burst = 100
+	admissionClient, err := kubernetes.NewForConfig(admissionConfig)
+	if err != nil {
+		klog.Fatalf("create lifecycle admission Kubernetes client: %v", err)
+	}
+	admissionDynamicClient, err := dynamic.NewForConfig(admissionConfig)
+	if err != nil {
+		klog.Fatalf("create lifecycle admission dynamic Kubernetes client: %v", err)
+	}
 	volumeRegistry := &volumeapi.Registry{Client: dynamicClient}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -142,8 +153,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", &admission.Handler{Client: client, Volumes: volumeRegistry})
 	mux.Handle("/validate-delete", &lifecycleadmission.Handler{Checker: &uninstallcheck.Checker{
-		Client: client, Volumes: volumeRegistry, StorageClassName: *storageClassName,
-	}, Permit: permitStore})
+		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, StorageClassName: *storageClassName,
+	}, Permit: &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}})
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
 	webhookServer = &http.Server{Addr: *webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}
 	go func() {

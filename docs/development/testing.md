@@ -95,9 +95,9 @@ webhook이 `failurePolicy=Ignore`와 항상 false인 match condition으로 비�
 
 별도 `shiftpv-argocd-e2e` cluster에 pinned Argo CD 3.5.2와 cluster-local Helm
 repository를 설치한다. 의존 storage가 없는 Application 삭제 성공, 실제 mount된
-ShiftPV volume이 있을 때 `PreDelete` 실패와 `DeletionError`, lifecycle validation에 의한
-CSI workload/StorageClass/checksum 보존, blocker 제거 후 동일 삭제 요청의 자동 재시도
-완료를 검증한다. cluster 이름,
+ShiftPV volume이 있을 때 `PreDelete` Job이 Running 상태로 삭제를 대기하고 lifecycle
+validation이 CSI workload/StorageClass/checksum을 보존하는지, blocker 제거 후 같은
+Job과 삭제 요청이 자동 완료되는지 검증한다. cluster 이름,
 kubeconfig, worker directory와 image tag가 기본/mobility E2E와 겹치지 않는다.
 
 ## Linux mount integration
@@ -125,7 +125,7 @@ mount가 실패하고, mount와 target을 남기지 않으며 source를 보존�
 | `linux-mount` | 격리된 실제 mount namespace, bind mount와 권한 실패 정리 |
 | `kind-e2e` | pinned toolchain, image build와 전체 kind E2E; 실패 진단 artifact |
 | `kind-mobility-e2e` | automatic mobility의 Blocked/Succeeded와 Controller restart recovery |
-| `kind-argocd-e2e` | Argo CD Application 삭제 허용, lifecycle admission 거부, 보존과 재시도 수렴 |
+| `kind-argocd-e2e` | Argo CD Application 삭제 허용, lifecycle admission 거부, 보존과 대기 후 수렴 |
 | `image-controller`, `image-node` | 독립 runtime image 빌드와 각 entrypoint smoke test |
 
 ## Container image builds

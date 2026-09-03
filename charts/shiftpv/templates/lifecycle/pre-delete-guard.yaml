@@ -1,3 +1,7 @@
+{{- $uninstallMode := lower .Values.lifecycle.uninstallMode -}}
+{{- if not (has $uninstallMode (list "helm" "argocd")) -}}
+{{- fail "lifecycle.uninstallMode must be either helm or argocd" -}}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -7,14 +11,21 @@ metadata:
     {{- include "shiftpv.baseLabels" . | nindent 4 }}
     app.kubernetes.io/component: uninstall-guard
   annotations:
+    {{- if eq $uninstallMode "argocd" }}
+    "argocd.argoproj.io/hook": PreDelete
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation,HookSucceeded
+    {{- else }}
     "helm.sh/hook": pre-delete
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
-    "argocd.argoproj.io/hook": PreDelete
-    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation,HookSucceeded
+    {{- end }}
 spec:
   backoffLimit: 0
+  {{- if eq $uninstallMode "argocd" }}
+  activeDeadlineSeconds: 86400
+  {{- else }}
   activeDeadlineSeconds: 60
+  {{- end }}
   template:
     metadata:
       labels:
@@ -42,6 +53,10 @@ spec:
             - --permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --validation-webhook={{ include "shiftpv.validationWebhookConfigurationName" . }}
             - --timeout=45s
+            {{- if eq $uninstallMode "argocd" }}
+            - --retry
+            - --retry-interval=5s
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

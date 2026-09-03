@@ -126,8 +126,9 @@ if kubectl -n shiftpv-system get job shiftpv-uninstall-guard >/dev/null 2>&1; th
 	exit 1
 fi
 
-# Reinstall and create a real mounted volume. The same PreDelete hook must now
-# keep the Application and every driver component alive.
+# Reinstall in Argo CD mode and create a real mounted volume. The long-running
+# PreDelete hook must keep the Application and every driver component alive
+# until the dependency is removed.
 apply_and_wait_for_application
 kubectl apply -f "${WORK_DIR}/pool.yaml"
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/argocd/workload.yaml"
@@ -139,28 +140,17 @@ VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 CHECKSUM_BEFORE=$(kubectl exec shiftpv-argocd-e2e -- sha256sum /data/payload | awk '{print $1}')
 
 kubectl -n argocd delete application shiftpv --wait=false
-kubectl -n shiftpv-system wait --for=condition=Failed job/shiftpv-uninstall-guard --timeout=5m
+kubectl -n shiftpv-system wait --for=create job/shiftpv-uninstall-guard --timeout=2m
+kubectl -n shiftpv-system wait --for=jsonpath='{.status.active}'=1 job/shiftpv-uninstall-guard --timeout=2m
 test -n "$(kubectl -n argocd get application shiftpv -o jsonpath='{.metadata.deletionTimestamp}')"
-
-DELETION_ERROR=""
-for _ in {1..120}; do
-	DELETION_ERROR=$(kubectl -n argocd get application shiftpv \
-		-o jsonpath='{range .status.conditions[?(@.type=="DeletionError")]}{.message}{end}' 2>/dev/null || true)
-	[[ -n "${DELETION_ERROR}" ]] && break
-	sleep 1
-done
-if [[ -z "${DELETION_ERROR}" ]]; then
-	echo "Argo CD Application did not report DeletionError after the uninstall guard failed" >&2
-	exit 1
-fi
 
 kubectl -n shiftpv-system get deployment/shiftpv-controller >/dev/null
 kubectl -n shiftpv-system get daemonset/shiftpv-node >/dev/null
 kubectl get storageclass shiftpv >/dev/null
 kubectl get validatingwebhookconfiguration shiftpv-lifecycle >/dev/null
 
-# Argo CD keeps retrying the failed PreDelete hook, so a new quiescing attempt
-# may already exist here. No failed attempt may leave deletion permission live.
+# The guard may be between bounded attempts. It must never grant deletion while
+# the mounted volume still exists.
 UNINSTALL_STATE=$(kubectl -n shiftpv-system get configmap/shiftpv-uninstall-permit \
 	-o jsonpath='{.data.state}' 2>/dev/null || true)
 if [[ "${UNINSTALL_STATE}" == "granted" ]]; then
@@ -174,13 +164,12 @@ if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_DENIAL}" ]]; then
 	exit 1
 fi
 
-# Remove all blockers and the failed hook Job. Argo CD must retry, observe the
-# safe state, and finish the same pending Application deletion.
+# Remove all blockers. The running Argo CD guard must observe the safe state and
+# finish the same pending Application deletion without a manual hook restart.
 kubectl delete pod shiftpv-argocd-e2e --wait=true
 kubectl delete pvc shiftpv-argocd-e2e --wait=true
 kubectl delete "pv/${PV_NAME}" --wait=true
 kubectl delete "shiftpvvolume/${VOLUME_ID}" --ignore-not-found --wait=true
-kubectl -n shiftpv-system delete job shiftpv-uninstall-guard --ignore-not-found --wait=true
 kubectl -n argocd wait --for=delete application/shiftpv --timeout=5m
 
 if kubectl get storageclass shiftpv >/dev/null 2>&1; then
