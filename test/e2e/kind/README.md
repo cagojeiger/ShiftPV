@@ -22,12 +22,18 @@ The script builds and loads `shiftpv:dev` and installs the Helm chart with
 ShiftPV marked as the default StorageClass. It creates a PVC without
 `storageClassName`, verifies Kubernetes defaults it to `shiftpv`, provisions it
 through `csi.shiftpv.io`, and starts a Pod that writes through the mounted RWO
-filesystem volume. It force-replaces the controller Pod and the node plugin Pod
+filesystem volume. Before provisioning, it verifies that a direct server-side
+dry-run DELETE cannot create uninstall permission. It force-replaces the
+controller Pod and the node plugin Pod
 on the volume owner node, verifies both UIDs change without losing the mounted
-data, then verifies checksum retention after ordinary Pod recreation. It stops
-the workload, uninstalls Helm, verifies that the
-PVC/PV/reservation/host file remain, reinstalls the same release, and verifies
-the checksum again. Finally, it installs an unrelated default StorageClass,
+data, then verifies checksum retention after ordinary Pod recreation. It proves
+that Helm uninstall is rejected both while the Pod is running and after the Pod
+is stopped but retained PVC/PV/Volume state remains, and that a rejected attempt
+cancels quiescing while restoring lifecycle validation. It then explicitly removes
+lifecycle validation and uses the `--no-hooks` recovery path, verifies that
+PVC/PV/reservation/host data remain,
+reinstalls the same release, and verifies the checksum again. Finally, it
+installs an unrelated default StorageClass,
 reinstalls ShiftPV with `defaultClass=false`, verifies an implicit PVC keeps the
 existing default, and provisions an explicitly selected ShiftPV PVC and Pod.
 It then overlays one worker pool with an inode-exhausted tmpfs to exercise a
@@ -39,3 +45,7 @@ chart's `Retain` policy is unchanged.
 
 The cluster and its temporary host directories are removed on exit. Set
 `KEEP_CLUSTER=1` only while diagnosing a failure.
+
+Argo CD Application deletion uses a separate cluster and entry point documented
+in [`argocd/README.md`](argocd/README.md). Its cluster name, kubeconfig, worker
+directory, and image tag do not overlap this suite.

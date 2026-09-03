@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shiftpv-chart-repository
+  namespace: shiftpv-chart-repository
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shiftpv-chart-repository
+  template:
+    metadata:
+      labels:
+        app: shiftpv-chart-repository
+    spec:
+      containers:
+        - name: repository
+          image: busybox:1.37
+          command: ["httpd", "-f", "-p", "8080", "-h", "/repository"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /index.yaml
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 65532
+          volumeMounts:
+            - name: repository
+              mountPath: /repository
+              readOnly: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: repository
+          configMap:
+            name: shiftpv-chart-repository
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shiftpv-chart-repository
+  namespace: shiftpv-chart-repository
+spec:
+  selector:
+    app: shiftpv-chart-repository
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

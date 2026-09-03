@@ -46,12 +46,16 @@ spec:
             - --helper-cpu-limit={{ .Values.helperPod.resources.limits.cpu }}
             - --helper-memory-limit={{ .Values.helperPod.resources.limits.memory }}
             - --mobility-enabled={{ .Values.mobility.enabled }}
+            - --webhook-service-name={{ include "shiftpv.webhookServiceName" . }}
+            - --webhook-tls-secret-name={{ include "shiftpv.webhookSecretName" . }}
+            - --webhook-configuration-name={{ include "shiftpv.webhookConfigurationName" . }}
+            - --validation-webhook-configuration-name={{ include "shiftpv.validationWebhookConfigurationName" . }}
+            - --storage-class-name={{ .Values.storageClass.name }}
+            - --uninstall-permit-name={{ include "shiftpv.uninstallPermitName" . }}
+            - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}
             {{- if .Values.mobility.enabled }}
             - --mobility-interval={{ .Values.mobility.interval }}
             - --mobility-helper-image={{ .Values.mobility.helperImage }}
-            - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}
-            - --webhook-tls-cert-file=/var/run/shiftpv-webhook/tls.crt
-            - --webhook-tls-key-file=/var/run/shiftpv-webhook/tls.key
             {{- end }}
             - --v={{ .Values.controller.logLevel }}
           env:
@@ -68,12 +72,6 @@ spec:
           volumeMounts:
             - name: socket
               mountPath: /run/csi
-            {{- if .Values.mobility.enabled }}
-            - name: webhook-tls
-              mountPath: /var/run/shiftpv-webhook
-              readOnly: true
-            {{- end }}
-          {{- if .Values.mobility.enabled }}
           ports:
             - name: webhook
               containerPort: {{ .Values.mobility.webhookPort }}
@@ -85,7 +83,6 @@ spec:
             initialDelaySeconds: 2
             periodSeconds: 5
             timeoutSeconds: 2
-          {{- end }}
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -149,8 +146,3 @@ spec:
       volumes:
         - name: socket
           emptyDir: {}
-        {{- if .Values.mobility.enabled }}
-        - name: webhook-tls
-          secret:
-            secretName: {{ include "shiftpv.fullname" . }}-webhook-tls
-        {{- end }}

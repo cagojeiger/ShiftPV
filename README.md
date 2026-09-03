@@ -25,13 +25,14 @@ The current implementation provides:
 - explicit node Pool registration with per-node mount paths and dynamic owner publish guard
 - automatic healthy-node cordon cold migration with Placement Hold, authenticated rsync,
   dynamic owner CAS and restart-safe reconciliation
-- Helm installation and recovery after Helm uninstall/reinstall
-- isolated two-worker kind E2E validation
+- fail-closed Helm/Argo CD Application uninstall guard and explicit recovery bypass
+- isolated Helm, mobility, and Argo CD kind E2E validation
 
 ## Requirements
 
 - Kubernetes 1.35 or newer
 - Linux nodes with privileged DaemonSet and HostPath access
+- Argo CD 3.3 or newer when Application deletion must run the uninstall guard
 - a writable local filesystem prepared on every participating node; each node's
   absolute mount path is declared by its `ShiftPVPool`
 
@@ -66,8 +67,8 @@ Automatic mobility applies only to workload namespaces explicitly labeled
 
 ## Status
 
-Early `dev-v1` bootstrap. The CSI/Helm lifecycle has been validated in an
-isolated Kubernetes 1.35.8 kind cluster with two distinct worker directories.
+Early `dev-v1` bootstrap. The CSI lifecycle and Helm/Argo CD removal guards have
+been validated in isolated Kubernetes 1.35.8 kind clusters.
 
 ## License
 

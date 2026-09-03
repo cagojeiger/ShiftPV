@@ -13,7 +13,8 @@ ShiftPV/
 ├── src/
 │   ├── cmd/
 │   │   ├── controller/main.go
-│   │   └── node/main.go
+│   │   ├── node/main.go
+│   │   └── uninstall-guard/main.go
 │   ├── csi/
 │   │   ├── server/server.go
 │   │   ├── identity/service.go
@@ -22,6 +23,12 @@ ShiftPV/
 │   ├── kubernetes/
 │   │   ├── helperpod/runner.go
 │   │   └── volumeapi/registry.go
+│   ├── lifecycle/
+│   │   ├── admission/handler.go
+│   │   └── uninstall/
+│   │       ├── checker.go
+│   │       ├── gate.go
+│   │       └── permit.go
 │   ├── mobility/
 │   │   ├── admission/handler.go
 │   │   ├── controller/
@@ -31,6 +38,8 @@ ShiftPV/
 │   │   │   └── resources.go
 │   │   └── fsm/fsm.go
 │   ├── node/mount/bind.go
+│   ├── webhook/
+│   │   └── certificate/manager.go
 │   └── volume/
 │       ├── id.go
 │       └── path.go
@@ -41,10 +50,14 @@ ShiftPV/
 │   ├── crds/
 │   └── templates/
 │       ├── controller/
+│       ├── lifecycle/
 │       ├── node/
 │       └── storage/
 └── test/e2e/kind/
     ├── run.sh
+    ├── argocd/
+    │   ├── run.sh
+    │   └── README.md
     └── mobility/
         ├── README.md
         ├── run.sh
@@ -59,12 +72,19 @@ ShiftPV/
   실행하는 adapter다.
 - `src/kubernetes/volumeapi`는 Pool/Volume/Move CR을 읽고 status를 CAS로 갱신하는
   Kubernetes adapter다.
+- `src/lifecycle/uninstall`은 driver 제거 전에 provisioning과 certificate reconciliation을
+  quiesce하고, 남은 PV/PVC/Volume/Move를 검사하며, UID-bound permit 상태를 관리한다.
+  API 오류를 포함한 불확실한 상태는 fail-closed로 거부한다.
+- `src/lifecycle/admission`은 보호된 ShiftPV component DELETE를 read-only로 검증하고
+  guard가 만든 유효한 teardown permit이 없으면 거부한다.
 - `src/mobility/fsm`은 Kubernetes client에 의존하지 않는 phase/observation/decision
   규칙만 담당한다.
 - `src/mobility/controller`는 cluster 상태 관찰과 FSM action 실행만 담당한다.
 - `src/mobility/admission`은 bound ShiftPV Pod의 owner pin 또는 Placement Hold mutation만
   담당한다.
 - `src/node/mount`는 bind mount/unmount와 target path 제한만 담당한다.
+- `src/webhook/certificate`는 admission TLS material, CA bundle, renewal과 hot reload만
+  담당한다.
 - `src/volume`은 CSI/Kubernetes 타입에 종속되지 않는 volume ID/path 규칙을
   담당한다.
 - unit test는 대상 package 옆에 둔다. cluster가 필요한 test만 `test/e2e`에 둔다.

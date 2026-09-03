@@ -90,14 +90,12 @@ jobs:
           COMPONENT: ${{ matrix.component }}
         run: |
           if [[ "${COMPONENT}" == "controller" ]]; then
-            expected=/shiftpv-controller
-            unexpected=/shiftpv-node
+            docker run --rm --entrypoint /bin/sh "shiftpv-controller:ci" \
+              -ec "test -x /shiftpv-controller && test -x /shiftpv-uninstall-guard && test ! -e /shiftpv-node"
           else
-            expected=/shiftpv-node
-            unexpected=/shiftpv-controller
+            docker run --rm --entrypoint /bin/sh "shiftpv-node:ci" \
+              -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard"
           fi
-          docker run --rm --entrypoint /bin/sh "shiftpv-${COMPONENT}:ci" \
-            -ec "test -x '${expected}' && test ! -e '${unexpected}'"
 
   linux-mount:
     name: linux-mount
@@ -270,3 +268,82 @@ jobs:
       - name: Delete kind cluster
         if: always()
         run: kind delete cluster --name shiftpv-mobility-e2e || true
+
+  kind-argocd-e2e:
+    name: kind-argocd-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
+      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned Kubernetes tools
+        env:
+          KIND_VERSION: v0.33.0
+          KUBECTL_VERSION: v1.35.8
+          HELM_VERSION: v3.15.2
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bin"
+
+          kind_asset="kind-linux-amd64"
+          kind_url="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}"
+          curl -fsSL "${kind_url}/${kind_asset}" -o "${RUNNER_TEMP}/${kind_asset}"
+          curl -fsSL "${kind_url}/${kind_asset}.sha256sum" -o "${RUNNER_TEMP}/${kind_asset}.sha256sum"
+          cd "${RUNNER_TEMP}"
+          sha256sum -c "${kind_asset}.sha256sum"
+          chmod +x "${kind_asset}"
+          mv "${kind_asset}" "${RUNNER_TEMP}/bin/kind"
+
+          curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o kubectl
+          curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" -o kubectl.sha256
+          printf '%s  kubectl\n' "$(<kubectl.sha256)" | sha256sum -c -
+          chmod +x kubectl
+          mv kubectl "${RUNNER_TEMP}/bin/kubectl"
+
+          helm_asset="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL "https://get.helm.sh/${helm_asset}" -o "${helm_asset}"
+          curl -fsSL "https://get.helm.sh/${helm_asset}.sha256sum" -o "${helm_asset}.sha256sum"
+          sha256sum -c "${helm_asset}.sha256sum"
+          tar -xzf "${helm_asset}"
+          mv linux-amd64/helm "${RUNNER_TEMP}/bin/helm"
+
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+      - name: Report tool versions
+        run: |
+          docker info --format 'Docker {{.ServerVersion}} {{.OSType}}/{{.Architecture}}'
+          kind version
+          kubectl version --client
+          helm version --short
+
+      - name: Run isolated Argo CD uninstall E2E
+        env:
+          KEEP_CLUSTER: "1"
+        run: ./test/e2e/kind/argocd/run.sh
+
+      - name: Export failure diagnostics
+        if: failure()
+        run: |
+          mkdir -p .tmp/ci-argocd-diagnostics
+          kind export logs .tmp/ci-argocd-diagnostics/kind --name shiftpv-argocd-e2e || true
+          kubectl get nodes,pods,jobs,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-argocd-diagnostics/resources.txt 2>&1 || true
+          kubectl -n argocd get applications -o yaml > .tmp/ci-argocd-diagnostics/applications.yaml 2>&1 || true
+          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > .tmp/ci-argocd-diagnostics/shiftpv-resources.yaml 2>&1 || true
+          kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-argocd-diagnostics/events.txt 2>&1 || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kind-argocd-e2e-diagnostics
+          path: .tmp/ci-argocd-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name shiftpv-argocd-e2e || true

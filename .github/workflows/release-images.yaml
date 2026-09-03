@@ -101,14 +101,12 @@ jobs:
         run: |
           docker run --rm "${IMAGE}@${DIGEST}" --help
           if [[ "${COMPONENT}" == controller ]]; then
-            expected=/shiftpv-controller
-            unexpected=/shiftpv-node
+            docker run --rm --entrypoint /bin/sh "${IMAGE}@${DIGEST}" \
+              -ec "test -x /shiftpv-controller && test -x /shiftpv-uninstall-guard && test ! -e /shiftpv-node"
           else
-            expected=/shiftpv-node
-            unexpected=/shiftpv-controller
+            docker run --rm --entrypoint /bin/sh "${IMAGE}@${DIGEST}" \
+              -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard"
           fi
-          docker run --rm --entrypoint /bin/sh "${IMAGE}@${DIGEST}" \
-            -ec "test -x '${expected}' && test ! -e '${unexpected}'"
 
       - name: Export digest
         env:

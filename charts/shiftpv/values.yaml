@@ -39,6 +39,11 @@ helperPod:
       cpu: 100m
       memory: 64Mi
 
+lifecycle:
+  # Use argocd when Argo CD owns this release so a blocked Application deletion
+  # stays pending and completes automatically after storage dependencies are removed.
+  uninstallMode: helm
+
 storageClass:
   create: true
   name: shiftpv
