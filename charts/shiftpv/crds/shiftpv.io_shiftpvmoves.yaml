@@ -1,0 +1,84 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: shiftpvmoves.shiftpv.io
+spec:
+  group: shiftpv.io
+  scope: Cluster
+  names:
+    plural: shiftpvmoves
+    singular: shiftpvmove
+    kind: ShiftPVMove
+    shortNames: [sm]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Source
+          type: string
+          jsonPath: .spec.sourceNode
+        - name: Destination
+          type: string
+          jsonPath: .status.destinationNode
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [volumeID, sourceNode]
+              properties:
+                volumeID:
+                  type: string
+                  pattern: ^shiftpv-[a-f0-9]{32}$
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: volumeID is immutable
+                sourceNode:
+                  type: string
+                  minLength: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: sourceNode is immutable
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, Copying, Promoting, Committing, WaitingForDestinationPublish, CleaningSource, Blocked, Succeeded]
+                reason:
+                  type: string
+                message:
+                  type: string
+                persistentVolumeName:
+                  type: string
+                persistentVolumeClaimNamespace:
+                  type: string
+                persistentVolumeClaimName:
+                  type: string
+                destinationNode:
+                  type: string
+                consumerName:
+                  type: string
+                replacementName:
+                  type: string
+                evictionRequested:
+                  type: boolean
+                copyJobName:
+                  type: string
+                promotionJobName:
+                  type: string
+                cleanupJobName:
+                  type: string
+                candidateNodes:
+                  type: array
+                  items:
+                    type: string
+                  x-kubernetes-list-type: set
+      subresources:
+        status: {}

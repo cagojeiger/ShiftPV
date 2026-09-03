@@ -7,6 +7,8 @@
 | 기록 | 범위 |
 |------|------|
 | [kind-e2e-2026-09-01.md](kind-e2e-2026-09-01.md) | Kubernetes 1.35.8, 두 worker의 분리된 pool, 기본 StorageClass와 Helm 재설치 |
+| [kind-mobility-e2e-2026-09-02.md](kind-mobility-e2e-2026-09-02.md) | cordon mobility의 Blocked/Succeeded terminal과 Controller restart recovery |
+| [kind-ultraqa-2026-09-03.md](kind-ultraqa-2026-09-03.md) | Node Plugin 재시작, 병렬 E2E 격리, admission outage와 filesystem fault 회복 |
 
 검증 문서는 당시의 환경과 결과를 보존하는 snapshot이다. 현재 branch의 통과 여부는
 같은 테스트를 다시 실행하거나 해당 commit의 CI check로 판단한다.

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -13,6 +14,10 @@ import (
 type Register func(*grpc.Server)
 
 func Serve(endpoint string, register Register) error {
+	return ServeContext(context.Background(), endpoint, register)
+}
+
+func ServeContext(ctx context.Context, endpoint string, register Register) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return fmt.Errorf("parse CSI endpoint: %w", err)
@@ -35,5 +40,18 @@ func Serve(endpoint string, register Register) error {
 
 	grpcServer := grpc.NewServer()
 	register(grpcServer)
-	return grpcServer.Serve(listener)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			grpcServer.GracefulStop()
+		case <-done:
+		}
+	}()
+	err = grpcServer.Serve(listener)
+	close(done)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }

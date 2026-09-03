@@ -21,4 +21,4 @@ nodes:
             node-labels: "shiftpv.io/storage-node=true,shiftpv.io/fault-node=true"
     extraMounts:
       - hostPath: "__WORKER_B_POOL__"
-        containerPath: /mnt/shiftpv
+        containerPath: /srv/shiftpv-b

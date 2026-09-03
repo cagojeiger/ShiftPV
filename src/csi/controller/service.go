@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -21,7 +22,12 @@ const (
 	TopologyKey             = "topology.csi.shiftpv.io/node"
 	NodeContextKey          = "shiftpv.io/node"
 	CapacityEnforcementKey  = "shiftpv.io/capacity-enforcement"
+	PVCNameKey              = "csi.storage.k8s.io/pvc/name"
+	PVCNamespaceKey         = "csi.storage.k8s.io/pvc/namespace"
+	PVNameKey               = "csi.storage.k8s.io/pv/name"
+	MobilityAdmissionLabel  = "shiftpv.io/admission"
 	capacityEnforcementNone = "none"
+	mobilityEnabledValue    = "enabled"
 )
 
 type DirectoryOperator interface {
@@ -29,11 +35,19 @@ type DirectoryOperator interface {
 	Delete(context.Context, string, string) error
 }
 
+type VolumeRegistry interface {
+	Ensure(context.Context, string, string) error
+	Get(context.Context, string) (volumeapi.State, error)
+	Delete(context.Context, string) error
+	PoolNodes(context.Context) ([]string, error)
+}
+
 type Service struct {
 	csi.UnimplementedControllerServer
 	Client     kubernetes.Interface
 	Namespace  string
 	Operator   DirectoryOperator
+	Volumes    VolumeRegistry
 	lifecycles volumeLifecycles
 }
 
@@ -68,8 +82,40 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	if err := s.Operator.Create(ctx, nodeName, id); err != nil {
 		return nil, directoryOperationError("prepare volume directory", err)
 	}
+	accessibleNodes := []string{nodeName}
+	if s.Volumes != nil {
+		if err := s.Volumes.Ensure(ctx, id, nodeName); err != nil {
+			return nil, kubernetesAPIError("register volume state", err)
+		}
+		poolNodes, poolErr := s.Volumes.PoolNodes(ctx)
+		if poolErr != nil {
+			return nil, kubernetesAPIError("list volume topology", poolErr)
+		}
+		if !contains(poolNodes, nodeName) {
+			return nil, status.Errorf(codes.FailedPrecondition, "selected node %q has no registered ShiftPVPool", nodeName)
+		}
+		accessibleNodes, err = s.accessibleNodes(ctx, req.GetParameters(), nodeName, poolNodes)
+		if err != nil {
+			return nil, err
+		}
+	}
 
-	return volumeResponse(id, nodeName, capacity), nil
+	return volumeResponse(id, nodeName, accessibleNodes, capacity), nil
+}
+
+func (s *Service) accessibleNodes(ctx context.Context, parameters map[string]string, owner string, poolNodes []string) ([]string, error) {
+	namespaceName := parameters[PVCNamespaceKey]
+	if namespaceName == "" {
+		return []string{owner}, nil
+	}
+	namespace, err := s.Client.CoreV1().Namespaces().Get(ctx, namespaceName, metav1.GetOptions{})
+	if err != nil {
+		return nil, kubernetesAPIError("read PVC namespace for mobility topology", err)
+	}
+	if namespace.Labels[MobilityAdmissionLabel] != mobilityEnabledValue {
+		return []string{owner}, nil
+	}
+	return poolNodes, nil
 }
 
 func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
@@ -92,6 +138,18 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 		return nil, kubernetesAPIError("read volume reservation", err)
 	}
 	nodeName := cm.Data["nodeName"]
+	if s.Volumes != nil {
+		state, stateErr := s.Volumes.Get(ctx, req.GetVolumeId())
+		if stateErr != nil && !apierrors.IsNotFound(stateErr) {
+			return nil, kubernetesAPIError("read volume state", stateErr)
+		}
+		if stateErr == nil && state.OwnerNode != "" {
+			if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" {
+				return nil, status.Errorf(codes.FailedPrecondition, "volume is phase=%q activeMove=%q", state.Phase, state.ActiveMove)
+			}
+			nodeName = state.OwnerNode
+		}
+	}
 	if nodeName == "" {
 		return nil, status.Error(codes.FailedPrecondition, "volume reservation has no owner node")
 	}
@@ -100,6 +158,11 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 	}
 	if err := s.Client.CoreV1().ConfigMaps(s.Namespace).Delete(ctx, req.GetVolumeId(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return nil, kubernetesAPIError("delete volume reservation", err)
+	}
+	if s.Volumes != nil {
+		if err := s.Volumes.Delete(ctx, req.GetVolumeId()); err != nil {
+			return nil, kubernetesAPIError("delete volume state", err)
+		}
 	}
 	return &csi.DeleteVolumeResponse{}, nil
 }
@@ -187,8 +250,11 @@ func directoryOperationError(operation string, err error) error {
 	return status.Errorf(code, "%s: %v", operation, err)
 }
 
-func volumeResponse(id, nodeName string, capacity int64) *csi.CreateVolumeResponse {
-	topology := &csi.Topology{Segments: map[string]string{TopologyKey: nodeName}}
+func volumeResponse(id, nodeName string, poolNodes []string, capacity int64) *csi.CreateVolumeResponse {
+	topologies := make([]*csi.Topology, 0, len(poolNodes))
+	for _, poolNode := range poolNodes {
+		topologies = append(topologies, &csi.Topology{Segments: map[string]string{TopologyKey: poolNode}})
+	}
 	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
 		VolumeId:      id,
 		CapacityBytes: capacity,
@@ -196,8 +262,17 @@ func volumeResponse(id, nodeName string, capacity int64) *csi.CreateVolumeRespon
 			NodeContextKey:         nodeName,
 			CapacityEnforcementKey: capacityEnforcementNone,
 		},
-		AccessibleTopology: []*csi.Topology{topology},
+		AccessibleTopology: topologies,
 	}}
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func requestedCapacity(capacityRange *csi.CapacityRange) (int64, error) {
@@ -217,11 +292,15 @@ func requestedCapacity(capacityRange *csi.CapacityRange) (int64, error) {
 
 func validateParameters(parameters map[string]string) error {
 	for key, value := range parameters {
-		if key != CapacityEnforcementKey {
+		switch key {
+		case CapacityEnforcementKey:
+			if value != capacityEnforcementNone {
+				return fmt.Errorf("%s must be %q", CapacityEnforcementKey, capacityEnforcementNone)
+			}
+		case PVCNameKey, PVCNamespaceKey, PVNameKey:
+			// Added by csi-provisioner --extra-create-metadata, not by the StorageClass.
+		default:
 			return fmt.Errorf("unsupported StorageClass parameter %q", key)
-		}
-		if value != capacityEnforcementNone {
-			return fmt.Errorf("%s must be %q", CapacityEnforcementKey, capacityEnforcementNone)
 		}
 	}
 	if parameters[CapacityEnforcementKey] != capacityEnforcementNone {

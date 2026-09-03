@@ -7,10 +7,13 @@ metadata:
     {{- include "shiftpv.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["pods"]
+    resources: ["pods", "services", "secrets"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["configmaps"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]

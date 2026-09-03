@@ -14,9 +14,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 )
 
 const testVolumeID = "shiftpv-0123456789abcdef0123456789abcdef"
+
+type fakePoolResolver struct{ pool volumeapi.Pool }
+
+func (f fakePoolResolver) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+	return f.pool, nil
+}
 
 func TestCreateRunsPinnedHelperPodAndCleansItUp(t *testing.T) {
 	client, created := clientWithPodPhase(t, corev1.PodSucceeded, "")
@@ -46,6 +54,18 @@ func TestCreateRunsPinnedHelperPodAndCleansItUp(t *testing.T) {
 	}
 	if len(pods.Items) != 0 {
 		t.Fatalf("helper Pod was not cleaned up: %d remain", len(pods.Items))
+	}
+}
+
+func TestCreateUsesRegisteredNodeMountPath(t *testing.T) {
+	client, created := clientWithPodPhase(t, corev1.PodSucceeded, "")
+	runner := validRunner(client)
+	runner.Pools = fakePoolResolver{pool: volumeapi.Pool{NodeName: "worker-a", MountPath: "/srv/storage-a"}}
+	if err := runner.Create(context.Background(), "worker-a", testVolumeID); err != nil {
+		t.Fatal(err)
+	}
+	if got := created.pod.Spec.Volumes[0].HostPath.Path; got != "/srv/storage-a" {
+		t.Fatalf("helper HostPath = %q, want registered mountPath", got)
 	}
 }
 
@@ -133,19 +153,22 @@ func TestRunClassifiesPodGetAPIErrors(t *testing.T) {
 func TestRunRejectsIncompleteConfiguration(t *testing.T) {
 	tests := map[string]Runner{
 		"relative pool": {
-			Client: fake.NewClientset(), Namespace: "shiftpv-system", PoolRoot: "relative", Image: "busybox", Timeout: time.Second,
+			Client: fake.NewClientset(), Namespace: "shiftpv-system", Pools: fakePoolResolver{pool: volumeapi.Pool{MountPath: "relative"}}, Image: "busybox", Timeout: time.Second,
 		},
 		"missing client": {
-			Namespace: "shiftpv-system", PoolRoot: "/mnt/shiftpv", Image: "busybox", Timeout: time.Second,
+			Namespace: "shiftpv-system", Pools: fakePoolResolver{pool: volumeapi.Pool{MountPath: "/mnt/shiftpv"}}, Image: "busybox", Timeout: time.Second,
 		},
 		"missing namespace": {
-			Client: fake.NewClientset(), PoolRoot: "/mnt/shiftpv", Image: "busybox", Timeout: time.Second,
+			Client: fake.NewClientset(), Pools: fakePoolResolver{pool: volumeapi.Pool{MountPath: "/mnt/shiftpv"}}, Image: "busybox", Timeout: time.Second,
 		},
 		"missing image": {
-			Client: fake.NewClientset(), Namespace: "shiftpv-system", PoolRoot: "/mnt/shiftpv", Timeout: time.Second,
+			Client: fake.NewClientset(), Namespace: "shiftpv-system", Pools: fakePoolResolver{pool: volumeapi.Pool{MountPath: "/mnt/shiftpv"}}, Timeout: time.Second,
 		},
 		"invalid timeout": {
-			Client: fake.NewClientset(), Namespace: "shiftpv-system", PoolRoot: "/mnt/shiftpv", Image: "busybox",
+			Client: fake.NewClientset(), Namespace: "shiftpv-system", Pools: fakePoolResolver{pool: volumeapi.Pool{MountPath: "/mnt/shiftpv"}}, Image: "busybox",
+		},
+		"missing pool registry": {
+			Client: fake.NewClientset(), Namespace: "shiftpv-system", Image: "busybox", Timeout: time.Second,
 		},
 	}
 
@@ -214,7 +237,7 @@ func validRunner(client *fake.Clientset) Runner {
 	return Runner{
 		Client:    client,
 		Namespace: "shiftpv-system",
-		PoolRoot:  "/mnt/shiftpv",
+		Pools:     fakePoolResolver{pool: volumeapi.Pool{NodeName: "worker-a", MountPath: "/mnt/shiftpv"}},
 		Image:     "busybox:1.37",
 		Timeout:   time.Second,
 	}

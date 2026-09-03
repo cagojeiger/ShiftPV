@@ -36,13 +36,13 @@ spec:
       {{- end }}
       containers:
         - name: shiftpv-node
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.node.image.repository }}:{{ .Values.node.image.tag }}"
+          imagePullPolicy: {{ .Values.node.image.pullPolicy }}
           command: ["/shiftpv-node"]
           args:
             - --endpoint=unix:///csi/csi.sock
             - --node-name=$(NODE_NAME)
-            - --pool-root={{ .Values.node.poolRoot }}
+            - --host-root=/host
             - --target-root={{ .Values.node.kubeletRootDir }}/pods
             - --v={{ .Values.node.logLevel }}
           env:
@@ -59,8 +59,9 @@ spec:
             - name: kubelet-pods
               mountPath: {{ .Values.node.kubeletRootDir }}/pods
               mountPropagation: Bidirectional
-            - name: pool
-              mountPath: {{ .Values.node.poolRoot }}
+            - name: host-root
+              mountPath: /host
+              mountPropagation: HostToContainer
           {{- with .Values.node.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -126,7 +127,7 @@ spec:
           hostPath:
             path: {{ .Values.node.kubeletRootDir }}/pods
             type: Directory
-        - name: pool
+        - name: host-root
           hostPath:
-            path: {{ .Values.node.poolRoot }}
+            path: /
             type: Directory

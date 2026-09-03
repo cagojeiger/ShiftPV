@@ -29,6 +29,7 @@ WORKER_A_POOL="${WORK_DIR}/worker-a"
 WORKER_B_POOL="${WORK_DIR}/worker-b"
 DOCKER_CONFIG_DIR="${WORK_DIR}/docker-config"
 mkdir -p "${WORKER_A_POOL}" "${WORKER_B_POOL}" "${DOCKER_CONFIG_DIR}"
+export KUBECONFIG="${E2E_KUBECONFIG:-${WORK_DIR}/kubeconfig}"
 
 # Avoid inheriting a desktop-specific credential helper when using an isolated
 # Docker engine such as Colima. DOCKER_HOST preserves the engine selected before
@@ -40,7 +41,7 @@ docker info >/dev/null
 
 cleanup() {
   if [[ "${KEEP_CLUSTER}" == "1" ]]; then
-    echo "keeping cluster ${CLUSTER_NAME} and data under ${WORK_DIR}"
+    echo "keeping cluster ${CLUSTER_NAME}, kubeconfig ${KUBECONFIG}, and data under ${WORK_DIR}"
     return
   fi
   kind delete cluster --name "${CLUSTER_NAME}" >/dev/null 2>&1 || true
@@ -52,6 +53,10 @@ sed \
   -e "s|__WORKER_A_POOL__|${WORKER_A_POOL}|g" \
   -e "s|__WORKER_B_POOL__|${WORKER_B_POOL}|g" \
   "${ROOT_DIR}/test/e2e/kind/cluster.yaml.tpl" > "${WORK_DIR}/cluster.yaml"
+sed \
+  -e "s|__WORKER_A_NODE__|${CLUSTER_NAME}-worker|g" \
+  -e "s|__WORKER_B_NODE__|${CLUSTER_NAME}-worker2|g" \
+  "${ROOT_DIR}/test/e2e/kind/pools.yaml.tpl" > "${WORK_DIR}/pools.yaml"
 
 kind create cluster \
   --name "${CLUSTER_NAME}" \
@@ -76,10 +81,11 @@ install_shiftpv() {
 		--set "storageClass.defaultClass=${default_class}" \
 		--wait \
 		--timeout 5m
-  kubectl -n shiftpv-system wait \
+	kubectl -n shiftpv-system wait \
     --for=condition=Ready pod \
     -l app.kubernetes.io/instance=shiftpv \
-    --timeout=5m
+		--timeout=5m
+	kubectl apply -f "${WORK_DIR}/pools.yaml"
 }
 
 install_shiftpv true

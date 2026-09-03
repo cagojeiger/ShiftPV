@@ -2,8 +2,14 @@ ShiftPV CSI driver is installed.
 
 StorageClass: {{ .Values.storageClass.name }}
 Driver: csi.shiftpv.io
-Pool root: {{ .Values.node.poolRoot }}
+Mobility: {{ .Values.mobility.enabled }}
 
-PVCs, PVs, volume reservation ConfigMaps, and data directories are not Helm-owned.
-Before uninstalling, stop workloads that use ShiftPV volumes. Reinstall into the
-same namespace with the same pool root to recover retained volumes.
+Register each participating node with a ShiftPVPool.
+{{- if .Values.mobility.enabled }}
+Opt in workload namespaces with: kubectl label namespace <name> shiftpv.io/admission=enabled
+{{- end }}
+
+PVCs, PVs, Pool/Volume/Move CRs, volume reservation ConfigMaps, and data
+directories are not Helm-owned. Before uninstalling, wait for active Moves to
+become Succeeded or Blocked and stop workloads that use ShiftPV volumes. Reinstall
+into the same namespace with the same Pool registrations to recover retained volumes.

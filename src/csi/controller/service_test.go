@@ -17,8 +17,26 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
+
+type fakeVolumeRegistry struct {
+	state     volumeapi.State
+	poolNodes []string
+}
+
+func (f *fakeVolumeRegistry) Ensure(context.Context, string, string) error { return nil }
+func (f *fakeVolumeRegistry) Get(context.Context, string) (volumeapi.State, error) {
+	return f.state, nil
+}
+func (f *fakeVolumeRegistry) Delete(context.Context, string) error { return nil }
+func (f *fakeVolumeRegistry) PoolNodes(context.Context) ([]string, error) {
+	if len(f.poolNodes) > 0 {
+		return f.poolNodes, nil
+	}
+	return []string{f.state.OwnerNode}, nil
+}
 
 type fakeDirectoryOperator struct {
 	createdNode string
@@ -67,6 +85,52 @@ func TestCreateVolumeIsIdempotent(t *testing.T) {
 	}
 	if operator.createdNode != "worker-a" || operator.createdID != first.Volume.VolumeId {
 		t.Fatalf("unexpected directory operation: node=%q id=%q", operator.createdNode, operator.createdID)
+	}
+}
+
+func TestCreateVolumeTopologyFollowsMobilityOptIn(t *testing.T) {
+	for name, test := range map[string]struct {
+		namespace *corev1.Namespace
+		wantNodes []string
+	}{
+		"opted in": {
+			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "mobile", Labels: map[string]string{MobilityAdmissionLabel: mobilityEnabledValue}}},
+			wantNodes: []string{"worker-a", "worker-b"},
+		},
+		"not opted in": {
+			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "local"}},
+			wantNodes: []string{"worker-a"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			namespace := test.namespace
+			wantNodes := test.wantNodes
+			registry := &fakeVolumeRegistry{state: volumeapi.State{OwnerNode: "worker-a"}, poolNodes: []string{"worker-a", "worker-b"}}
+			service := &Service{Client: fake.NewClientset(namespace), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry}
+			req := validCreateRequest("worker-a")
+			req.Parameters[PVCNameKey] = "claim"
+			req.Parameters[PVCNamespaceKey] = namespace.Name
+			req.Parameters[PVNameKey] = "pv-test"
+			response, err := service.CreateVolume(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := topologyNodes(response.Volume.AccessibleTopology); !equalStrings(got, wantNodes) {
+				t.Fatalf("accessible topology = %v, want %v", got, wantNodes)
+			}
+		})
+	}
+}
+
+func TestCreateVolumeWithoutProvisionerMetadataStaysOwnerLocal(t *testing.T) {
+	registry := &fakeVolumeRegistry{state: volumeapi.State{OwnerNode: "worker-a"}, poolNodes: []string{"worker-a", "worker-b"}}
+	service := &Service{Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry}
+	response, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := topologyNodes(response.Volume.AccessibleTopology); !equalStrings(got, []string{"worker-a"}) {
+		t.Fatalf("accessible topology = %v, want owner only", got)
 	}
 }
 
@@ -437,6 +501,24 @@ func TestDeleteVolumeIsIdempotentWhenReservationIsMissing(t *testing.T) {
 	}
 }
 
+func TestDeleteVolumeRejectsActiveMove(t *testing.T) {
+	id, err := volume.IDFromName("moving-pvc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator := &fakeDirectoryOperator{}
+	service := &Service{
+		Client: fake.NewClientset(reservation(id, "source")), Namespace: "shiftpv-system", Operator: operator,
+		Volumes: &fakeVolumeRegistry{state: volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: "move-test"}},
+	}
+	if _, err := service.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: id}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %v", err)
+	}
+	if operator.deleteCalls != 0 {
+		t.Fatal("active volume directory was deleted")
+	}
+}
+
 func TestDeleteVolumePreservesReservationOnDirectoryFailure(t *testing.T) {
 	id, err := volume.IDFromName("pvc-uid")
 	if err != nil {
@@ -680,4 +762,24 @@ func validCreateRequest(node string) *csi.CreateVolumeRequest {
 			Segments: map[string]string{TopologyKey: node},
 		}}},
 	}
+}
+
+func topologyNodes(topologies []*csi.Topology) []string {
+	result := make([]string, 0, len(topologies))
+	for _, topology := range topologies {
+		result = append(result, topology.Segments[TopologyKey])
+	}
+	return result
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

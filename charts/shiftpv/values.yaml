@@ -1,8 +1,3 @@
-image:
-  repository: shiftpv
-  tag: dev
-  pullPolicy: IfNotPresent
-
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -10,12 +5,25 @@ fullnameOverride: ""
 controller:
   replicas: 1
   logLevel: 2
+  image:
+    repository: shiftpv
+    tag: dev
+    pullPolicy: IfNotPresent
   resources: {}
 
+mobility:
+  enabled: true
+  interval: 2s
+  webhookPort: 9443
+  helperImage: shiftpv:dev
+
 node:
-  poolRoot: /mnt/shiftpv
   kubeletRootDir: /var/lib/kubelet
   logLevel: 2
+  image:
+    repository: shiftpv
+    tag: dev
+    pullPolicy: IfNotPresent
   nodeSelector: {}
   tolerations: []
   resources: {}

@@ -2,6 +2,7 @@
 
 - 상태: Accepted
 - 날짜: 2026-09-01
+- 후속 결정: owner 권한과 PV topology는 [ADR 0005](0005-automatic-cordon-volume-mobility.md)가 대체한다.
 
 ## Context
 
@@ -15,8 +16,8 @@
   `volumes/<csi-volume-id>` directory를 생성한다.
 - namespace-scoped ConfigMap에 request name, volume ID, owner node와 requested
   capacity를 기록해 재시도와 재설치에 사용한다.
-- Node Plugin은 volume context의 owner node가 자신과 같을 때만 canonical
-  directory를 kubelet target에 bind mount한다.
+- Node Plugin은 `ShiftPVVolume.status`가 `Ready`이고 current owner가 자신과 같을 때만
+  canonical directory를 kubelet target에 bind mount한다.
 - Helm chart는 CSI workload, sidecar, RBAC, `CSIDriver`와 StorageClass를 소유한다.
   StorageClass의 cluster default 지정은 명시적으로 활성화한다.
 - StorageClass는 `Retain`, `WaitForFirstConsumer`, RWO Filesystem,
@@ -28,5 +29,5 @@
 
 - Helm 제거 전에 volume을 사용하는 workload를 중지해야 한다.
 - Helm 제거 후에도 PVC, PV, reservation ConfigMap과 데이터 directory는 남는다.
-- 같은 namespace와 pool root로 재설치하면 retained volume을 다시 publish할 수 있다.
+- 같은 namespace와 Pool 등록으로 재설치하면 retained volume을 다시 publish할 수 있다.
 - requested capacity는 표기와 idempotency 비교 값이며 실제 write limit가 아니다.
