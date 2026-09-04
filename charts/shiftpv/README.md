@@ -20,7 +20,7 @@ helm install shiftpv shiftpv/shiftpv \
 
 For repository development, replace `shiftpv/shiftpv` with
 `./charts/shiftpv`. Chart versions and component image versions are independent:
-this chart starts at `0.1.0` and its defaults select the separately released
+the initial chart release was `0.1.0`; its defaults select the separately released
 controller and node images. Override those image values together only when
 testing an unpublished build.
 
