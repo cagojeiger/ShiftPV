@@ -69,9 +69,22 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
    `Unavailable`로 실패하고 reservation을 보존한 뒤, 복구 시 같은 volume으로 bind된다.
 12. 같은 volume의 pool을 read-only로 바꿔 deletion이 `Unavailable`로 실패할 때
     reservation과 데이터를 보존하고, read-write 복구 후 삭제가 완료된다.
+13. 이동 copy 중 실제 ENOSPC가 불완전한 staging을 남겨도 `Blocked/CopyFailed`와 source
+    authority를 유지하고, 용량 복구 후 `ResumeOwner`가 staging을 격리한다.
+14. 검증된 copy 뒤 destination을 read-only로 바꾸면 promotion이
+    `Blocked/PromotionFailed`로 owner commit 전에 멈추고, read-write 복구 후 같은 source로
+    재개한다.
 
 테스트는 성공과 실패 모두 cluster와 임시 host directory를 정리한다.
 `KEEP_CLUSTER=1`은 로컬 실패 진단에만 사용한다.
+
+filesystem mobility 두 경로만 빠르게 재현할 때는 별도 cluster 이름으로 실행한다.
+
+```bash
+MOBILITY_FILESYSTEM_FAULTS_ONLY=1 \
+  CLUSTER_NAME=shiftpv-mobility-fs-focused \
+  ./test/e2e/kind/run.sh
+```
 
 ## kind mobility E2E
 

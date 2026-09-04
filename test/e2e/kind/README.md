@@ -43,6 +43,19 @@ exercise deletion failure. Both failures must surface as retryable
 the pool is restored. Deletion uses a test-only `Delete` reclaim policy; the
 chart's `Retain` policy is unchanged.
 
+The suite also enables mobility and faults the destination during an actual
+move. A full tmpfs must leave the Move at `Blocked/CopyFailed`, preserve source
+authority, and quarantine partial staging during `ResumeOwner`. A read-only
+destination after verified copy must stop at `Blocked/PromotionFailed` before
+owner commit and recover to the same source after the mount becomes writable.
+Run only these two cases with an isolated cluster when iterating:
+
+```bash
+MOBILITY_FILESYSTEM_FAULTS_ONLY=1 \
+  CLUSTER_NAME=shiftpv-mobility-fs-focused \
+  ./test/e2e/kind/run.sh
+```
+
 The cluster and its temporary host directories are removed on exit. Set
 `KEEP_CLUSTER=1` only while diagnosing a failure.
 
