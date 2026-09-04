@@ -282,6 +282,15 @@ copy/promotion/cleanup Job은 `activeDeadlineSeconds=300`, `backoffLimit=2`, 완
 5. API/CR 상태가 불명확하면 publish와 promotion을 허용하지 않는다.
 6. Controller restart는 CR status와 helper resource 관찰로 같은 action에 수렴한다.
 
+Kubernetes API 요청이 실제 반영된 뒤 응답만 timeout 또는 연결 단절로 유실될 수 있다.
+Controller는 이 경우 성공을 추측하지 않고 현재 phase를 유지한다. 다음 reconcile에서
+결정적 이름의 Move/helper resource, Move status와 Volume CAS 결과를 다시 읽어 이미 반영된
+action은 재사용하고 반영되지 않은 action만 재시도한다. 특히 destination과 copy Job 이름을
+Move status에 먼저 기록하기 전에는 copy resource를 시작하지 않는다. owner commit 응답이
+유실되어도 `Ready`, destination owner, 같은 `activeMove`의 세 값이 모두 관찰되어야
+commit 완료로 인정한다. 성공 정리 중 delete 또는 `activeMove` 해제 응답이 유실되면
+NotFound와 이미 비어 있는 `activeMove`를 멱등 성공으로 처리한다.
+
 ## Closure and limits
 
 FSM 그래프와 reconcile control loop는 닫혀 있다. 모든 알려진 phase는 허용된 transition과
