@@ -73,6 +73,7 @@ func (r *Reconciler) lockVolume(ctx context.Context, move *volumeapi.Move, obser
 	move.Status.ClaimNamespace = observed.Claim.Namespace
 	move.Status.ClaimName = observed.Claim.Name
 	move.Status.ConsumerName = observed.Consumer.Name
+	move.Status.ConsumerUID = string(observed.Consumer.UID)
 	move.Status.CandidateNodes = append([]string(nil), observed.CandidateNodes...)
 	return nil
 }
@@ -83,7 +84,8 @@ func (r *Reconciler) evictConsumer(ctx context.Context, move *volumeapi.Move, ob
 		return nil
 	}
 	err := r.Client.PolicyV1().Evictions(observed.Consumer.Namespace).Evict(ctx, &policyv1.Eviction{
-		ObjectMeta: metav1.ObjectMeta{Name: observed.Consumer.Name, Namespace: observed.Consumer.Namespace},
+		ObjectMeta:    metav1.ObjectMeta{Name: observed.Consumer.Name, Namespace: observed.Consumer.Namespace},
+		DeleteOptions: &metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &observed.Consumer.UID}},
 	})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("evict consumer Pod: %w", err)
@@ -126,9 +128,14 @@ func (r *Reconciler) ensureCopy(ctx context.Context, move *volumeapi.Move, obser
 	if observed.DestinationNode == "" {
 		return fmt.Errorf("destination node is not observed")
 	}
+	previous := move.Status
 	move.Status.DestinationNode = observed.DestinationNode
 	move.Status.ReplacementName = observed.Replacement.Name
 	move.Status.CopyJobName = observed.Names.CopyJob
+	// Persist the destination before starting disk-side work, including API retries.
+	if err := r.persistMoveStatus(ctx, move, previous); err != nil {
+		return err
+	}
 	return r.ensureCopyResources(ctx, *move, observed.Names)
 }
 

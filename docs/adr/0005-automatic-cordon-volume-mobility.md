@@ -43,6 +43,9 @@ storage topology를 다른 registered Pool로 이전해야 한다. Kubernetes CS
 
 ## Consequences
 
+eviction 이전의 판정은 [ADR 0009](0009-nondisruptive-mobility-preflight.md)가 보완한다.
+아래 selector Blocked 결과는 도입 당시 시험 이력이며 현재는 관측 가능한 충돌을 먼저 보류한다.
+
 - nodeSelector, required affinity, taint/toleration과 resource fit은 replacement Pod를
   배치하는 kube-scheduler가 평가한다. candidate와 충돌하는 hostname selector나 이미
   잘못 bind된 node는 즉시 Blocked이고, 그 밖의 Unschedulable은 waiting phase에 머문다.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +37,14 @@ func (m *memoryRepository) CompareAndSetState(_ context.Context, id, phase, acti
 	current := m.volumes[id]
 	if current.Phase != phase || current.ActiveMove != active || current.OwnerNode != owner {
 		return volumeapi.ErrStateConflict
+	}
+	next.PublishedNodes = current.PublishedNodes
+	if next.Phase == volumeapi.PhaseReady {
+		for _, node := range current.PublishedNodes {
+			if node != next.OwnerNode {
+				return volumeapi.ErrStateConflict
+			}
+		}
 	}
 	m.volumes[id] = next
 	return nil
@@ -244,6 +253,9 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsurePromotion}); err != nil {
 		t.Fatal(err)
 	}
+	unpublished := repository.volumes[volumeID]
+	unpublished.PublishedNodes = nil // kubelet has completed the source unpublish.
+	repository.volumes[volumeID] = unpublished
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionCommitOwner}); err != nil {
 		t.Fatal(err)
 	}
@@ -345,15 +357,16 @@ func mobilityObjects(volumeID string) []runtime.Object {
 		readyNode("source", true), readyNode("destination", false),
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}, Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "csi.shiftpv.io", VolumeHandle: volumeID}},
-			ClaimRef:               &corev1.ObjectReference{Name: "claim", Namespace: "workload"},
+			ClaimRef:               &corev1.ObjectReference{Name: "claim", Namespace: "workload", UID: "claim-uid"},
 		}},
-		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "workload"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
-		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: "workload", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: types.UID("rs"), Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: "source", Volumes: claimVolumes()}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "workload", UID: "claim-uid"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
+		&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "rs", Namespace: "workload", UID: "rs"}, Spec: appsv1.ReplicaSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: claimVolumes()}}}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: "workload", UID: "consumer-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: types.UID("rs"), Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: "source", Volumes: claimVolumes()}},
 	}
 }
 
 func readyNode(name string, cordoned bool) *corev1.Node {
-	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: corev1.NodeSpec{Unschedulable: cordoned}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{corev1.LabelHostname: name}}, Spec: corev1.NodeSpec{Unschedulable: cordoned}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
 }
 
 func claimVolumes() []corev1.Volume {

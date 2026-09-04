@@ -194,7 +194,7 @@ jobs:
   kind-mobility-e2e:
     name: kind-mobility-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig

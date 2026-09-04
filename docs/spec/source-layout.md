@@ -34,8 +34,12 @@ ShiftPV/
 │   │   ├── controller/
 │   │   │   ├── reconciler.go
 │   │   │   ├── observe.go
+│   │   │   ├── preflight.go
+│   │   │   ├── diagnostics.go
 │   │   │   ├── actions.go
-│   │   │   └── resources.go
+│   │   │   ├── resources.go
+│   │   │   ├── recovery.go
+│   │   │   └── recovery_resources.go
 │   │   └── fsm/fsm.go
 │   ├── node/mount/bind.go
 │   ├── webhook/
@@ -61,6 +65,8 @@ ShiftPV/
     └── mobility/
         ├── README.md
         ├── run.sh
+        ├── recovery.sh
+        ├── preflight.sh
         └── manifests/
 ```
 
@@ -79,7 +85,10 @@ ShiftPV/
   guard가 만든 유효한 teardown permit이 없으면 거부한다.
 - `src/mobility/fsm`은 Kubernetes client에 의존하지 않는 phase/observation/decision
   규칙만 담당한다.
-- `src/mobility/controller`는 cluster 상태 관찰과 FSM action 실행만 담당한다.
+- `src/mobility/controller`는 cluster 관찰, 이동 FSM action 및 명시적 owner 복구 journal을
+  조정한다. `diagnostics.go`는 status 시간/메시지와 변화 기반 Event를 담당하고,
+  `recovery.go`는 복구 단계/권한 검증/placement, `recovery_resources.go`는 helper 종료와
+  filesystem 검증·보존 격리를 담당한다.
 - `src/mobility/admission`은 bound ShiftPV Pod의 owner pin 또는 Placement Hold mutation만
   담당한다.
 - `src/node/mount`는 bind mount/unmount와 target path 제한만 담당한다.

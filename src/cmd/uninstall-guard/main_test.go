@@ -93,26 +93,36 @@ func TestRunCancelsQuiesceWhenValidationRemovalFails(t *testing.T) {
 
 func TestRunWithRetryCompletesAfterBlockerIsRemoved(t *testing.T) {
 	client := uninstallClient()
-	client.Tracker().Add(&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data"}, Spec: corev1.PersistentVolumeSpec{
+	blocker := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data"}, Spec: corev1.PersistentVolumeSpec{
 		PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: uninstallcheck.DriverName, VolumeHandle: "volume"}},
-	}})
+	}}
+	if err := client.Tracker().Add(blocker); err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	client.PrependReactor("list", "persistentvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		checks++
+		if checks != 1 {
+			return false, nil, nil
+		}
+		// The first snapshot must contain the blocker. Remove it for the next
+		// attempt instead of racing a 20ms sleep against the 200ms ACK poll.
+		err := client.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("persistentvolumes"), "", blocker.Name)
+		return true, &corev1.PersistentVolumeList{Items: []corev1.PersistentVolume{*blocker.DeepCopy()}}, err
+	})
 	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
 	gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
 	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
 
-	removed := make(chan struct{})
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		_ = client.CoreV1().PersistentVolumes().Delete(context.Background(), "pv-data", metav1.DeleteOptions{})
-		close(removed)
-	}()
-	if err := runWithRetry(ctx, checker, store, "shiftpv-lifecycle", 200*time.Millisecond, time.Millisecond); err != nil {
+	if err := runWithRetry(ctx, checker, store, "shiftpv-lifecycle", time.Second, time.Millisecond); err != nil {
 		t.Fatalf("runWithRetry: %v", err)
 	}
-	<-removed
+	if checks < 2 {
+		t.Fatal("retry did not observe both blocked and clear snapshots")
+	}
 	if granted, err := store.Granted(context.Background()); err != nil || !granted {
 		t.Fatalf("Granted = %v, %v", granted, err)
 	}

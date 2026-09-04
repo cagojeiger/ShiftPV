@@ -5,6 +5,12 @@ metadata:
   labels:
     {{- include "shiftpv.labels" . | nindent 4 }}
 rules:
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "statefulsets"]
+    verbs: ["get"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["list"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "watch", "create", "delete", "patch"]
