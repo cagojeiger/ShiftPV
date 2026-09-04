@@ -39,6 +39,9 @@ storage topology를 다른 registered Pool로 이전해야 한다. Kubernetes CS
   전이이며 PV node affinity는 변경하지 않는다.
 - source는 commit 전, destination은 commit 후 authoritative다. source 장애나 상태
   불명은 staging copy 승격 근거가 아니다.
+- destination을 선택한 뒤에는 해당 Node가 Ready이고 Pool에 계속 등록되어 있을 때만
+  copy/promotion/commit을 전진시킨다. commit 후 destination이 일시적으로 unavailable이면
+  destination authority를 유지하고 source retire를 보류한 채 자동 재평가한다.
 - `MutablePVNodeAffinity`나 scheduler plugin은 요구하지 않는다.
 
 ## Consequences
@@ -64,4 +67,5 @@ eviction 이전의 판정은 [ADR 0009](0009-nondisruptive-mobility-preflight.md
 - 제품 admission, scheduler handoff, CSI retry, authenticated rsync와 dynamic owner CAS를
   `test/e2e/kind/mobility/`에서 검증했다. source-only selector는 authority를 보존한
   `Blocked`로 끝났고, 정상 이동은 `Copying`과 `Committing` 중 Controller를 강제
-  재시작해도 `Succeeded`로 수렴했다.
+  재시작해도 `Succeeded`로 수렴했다. 실제 Kind storage node 중단도 `Copying`,
+  `Promoting`, owner commit 이후 경계에서 authority를 보존하고 node 복귀 후 수렴했다.

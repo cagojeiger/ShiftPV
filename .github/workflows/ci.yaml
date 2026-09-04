@@ -272,7 +272,7 @@ jobs:
   kind-mobility-node-restart-e2e:
     name: kind-mobility-node-restart-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig

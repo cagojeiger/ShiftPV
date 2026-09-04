@@ -139,9 +139,11 @@ Blocked   -- reconcile --> Blocked
 | `WaitingForUnpublish` | source가 `publishedNodes`에서 제거됨 | `WaitingForReplacement` |
 | `WaitingForReplacement` | workload controller의 replacement Pod 존재 | Placement Release, `WaitingForDestination` |
 | `WaitingForDestination` | scheduler가 candidate node에 Pod 지정 | copy resources 생성, `Copying` |
+| `Copying` / `Promoting` / commit 전 `Committing` | 선택된 destination이 NotReady 또는 Pool 미등록 | 현재 phase와 source authority 유지, `DestinationUnavailable` 자동 대기 |
 | `Copying` | copy Job complete | promotion Job 생성, `Promoting` |
 | `Promoting` | promotion Job complete | owner CAS commit, `Committing` |
 | `Committing` | destination owner와 `Ready` read-back | `WaitingForDestinationPublish` |
+| `WaitingForDestinationPublish` / `CleaningSource` | authoritative destination이 NotReady 또는 Pool 미등록 | 현재 phase와 destination authority 유지, source retire 보류 |
 | `WaitingForDestinationPublish` | destination이 `publishedNodes`에 존재 | cleanup Job 생성, `CleaningSource` |
 | `CleaningSource` | source retire Job complete | transfer resource 정리, `Succeeded` |
 
@@ -293,8 +295,10 @@ copy/promotion/cleanup Job은 `activeDeadlineSeconds=300`, `backoffLimit=2`, 완
 2. verified staging을 promotion하기 전 owner를 바꾸지 않는다.
 3. owner CAS가 성공하기 전 destination CSI publish를 열지 않는다.
 4. destination publish가 확인되기 전 source를 retire하지 않는다.
-5. API/CR 상태가 불명확하면 publish와 promotion을 허용하지 않는다.
-6. Controller restart는 CR status와 helper resource 관찰로 같은 action에 수렴한다.
+5. 선택된 destination이 Ready이고 Pool에 등록된 상태를 다시 확인하기 전 commit 또는
+   source retire를 진행하지 않는다.
+6. API/CR 상태가 불명확하면 publish와 promotion을 허용하지 않는다.
+7. Controller restart는 CR status와 helper resource 관찰로 같은 action에 수렴한다.
 
 Kubernetes API 요청이 실제 반영된 뒤 응답만 timeout 또는 연결 단절로 유실될 수 있다.
 Controller는 이 경우 성공을 추측하지 않고 현재 phase를 유지한다. 다음 reconcile에서
@@ -310,7 +314,9 @@ NotFound와 이미 비어 있는 `activeMove`를 멱등 성공으로 처리한�
 FSM 그래프와 reconcile control loop는 닫혀 있다. 모든 알려진 phase는 허용된 transition과
 action을 반환하고 `Succeeded` 또는 `Blocked`는 안정적인 terminal self-loop다. kind 검증은
 두 terminal 결과와 `Copying`, `Promoting`, commit CAS 직후 `Committing` 중 Controller 강제
-재시작 수렴을 확인한다.
+재시작 수렴을 확인한다. 실제 Kind node 중단 검증은 copy 전 destination 상실을 안전하게
+Blocked 처리하고, `Copying`/`Promoting` 중 선택된 destination 상실과 commit 후 destination
+상실을 같은 phase에서 기다렸다 node 복귀 후 자동 수렴하는 것도 확인한다.
 
 종료 시간이 bounded라는 뜻은 아니다. workload controller가 replacement를 만들지 않거나
 scheduler가 constraint/resource 부족으로 결정을 내리지 못하거나 destination publish가

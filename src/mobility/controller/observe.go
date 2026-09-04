@@ -224,6 +224,14 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 			}
 		}
 	}
+	if result.DestinationNode != "" {
+		_, registered := poolNodes[result.DestinationNode]
+		destinationNode, destinationErr := r.Client.CoreV1().Nodes().Get(ctx, result.DestinationNode, metav1.GetOptions{})
+		if destinationErr != nil && !apierrors.IsNotFound(destinationErr) {
+			return result, fmt.Errorf("read selected destination Node %q: %w", result.DestinationNode, destinationErr)
+		}
+		result.FSM.DestinationUnavailable = destinationErr != nil || !registered || !nodeReady(destinationNode)
+	}
 	result.FSM.CopyComplete, result.FSM.CopyFailed, err = r.jobState(ctx, result.Names.CopyJob)
 	if err != nil {
 		return result, err

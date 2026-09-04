@@ -128,6 +128,26 @@ pause_before_copy() {
 	return 1
 }
 
+pause_at_phase() {
+	local expected_phase=$1 deadline=$((SECONDS + 300)) phase=""
+	while ((SECONDS < deadline)); do
+		phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [[ "${phase}" == "${expected_phase}" ]]; then
+			controller_down
+			phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')
+			test "${phase}" = "${expected_phase}"
+			return
+		fi
+		if [[ "${phase}" == Blocked || "${phase}" == Succeeded ]]; then
+			echo "Move reached terminal phase before ${expected_phase} node fault injection: ${phase}" >&2
+			return 1
+		fi
+		sleep 0.2
+	done
+	echo "Move did not reach ${expected_phase} before deadline; phase=${phase}" >&2
+	return 1
+}
+
 stop_node() {
 	local node=$1
 	docker stop -t 1 "${node}" >/dev/null
@@ -169,6 +189,44 @@ recover_source() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 }
 
+assert_destination_unavailable_wait() {
+	local expected_phase=$1 expected_owner=$2
+	kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.reason}'=DestinationUnavailable --timeout=180s
+	test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')" = "${expected_phase}"
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${expected_owner}"
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${MOVE_NAME}"
+	test -f "${WORKER_A_POOL}/volumes/${VOLUME_ID}/payload"
+	if [[ "${expected_owner}" == "${SOURCE_NODE}" ]]; then
+		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Moving
+	else
+		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
+	fi
+}
+
+finish_destination_move() {
+	local namespace=$1 pod checksum
+	kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=600s
+	kubectl -n "${namespace}" rollout status deployment/writer --timeout=180s
+	pod=$(kubectl -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
+	test "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
+	checksum=$(kubectl -n "${namespace}" exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')
+	test "${checksum}" = "${SOURCE_CHECKSUM}"
+	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
+	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
+	test ! -e "${WORKER_A_POOL}/volumes/${VOLUME_ID}"
+	test -f "${WORKER_B_POOL}/volumes/${VOLUME_ID}/payload"
+}
+
+cleanup_case() {
+	local namespace=$1
+	kubectl delete "namespace/${namespace}" --wait=true --timeout=180s
+	kubectl uncordon "${SOURCE_NODE}" >/dev/null 2>&1 || true
+	kubectl uncordon "${DESTINATION_NODE}" >/dev/null 2>&1 || true
+}
+
 run_case() {
 	local namespace=$1 payload=$2 stopped_node=$3 expected_reason=$4
 	TEST_NAMESPACE="${namespace}"
@@ -188,9 +246,48 @@ run_case() {
 	start_node "${stopped_node}"
 	recover_source "${namespace}"
 	echo "mobility node restart recovery passed: node=${stopped_node} reason=${expected_reason} volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"
-	kubectl delete "namespace/${namespace}" --wait=true --timeout=180s
-	kubectl uncordon "${SOURCE_NODE}" >/dev/null 2>&1 || true
-	kubectl uncordon "${DESTINATION_NODE}" >/dev/null 2>&1 || true
+	cleanup_case "${namespace}"
+}
+
+run_copying_source_restart_case() {
+	local namespace=$1 payload=$2
+	TEST_NAMESPACE="${namespace}"
+	create_source_workload "${namespace}" "${payload}"
+	kubectl cordon "${SOURCE_NODE}"
+	wait_for_move
+	pause_at_phase Copying
+	stop_node "${SOURCE_NODE}"
+	controller_up
+	assert_blocked_source_authority SourceUnavailable
+	start_node "${SOURCE_NODE}"
+	recover_source "${namespace}"
+	echo "mobility Copying source restart recovery passed: volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"
+	cleanup_case "${namespace}"
+}
+
+run_destination_restart_case() {
+	local namespace=$1 payload=$2 fault_phase=$3 expected_owner=$4
+	TEST_NAMESPACE="${namespace}"
+	create_source_workload "${namespace}" "${payload}"
+	kubectl cordon "${SOURCE_NODE}"
+	wait_for_move
+	pause_at_phase "${fault_phase}"
+	if [[ "${expected_owner}" == "${DESTINATION_NODE}" ]]; then
+		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
+	else
+		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
+	fi
+	stop_node "${DESTINATION_NODE}"
+	# The transaction is already past preflight. Uncordoning the source lets the
+	# controller run while the selected destination is unavailable; it does not
+	# change the persisted destination or volume authority.
+	kubectl uncordon "${SOURCE_NODE}"
+	controller_up
+	assert_destination_unavailable_wait "${fault_phase}" "${expected_owner}"
+	start_node "${DESTINATION_NODE}"
+	finish_destination_move "${namespace}"
+	echo "mobility ${fault_phase} destination restart continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"
+	cleanup_case "${namespace}"
 }
 
 # Keep each phase visible long enough to pause reconciliation before disk-side
@@ -204,5 +301,9 @@ helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 
 run_case shiftpv-node-restart-source 'ShiftPV source node restart recovery' "${SOURCE_NODE}" SourceUnavailable
 run_case shiftpv-node-restart-destination 'ShiftPV destination node restart recovery' "${DESTINATION_NODE}" InvalidDestination
+run_copying_source_restart_case shiftpv-node-restart-copying-source 'ShiftPV Copying source restart recovery'
+run_destination_restart_case shiftpv-node-restart-copying-destination 'ShiftPV Copying destination restart continuation' Copying "${SOURCE_NODE}"
+run_destination_restart_case shiftpv-node-restart-promoting-destination 'ShiftPV Promoting destination restart continuation' Promoting "${SOURCE_NODE}"
+run_destination_restart_case shiftpv-node-restart-committed-destination 'ShiftPV committed destination restart continuation' WaitingForDestinationPublish "${DESTINATION_NODE}"
 
 echo 'ShiftPV mobility node-container restart recovery passed'
