@@ -94,11 +94,23 @@ run_mobility_filesystem_faults() {
 		"${ROOT_DIR}/test/e2e/kind/mobility-filesystem-faults.sh"
 }
 
+run_mobility_node_restarts() {
+	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
+		WORKER_A_POOL="${WORKER_A_POOL}" WORKER_B_POOL="${WORKER_B_POOL}" \
+		"${ROOT_DIR}/test/e2e/kind/mobility-node-restarts.sh"
+}
+
 install_shiftpv true
 
 if [[ "${MOBILITY_FILESYSTEM_FAULTS_ONLY:-0}" == "1" ]]; then
 	run_mobility_filesystem_faults
 	echo "ShiftPV focused mobility filesystem fault E2E passed"
+	exit 0
+fi
+
+if [[ "${MOBILITY_NODE_RESTARTS_ONLY:-0}" == "1" ]]; then
+	run_mobility_node_restarts
+	echo "ShiftPV focused mobility node-container restart E2E passed"
 	exit 0
 fi
 

@@ -86,6 +86,19 @@ MOBILITY_FILESYSTEM_FAULTS_ONLY=1 \
   ./test/e2e/kind/run.sh
 ```
 
+이동 transaction 중 source 또는 destination Kind node container 중단과 source-owner
+복구만 재현할 때는 다음 focused mode를 사용한다.
+
+```bash
+MOBILITY_NODE_RESTARTS_ONLY=1 \
+  CLUSTER_NAME=shiftpv-mobility-node-restart-focused \
+  ./test/e2e/kind/run.sh
+```
+
+두 시나리오는 disk-side 작업 전 node를 실제로 stop해 `NotReady`를 관찰한다. commit 전
+source authority와 payload를 유지한 `Blocked`가 된 뒤 node를 다시 시작하고 명시적
+`ResumeOwner`로 동일 PVC UID, PV, owner와 checksum을 재개해야 한다.
+
 ## kind mobility E2E
 
 사전 점검 회귀는 `preflight.sh`에서 selector, required node affinity, taint, PDB 거부를
