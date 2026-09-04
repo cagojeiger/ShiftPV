@@ -49,6 +49,7 @@ type Observation struct {
 	ReplacementHeld        bool
 	DestinationScheduled   bool
 	DestinationBlocked     bool
+	DestinationUnavailable bool
 	CopyComplete           bool
 	CopyFailed             bool
 	PromotionComplete      bool
@@ -124,6 +125,9 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		}
 		return transition(current, PhaseCopying, ActionEnsureCopy, "")
 	case PhaseCopying:
+		if observation.DestinationUnavailable {
+			return transition(current, current, ActionWait, "DestinationUnavailable")
+		}
 		if observation.CopyFailed {
 			return blocked(current, reasonOr(observation.UnsafeReason, "CopyFailed")), nil
 		}
@@ -132,6 +136,9 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		}
 		return transition(current, current, ActionEnsureCopy, "")
 	case PhasePromoting:
+		if observation.DestinationUnavailable {
+			return transition(current, current, ActionWait, "DestinationUnavailable")
+		}
 		if observation.PromotionFailed {
 			return blocked(current, reasonOr(observation.UnsafeReason, "PromotionFailed")), nil
 		}
@@ -143,13 +150,22 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		if observation.OwnerCommitted {
 			return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
 		}
+		if observation.DestinationUnavailable {
+			return transition(current, current, ActionWait, "DestinationUnavailable")
+		}
 		return transition(current, current, ActionCommitOwner, "")
 	case PhaseWaitingForDestinationPublish:
+		if observation.DestinationUnavailable {
+			return transition(current, current, ActionWait, "DestinationUnavailable")
+		}
 		if !observation.PublishedOnDestination {
 			return transition(current, current, ActionWait, "")
 		}
 		return transition(current, PhaseCleaningSource, ActionEnsureCleanup, "")
 	case PhaseCleaningSource:
+		if observation.DestinationUnavailable {
+			return transition(current, current, ActionWait, "DestinationUnavailable")
+		}
 		if observation.CleanupFailed {
 			return blocked(current, reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
 		}

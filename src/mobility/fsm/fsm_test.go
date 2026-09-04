@@ -140,6 +140,38 @@ func TestCommittedOwnerSurvivesCommittingCrashWindow(t *testing.T) {
 	}
 }
 
+func TestUnavailableDestinationCannotAdvanceTransaction(t *testing.T) {
+	tests := []struct {
+		phase       Phase
+		observation Observation
+	}{
+		{PhaseCopying, Observation{SourceHealthy: true, DestinationUnavailable: true, CopyComplete: true}},
+		{PhasePromoting, Observation{SourceHealthy: true, DestinationUnavailable: true, PromotionComplete: true}},
+		{PhaseCommitting, Observation{SourceHealthy: true, DestinationUnavailable: true}},
+		{PhaseWaitingForDestinationPublish, Observation{DestinationUnavailable: true, PublishedOnDestination: true}},
+		{PhaseCleaningSource, Observation{DestinationUnavailable: true, CleanupComplete: true}},
+	}
+	for _, test := range tests {
+		decision, err := Decide(test.phase, test.observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decision.Next != test.phase || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
+			t.Errorf("phase %q decision = %#v", test.phase, decision)
+		}
+	}
+}
+
+func TestCommittedOwnerAdvancesOutOfCommittingEvenWhenDestinationIsUnavailable(t *testing.T) {
+	decision, err := Decide(PhaseCommitting, Observation{OwnerCommitted: true, DestinationUnavailable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Next != PhaseWaitingForDestinationPublish || decision.Action != ActionWait {
+		t.Fatalf("committed unavailable-destination decision = %#v", decision)
+	}
+}
+
 func TestBindingLossBlocksAfterOwnerCommit(t *testing.T) {
 	decision, err := Decide(PhaseWaitingForDestinationPublish, Observation{
 		OwnerCommitted:         true,

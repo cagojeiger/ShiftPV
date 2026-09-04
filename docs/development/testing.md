@@ -86,8 +86,9 @@ MOBILITY_FILESYSTEM_FAULTS_ONLY=1 \
   ./test/e2e/kind/run.sh
 ```
 
-이동 transaction 중 source 또는 destination Kind node container 중단과 source-owner
-복구만 재현할 때는 다음 focused mode를 사용한다.
+이동 transaction 중 source 또는 destination Kind node container 중단과 authority 보존,
+명시적 source-owner 복구 또는 destination 복귀 후 자동 재개만 재현할 때는 다음 focused
+mode를 사용한다.
 
 ```bash
 MOBILITY_NODE_RESTARTS_ONLY=1 \
@@ -95,9 +96,12 @@ MOBILITY_NODE_RESTARTS_ONLY=1 \
   ./test/e2e/kind/run.sh
 ```
 
-두 시나리오는 disk-side 작업 전 node를 실제로 stop해 `NotReady`를 관찰한다. commit 전
-source authority와 payload를 유지한 `Blocked`가 된 뒤 node를 다시 시작하고 명시적
-`ResumeOwner`로 동일 PVC UID, PV, owner와 checksum을 재개해야 한다.
+여섯 시나리오는 node를 실제로 stop해 `NotReady`를 관찰한다. copy 전 source/destination
+상실과 `Copying` 중 source 상실은 source authority와 payload를 유지한 `Blocked`가 된 뒤
+명시적 `ResumeOwner`로 복구한다. `Copying`/`Promoting` 중 선택된 destination 상실은
+source owner인 같은 phase에서 기다리고, commit 후 destination 상실은 destination owner인
+`WaitingForDestinationPublish`에서 source cleanup을 보류한다. 세 destination 대기 케이스는
+node 복귀 후 사용자 개입 없이 `Succeeded`로 수렴하며 동일 PVC UID, PV, checksum을 검증한다.
 
 ## kind mobility E2E
 

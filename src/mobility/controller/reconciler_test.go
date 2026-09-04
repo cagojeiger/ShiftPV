@@ -209,6 +209,29 @@ func TestObserveRecognizesOwnerCommitBeforeMovePhasePersistence(t *testing.T) {
 	}
 }
 
+func TestObserveMarksSelectedNotReadyDestinationUnavailable(t *testing.T) {
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	move := volumeapi.Move{
+		Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseCopying), ConsumerName: "consumer", DestinationNode: "destination"},
+	}
+	repository := &memoryRepository{
+		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name}},
+		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
+		moves:   []volumeapi.Move{move},
+	}
+	objects := mobilityObjects(volumeID)
+	objects[2].(*corev1.Node).Status.Conditions[0].Status = corev1.ConditionUnknown
+	reconciler := &Reconciler{Client: fake.NewSimpleClientset(objects...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	observed, err := reconciler.observe(context.Background(), move)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.FSM.DestinationUnavailable || observed.DestinationNode != "destination" {
+		t.Fatalf("destination observation = %#v", observed)
+	}
+}
+
 func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
