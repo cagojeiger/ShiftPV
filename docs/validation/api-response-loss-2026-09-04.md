@@ -85,4 +85,9 @@ Corrected local result:
   `5e5f6fbe9c6e6e15fec4d9f6bbad305a5d8a5ca18856b05949deca446d7398b1`;
 - the cluster was deleted and `kind get clusters` returned no cluster.
 
-The replacement PR CI run is recorded after completion.
+PR #15의 교체 실행
+[`33869367064`](https://github.com/cagojeiger/ShiftPV/actions/runs/33869367064)과 merge commit
+`98c4c3f`의 main 실행
+[`33871442400`](https://github.com/cagojeiger/ShiftPV/actions/runs/33871442400)은 각각 일곱
+job을 모두 통과했다. mobility E2E는 각각 25분 11초와 25분 2초였고 최종 payload SHA-256은
+두 실행 모두 `5e5f6fbe9c6e6e15fec4d9f6bbad305a5d8a5ca18856b05949deca446d7398b1`였다.

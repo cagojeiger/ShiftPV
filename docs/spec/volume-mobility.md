@@ -268,6 +268,15 @@ read-only rsync daemon이고 destination copy Job은 staging에 `rsync -a --dele
 뒤 checksum dry-run 결과가 비어 있는지 확인한다. promotion Job은 move marker와 device ID를
 검사한 뒤 같은 filesystem에서 `mv`로 final directory를 만든다.
 
+copy가 ENOSPC로 실패하면 staging에는 일부 파일이나 비어 있거나 불완전한
+`.shiftpv-move-id`가 남을 수 있다. marker의 존재만으로 copy 완료를 인정하지 않으며 그
+내용이 현재 Move 이름과 정확히 일치해야 promotion할 수 있다. copy 또는 promotion이
+실패한 동안 source가 authoritative하고 destination staging은 비권위 데이터다. 목적지
+filesystem의 용량·권한·read-only 원인을 해소한 뒤 `ResumeOwner`를 요청하면 source final을
+검증하고 남은 destination staging을 `.shiftpv/aborted/<move-name>-incoming`으로 rename한
+후 같은 source owner를 다시 연다. 복구는 staging을 재사용하거나 자동으로 owner를
+destination으로 바꾸지 않는다.
+
 owner commit은 expected `phase=Moving`, source owner와 `activeMove=<move>`를 전제로 하는
 status CAS다. phase와 owner를 destination/Ready로 바꿔도 `activeMove`는 유지한다.
 commit read-back 뒤 kubelet의 CSI retry가 destination publish를 기록해야 source cleanup을

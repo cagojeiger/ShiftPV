@@ -88,7 +88,19 @@ install_shiftpv() {
 	kubectl apply -f "${WORK_DIR}/pools.yaml"
 }
 
+run_mobility_filesystem_faults() {
+	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
+		WORKER_A_POOL="${WORKER_A_POOL}" WORKER_B_POOL="${WORKER_B_POOL}" \
+		"${ROOT_DIR}/test/e2e/kind/mobility-filesystem-faults.sh"
+}
+
 install_shiftpv true
+
+if [[ "${MOBILITY_FILESYSTEM_FAULTS_ONLY:-0}" == "1" ]]; then
+	run_mobility_filesystem_faults
+	echo "ShiftPV focused mobility filesystem fault E2E passed"
+	exit 0
+fi
 
 # Lifecycle admission is read-only. A direct dry-run DELETE must not mint an
 # uninstall permit even when no storage dependency exists.
@@ -282,6 +294,7 @@ kubectl delete pod shiftpv-coexistence --wait=true
 kubectl delete pvc shiftpv-coexistence --wait=true
 CLUSTER_NAME="${CLUSTER_NAME}" WORKER_B_POOL="${WORKER_B_POOL}" \
   "${ROOT_DIR}/test/e2e/kind/filesystem-faults.sh"
+run_mobility_filesystem_faults
 
 echo "ShiftPV kind e2e passed"
 echo "PV=${PV_NAME} volume=${VOLUME_ID} node=${OWNER_NODE} checksum=${CHECKSUM_AFTER} controller_restart=${CONTROLLER_UID_AFTER} node_restart=${NODE_UID_AFTER}"

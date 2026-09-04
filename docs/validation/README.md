@@ -15,6 +15,7 @@
 | [public-artifact-ci-2026-09-04.md](public-artifact-ci-2026-09-04.md) | 공개 chart package SHA-256과 image manifest digest 고정, 실제 Helm/PVC mount CI |
 | [operator-diagnostics-2026-09-04.md](operator-diagnostics-2026-09-04.md) | Move reason/message/진행 시각/Event, API 오류 복구와 실제 Blocked/Recovered/Succeeded 진단 |
 | [api-response-loss-2026-09-04.md](api-response-loss-2026-09-04.md) | Move/helper 생성, 상태 기록, owner CAS와 정리 요청의 반영 후 응답 유실 수렴 |
+| [mobility-filesystem-faults-2026-09-04.md](mobility-filesystem-faults-2026-09-04.md) | 실제 destination ENOSPC/read-only와 partial staging의 source-owner 복구 |
 
 검증 문서는 당시의 환경과 결과를 보존하는 snapshot이다. 현재 branch의 통과 여부는
 같은 테스트를 다시 실행하거나 해당 commit의 CI check로 판단한다.
