@@ -33,11 +33,16 @@ fi
 
 tag="chart/v${version}"
 if tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}" 2>/dev/null)"; then
-  if [[ "${tagged_commit}" != "${release_sha}" ]]; then
-    echo "::error::tag ${tag} already points to a different commit; bump the chart version before merging" >&2
+  if [[ "${tagged_commit}" == "${release_sha}" ]]; then
+    echo "::notice::tag ${tag} already points to this commit; resuming publication"
+  elif git diff --quiet "${tagged_commit}" "${release_sha}" -- charts/shiftpv; then
+    echo "::notice::charts/shiftpv did not change since ${tag}; skipping chart release"
+    echo 'should_release=false' >>"${github_output}"
+    exit 0
+  else
+    echo "::error::charts/shiftpv changed after ${tag}; bump the chart version before merging" >&2
     exit 1
   fi
-  echo "::notice::tag ${tag} already points to this commit; resuming publication"
 else
   echo "::notice::tag ${tag} does not exist; publishing the chart"
 fi

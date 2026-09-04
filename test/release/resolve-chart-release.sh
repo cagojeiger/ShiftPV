@@ -13,7 +13,6 @@ cp "${repo_root}/build/ci/resolve-chart-release.sh" "${fixture}/build/ci/"
 printf '%s\n' 'version: 0.0.9' >"${fixture}/charts/shiftpv/Chart.yaml"
 git -C "${fixture}" add build charts
 git -C "${fixture}" commit -qm base
-base_sha="$(git -C "${fixture}" rev-parse HEAD)"
 
 printf '%s\n' 'version: 0.1.0' >"${fixture}/charts/shiftpv/Chart.yaml"
 git -C "${fixture}" add charts
@@ -47,23 +46,40 @@ resume_output="${fixture}/resume-output"
 )
 [[ "$(sed -n 's/^should_release=//p' "${resume_output}")" == true ]]
 
-git -C "${fixture}" tag -d chart/v0.1.0 >/dev/null
-git -C "${fixture}" tag chart/v0.1.0 "${base_sha}"
+printf '%s\n' 'unrelated change' >"${fixture}/README.md"
+git -C "${fixture}" add README.md
+git -C "${fixture}" commit -qm unrelated
+unrelated_sha="$(git -C "${fixture}" rev-parse HEAD)"
+skip_output="${fixture}/skip-output"
+(
+  cd "${fixture}"
+  RELEASE_SHA="${unrelated_sha}" CURRENT_MAIN_SHA="${unrelated_sha}" GITHUB_OUTPUT="${skip_output}" \
+    build/ci/resolve-chart-release.sh
+)
+[[ "$(sed -n 's/^should_release=//p' "${skip_output}")" == false ]]
+
+printf '%s\n' 'changed chart' >"${fixture}/charts/shiftpv/README.md"
+git -C "${fixture}" add charts
+git -C "${fixture}" commit -qm changed-chart
+changed_chart_sha="$(git -C "${fixture}" rev-parse HEAD)"
 conflict_output="${fixture}/conflict-output"
 if (
   cd "${fixture}"
-  RELEASE_SHA="${release_sha}" CURRENT_MAIN_SHA="${release_sha}" GITHUB_OUTPUT="${conflict_output}" \
+  RELEASE_SHA="${changed_chart_sha}" CURRENT_MAIN_SHA="${changed_chart_sha}" GITHUB_OUTPUT="${conflict_output}" \
     build/ci/resolve-chart-release.sh
 ); then
-  echo "expected a chart tag on another commit to reject publication" >&2
+  echo "expected changed chart content without a version bump to reject publication" >&2
   exit 1
 fi
 
 printf '%s\n' 'version: 0.2.0-rc.1' >"${fixture}/charts/shiftpv/Chart.yaml"
+git -C "${fixture}" add charts/shiftpv/Chart.yaml
+git -C "${fixture}" commit -qm invalid-version
+invalid_sha="$(git -C "${fixture}" rev-parse HEAD)"
 invalid_output="${fixture}/invalid-output"
 if (
   cd "${fixture}"
-  RELEASE_SHA="${release_sha}" CURRENT_MAIN_SHA="${release_sha}" GITHUB_OUTPUT="${invalid_output}" \
+  RELEASE_SHA="${invalid_sha}" CURRENT_MAIN_SHA="${invalid_sha}" GITHUB_OUTPUT="${invalid_output}" \
     build/ci/resolve-chart-release.sh
 ); then
   echo "expected a non-numeric chart version to be rejected" >&2
