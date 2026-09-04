@@ -56,7 +56,7 @@ recover_source_only() {
 }
 
 recover_after_commit_failure() {
-	local return_move current_pod latest_checksum failed_job
+	local return_move current_pod latest_checksum failed_job destination_mount
 	# Real rename failure in source cleanup; the volume contents are untouched.
 	kubectl uncordon "${SOURCE_NODE}"
 	kubectl cordon "${DESTINATION_NODE}"
@@ -67,10 +67,11 @@ recover_after_commit_failure() {
 		sleep 1
 	done
 	test -n "${return_move}"
-	local fault_path="${DESTINATION_POOL}/.shiftpv/retired/${return_move}"
-	mkdir -p "${DESTINATION_POOL}/.shiftpv/retired"
-	test ! -e "${fault_path}"
-	touch "${fault_path}"
+	destination_mount=$(pool_mount_for_node "${DESTINATION_NODE}")
+	local fault_path="${destination_mount}/.shiftpv/retired/${return_move}"
+	docker exec "${DESTINATION_NODE}" mkdir -p -- "$(dirname "${fault_path}")"
+	docker exec "${DESTINATION_NODE}" test ! -e "${fault_path}"
+	docker exec "${DESTINATION_NODE}" touch -- "${fault_path}"
 	kubectl wait "shiftpvmove/${return_move}" --for=jsonpath='{.status.phase}'=Blocked --timeout=480s
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.spec.sourceNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.reason}')" = "CleanupFailed"
@@ -83,16 +84,16 @@ recover_after_commit_failure() {
 	kubectl -n shiftpv-mobility-test exec "${current_pod}" -- sh -ec 'printf "after owner commit\n" >> /data/payload'
 	latest_checksum=$(kubectl -n shiftpv-mobility-test exec "${current_pod}" -- sha256sum /data/payload | awk '{print $1}')
 	test "${latest_checksum}" != "${CHECKSUM_BEFORE}"
-	test -f "${fault_path}"
-	rm -- "${fault_path}"
+	docker exec "${DESTINATION_NODE}" test -f "${fault_path}"
+	docker exec "${DESTINATION_NODE}" rm -- "${fault_path}"
 	request_recovery "${return_move}"
 	restart_during_recovery "${return_move}"
 	test "$(kubectl -n shiftpv-mobility-test exec "${current_pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${latest_checksum}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	test -f "${DESTINATION_POOL}/.shiftpv/aborted/${return_move}-final/payload"
-	test ! -e "${DESTINATION_POOL}/volumes/${VOLUME_ID}"
+	docker exec "${DESTINATION_NODE}" test -f "${destination_mount}/.shiftpv/aborted/${return_move}-final/payload"
+	docker exec "${DESTINATION_NODE}" test ! -e "${destination_mount}/volumes/${VOLUME_ID}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 	kubectl uncordon "${DESTINATION_NODE}"
 	echo 'post-commit recovery passed: latest destination writes preserved; stale source quarantined'

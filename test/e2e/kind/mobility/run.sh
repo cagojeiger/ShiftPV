@@ -35,6 +35,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+pool_mount_for_node() {
+	case $1 in
+	"${CLUSTER_NAME}-worker")
+		echo /mnt/shiftpv
+		;;
+	"${CLUSTER_NAME}-worker2")
+		echo /srv/shiftpv-b
+		;;
+	*)
+		echo "unknown storage node: $1" >&2
+		return 1
+		;;
+	esac
+}
+
 assert_move_diagnostics() {
 	local move=$1 expected_phase=$2 expected_reason=$3 expected_event=$4
 	local phase reason message transition_time progress_time event_reasons="" deadline
@@ -131,10 +146,11 @@ for _ in {1..300}; do
 	BLOCKED_MOVE=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${BLOCKED_VOLUME}')].metadata.name}" 2>/dev/null || true)
 	if [[ -n "${BLOCKED_MOVE}" ]]; then
 		if [[ -z "${COPY_FAULT_PATH:-}" ]]; then
-			COPY_FAULT_PATH="${WORKER_B_POOL}/.shiftpv/incoming/${BLOCKED_MOVE}"
-			mkdir -p "${WORKER_B_POOL}/.shiftpv/incoming"
-			test ! -e "${COPY_FAULT_PATH}"
-			touch "${COPY_FAULT_PATH}"
+			COPY_FAULT_NODE="${CLUSTER_NAME}-worker2"
+			COPY_FAULT_PATH="$(pool_mount_for_node "${COPY_FAULT_NODE}")/.shiftpv/incoming/${BLOCKED_MOVE}"
+			docker exec "${COPY_FAULT_NODE}" mkdir -p -- "$(dirname "${COPY_FAULT_PATH}")"
+			docker exec "${COPY_FAULT_NODE}" test ! -e "${COPY_FAULT_PATH}"
+			docker exec "${COPY_FAULT_NODE}" touch -- "${COPY_FAULT_PATH}"
 		fi
 		BLOCKED_PHASE=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
 		[[ "${BLOCKED_PHASE}" == "Blocked" ]] && break
@@ -149,7 +165,7 @@ test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.owne
 test -f "${WORKER_A_POOL}/volumes/${BLOCKED_VOLUME}/payload"
 test ! -e "${WORKER_B_POOL}/volumes/${BLOCKED_VOLUME}"
 kubectl uncordon "${BLOCKED_SOURCE_NODE}"
-rm -- "${COPY_FAULT_PATH}"
+docker exec "${COPY_FAULT_NODE}" rm -- "${COPY_FAULT_PATH}"
 
 echo "ShiftPV blocked mobility E2E passed: volume=${BLOCKED_VOLUME} move=${BLOCKED_MOVE} reason=CopyFailed"
 recover_source_only
