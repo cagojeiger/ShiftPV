@@ -190,15 +190,19 @@ MOUNT_STATE=tmpfs_rw
 kubectl cordon "${SOURCE_NODE}"
 wait_for_move
 COPY_JOB=""
-for _ in {1..600}; do
+COPY_JOB_DEADLINE=$((SECONDS + 180))
+while ((SECONDS < COPY_JOB_DEADLINE)); do
 	COPY_JOB=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.copyJobName}' 2>/dev/null || true)
 	if [[ -n "${COPY_JOB}" ]] && kubectl -n shiftpv-system get "job/${COPY_JOB}" >/dev/null 2>&1; then
 		break
 	fi
-	sleep 0.1
+	sleep 0.2
 done
-test -n "${COPY_JOB}"
-kubectl -n shiftpv-system get "job/${COPY_JOB}" >/dev/null
+if [[ -z "${COPY_JOB}" ]] || ! kubectl -n shiftpv-system get "job/${COPY_JOB}" >/dev/null 2>&1; then
+	echo "copy Job was not created before the read-only test deadline: move=${MOVE_NAME} copyJobName=${COPY_JOB}" >&2
+	kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2 || true
+	exit 1
+fi
 controller_down
 kubectl -n shiftpv-system wait "job/${COPY_JOB}" --for=condition=complete --timeout=180s
 docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}/.shiftpv-move-id"

@@ -57,7 +57,11 @@ returns an I/O error. The product already validates exact marker content before
 promotion; the assertion was corrected to test that contract. A later harness
 race observed the durable `copyJobName` before the Job create in the same
 reconcile; it was corrected to wait for both status identity and Job existence
-before pausing the Controller. Neither finding required a product-code change.
+before pausing the Controller. PR CI then showed that a fixed polling-count
+budget could expire while the intentionally widened 10-second reconcile steps
+were still approaching `Copying`; the wait now uses a 180-second wall-clock
+deadline and requires both observations. None of these findings required a
+product-code change.
 
 ## Full-suite integration result
 
