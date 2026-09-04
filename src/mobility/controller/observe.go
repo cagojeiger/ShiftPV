@@ -104,6 +104,14 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		return result, fmt.Errorf("read PVC: %w", err)
 	}
 	result.Claim = claim
+	// Names can be reused after PVC/namespace deletion while Retain PVs and
+	// ShiftPVVolumes survive. Never associate that old volume with the new Pod.
+	if claim.UID == "" || claimRef.UID != claim.UID || claim.Spec.VolumeName != result.PV.Name ||
+		claim.DeletionTimestamp != nil || result.PV.DeletionTimestamp != nil {
+		result.FSM.UnsafeReason = "VolumeBindingMismatch"
+		result.FSM.SourceAuthorityInvalid = true
+		return result, nil
+	}
 	if state.OwnerNode != move.Spec.SourceNode && !result.FSM.OwnerCommitted {
 		result.FSM.UnsafeReason = "OwnerMismatch"
 		result.FSM.SourceAuthorityInvalid = true
@@ -115,6 +123,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	}
 	if namespace.Labels[admissionNamespaceLabel] != "enabled" {
 		result.FSM.UnsafeReason = "AdmissionNotEnabled"
+		result.FSM.PreflightDeferred = preEviction(move)
 		return result, nil
 	}
 
@@ -127,13 +136,15 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		if !podUsesClaim(pod, claim.Name) || terminalPod(pod) {
 			continue
 		}
-		if move.Status.ConsumerName != "" && pod.Name == move.Status.ConsumerName {
+		if move.Status.ConsumerName != "" && pod.Name == move.Status.ConsumerName &&
+			(move.Status.ConsumerUID == "" || string(pod.UID) == move.Status.ConsumerUID) {
 			result.Consumer = pod.DeepCopy()
 			continue
 		}
 		if move.Status.ConsumerName == "" && pod.Spec.NodeName == move.Spec.SourceNode {
 			if result.Consumer != nil {
 				result.FSM.UnsafeReason = "MultipleConsumers"
+				result.FSM.PreflightDeferred = preEviction(move)
 				return result, nil
 			}
 			result.Consumer = pod.DeepCopy()
@@ -146,7 +157,10 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 
 	sourceCordoned := sourceNode != nil && sourceNode.Spec.Unschedulable
 	preconditions := sourceHealthy && !result.FSM.SourceAuthorityInvalid && sourceCordoned && len(result.CandidateNodes) > 0 && result.Consumer != nil && metav1.GetControllerOf(result.Consumer) != nil
-	if !preconditions && result.FSM.UnsafeReason == "" {
+	// The original consumer is expected to disappear after eviction. Eligibility
+	// diagnostics must not mask CopyFailed/PromotionFailed/CleanupFailed later.
+	preflight := move.Status.Phase == "" || move.Status.Phase == string(fsm.PhasePending)
+	if preflight && !preconditions && result.FSM.UnsafeReason == "" {
 		switch {
 		case result.Consumer == nil:
 			result.FSM.UnsafeReason = "ControlledConsumerMissing"
@@ -159,6 +173,23 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		}
 	}
 	result.FSM.PreconditionsValid = preconditions
+	if preEviction(move) && result.Consumer != nil && sourceHealthy {
+		reason, err := r.preflight(ctx, &result)
+		if err != nil {
+			return result, err
+		}
+		if reason == "" && !preconditions {
+			reason = result.FSM.UnsafeReason
+			if reason == "" {
+				reason = "PreconditionFailed"
+			}
+		}
+		if reason != "" {
+			result.FSM.PreconditionsValid = false
+			result.FSM.PreflightDeferred = true
+			result.FSM.UnsafeReason = reason
+		}
+	}
 	result.FSM.VolumeLocked = state.Phase == volumeapi.PhaseMoving && state.ActiveMove == move.Name && state.OwnerNode == move.Spec.SourceNode
 	result.FSM.ConsumerExists = result.Consumer != nil
 	result.FSM.EvictionRequested = move.Status.EvictionRequested
@@ -166,7 +197,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	result.FSM.ReplacementExists = result.Replacement != nil
 	result.FSM.ReplacementHeld = result.Replacement != nil && hasPlacementHold(result.Replacement)
 
-	if result.Replacement != nil {
+	if result.Replacement != nil && !preEviction(move) {
 		if selected := result.Replacement.Spec.NodeSelector["kubernetes.io/hostname"]; selected != "" && !contains(result.CandidateNodes, selected) {
 			result.FSM.DestinationBlocked = true
 			result.FSM.UnsafeReason = "UnsupportedSchedulingConstraint"

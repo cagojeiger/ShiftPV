@@ -24,6 +24,8 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 - mobility admission의 owner pin, Placement Hold 멱등성, invalid state fail-closed
 - mobility FSM의 모든 phase closure, illegal transition과 action failure terminal 처리
 - Move/Volume status CAS와 Controller action 재실행 멱등성
+- Move의 표준 진단 message, phase/progress timestamp, 변화 기반 Event, API/action 오류 기록과
+  정상 reconcile 뒤 임시 오류 제거
 - uninstall guard의 PV/PVC/Volume/Move 검출, terminal Move 제외와 API 오류 fail-closed
 - uninstall quiesce 중 새 CreateVolume 거부, 진행 중 CreateVolume drain/acknowledgement,
   실패 rollback과 provisioning 재개
@@ -73,13 +75,22 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 
 ## kind mobility E2E
 
+사전 점검 회귀는 `preflight.sh`에서 selector, required node affinity, taint, PDB 거부를
+독립 실행한다. 같은 Pod UID/쓰기 가능/Ready volume/no Move를 확인하고, controller 재시작과
+PDB 제거 후 자동 이동까지 검사한다. controller unit test는 API 실패, UID 재사용,
+Pending/Locking/Evicting 재평가, 같은 이름의 replacement와 UID 조건부 eviction을 검증한다.
+
 ```bash
 ./test/e2e/kind/mobility/run.sh
 ```
 
 별도 2-worker cluster에서 제품 admission, reconciler, CSI publish guard와 rsync helper를 함께
-실행한다. source-only selector는 data promotion 없이 `Blocked`가 되고 source owner와
-payload가 유지되어야 한다. 정상 cordon 이동은 `Copying`과 `Committing` 중 Controller
+실행한다. source-only selector는 eviction 없이 Ready/기존 Pod를 유지해야 한다.
+실제 staging mkdir 실패는 `Blocked/CopyFailed` 뒤 source 복구를 검증한다.
+Move가 생성된 경로는 Reason/message와 transition/progress 시각을 노출하고, 같은 상태의
+polling이 진행 시각을 바꾸지 않으며, phase/reason/recovery 변화가 Kubernetes Event로
+남아야 한다.
+정상 cordon 이동은 `Copying`과 `Committing` 중 Controller
 Pod를 강제 교체해도 같은 Move가 `Succeeded`로 수렴해야 한다. PVC UID, PV, volume handle,
 checksum, destination final과 source retired directory도 검증한다. Controller가 생성한
 TLS Secret의 네 key, Service/CSIDriver owner reference, webhook `caBundle` 일치, restart 시
@@ -124,7 +135,7 @@ mount가 실패하고, mount와 target을 남기지 않으며 source를 보존�
 | `verify` | fast checks, 80% coverage gate와 coverage artifact |
 | `linux-mount` | 격리된 실제 mount namespace, bind mount와 권한 실패 정리 |
 | `kind-e2e` | pinned toolchain, image build와 전체 kind E2E; 실패 진단 artifact |
-| `kind-mobility-e2e` | automatic mobility의 Blocked/Succeeded와 Controller restart recovery |
+| `kind-mobility-e2e` | automatic mobility의 Blocked/Succeeded, Controller restart, 명시적 source/destination owner 복구 |
 | `kind-argocd-e2e` | Argo CD Application 삭제 허용, lifecycle admission 거부, 보존과 대기 후 수렴 |
 | `image-controller`, `image-node` | 독립 runtime image 빌드와 각 entrypoint smoke test |
 
@@ -168,3 +179,18 @@ commit의 CI 성공이 실제 이미지 배포를 trigger한다.
 
 CI의 특정 실행 결과가 해당 commit의 합격 증거다. [`validation/`](../validation/README.md)의
 문서는 재현 환경과 관찰 결과를 남기는 기록이며, 최신 commit의 CI 상태를 대신하지 않는다.
+
+## Published artifact smoke
+
+```bash
+./test/e2e/kind/artifact/run.sh
+```
+
+이 경로는 checkout에서 제품 이미지를 빌드하지 않는다. GitHub Pages의 chart package를
+`helm repo add`로 내려받아 SHA-256을 확인하고, controller/node의 multi-platform manifest
+digest를 포함한 image reference로 설치한다. 고정값은
+[`artifact/versions.env`](../../test/e2e/kind/artifact/versions.env)에 있으며 공개 artifact가
+실제로 존재한 뒤에만 갱신한다. mutable tag, 누락·중복 키와 잘못된 digest는 fast check에서
+거부한다. 이 smoke는 공개 배포물 연결을 확인하며 source 기반 장애·이동 회귀를 대체하지 않는다.
+외부 publication 상태가 PR merge gate를 흔들지 않도록 `artifact-smoke.yaml`의 수동 실행과
+매일 정기 실행으로 분리한다. PR CI는 같은 lock의 형식·불변성 규칙만 fast check로 검사한다.

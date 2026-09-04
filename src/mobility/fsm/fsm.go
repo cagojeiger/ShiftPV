@@ -37,6 +37,7 @@ const (
 
 type Observation struct {
 	PreconditionsValid     bool
+	PreflightDeferred      bool
 	UnsafeReason           string
 	SourceHealthy          bool
 	SourceAuthorityInvalid bool
@@ -77,11 +78,15 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 	if beforeCommit(current) && !observation.OwnerCommitted && !observation.SourceHealthy {
 		return blocked(current, reasonOr(observation.UnsafeReason, "SourceUnavailable")), nil
 	}
+	if observation.PreflightDeferred && (current == PhasePending || current == PhaseLocking ||
+		(current == PhaseEvicting && !observation.EvictionRequested)) {
+		return transition(current, current, ActionWait, observation.UnsafeReason)
+	}
 
 	switch current {
 	case PhasePending:
 		if !observation.PreconditionsValid {
-			return blocked(current, reasonOr(observation.UnsafeReason, "PreconditionFailed")), nil
+			return transition(current, current, ActionWait, reasonOr(observation.UnsafeReason, "PreconditionFailed"))
 		}
 		return transition(current, PhaseLocking, ActionLockVolume, "")
 	case PhaseLocking:
@@ -173,7 +178,7 @@ func ValidateTransition(from, to Phase) error {
 }
 
 var allowedTransitions = map[Phase][]Phase{
-	PhasePending:                      {PhaseLocking, PhaseBlocked},
+	PhasePending:                      {PhasePending, PhaseLocking, PhaseBlocked},
 	PhaseLocking:                      {PhaseLocking, PhaseEvicting, PhaseBlocked},
 	PhaseEvicting:                     {PhaseEvicting, PhaseWaitingForUnpublish, PhaseBlocked},
 	PhaseWaitingForUnpublish:          {PhaseWaitingForUnpublish, PhaseWaitingForReplacement, PhaseBlocked},

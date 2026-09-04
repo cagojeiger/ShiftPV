@@ -68,6 +68,53 @@ converged to the new CA. If the Secret is lost, the Controller recovers the old
 trust root from the current webhook configuration before switching certificates.
 These periods are fixed product contracts rather than chart values.
 
+### Recovery and CRD upgrades
+
+The source-tree controller checks live Pod and ReplicaSet/StatefulSet template
+constraints, destination taints/PV topology, and PDB allowance before locking or
+first eviction. A known-ineligible workload is left running and reevaluated;
+this does not reserve scheduler capacity or guarantee eventual scheduling.
+See the [preflight contract](../../docs/spec/volume-mobility.md#non-disruptive-preflight).
+The chart grants read-only `get` on ReplicaSets/StatefulSets and `list` on PDBs.
+Use a matching new controller build and apply the CRD including `consumerUID`;
+upgrade only with no active moves. Published older binaries do not gain this behavior
+from chart/RBAC changes alone.
+
+The source-tree controller supports explicit `ShiftPVMove.spec.recovery=ResumeOwner`
+on a Blocked move. It verifies and reopens the current owner; it never rolls a
+committed destination back to the stale source. See the
+[recovery contract and operating procedure](../../docs/spec/volume-mobility.md#explicit-owner-recovery).
+Use a matching controller/helper image when testing this source tree: changing a
+chart or CRD alone does not add recovery to an older published binary.
+
+Before upgrading an existing installation, apply the target chart's CRD schemas
+without deleting the existing CRDs, then upgrade the controller. For a local chart:
+
+```sh
+helm show crds ./charts/shiftpv | \
+  kubectl apply --server-side --field-manager=shiftpv-crds -f -
+```
+
+Helm's `crds/` installation path does not upgrade existing CRDs. Do not disable
+mobility or downgrade to a controller without recovery support while recovery is
+in progress; confirm `recoveryPhase=Recovered` and `activeMove` empty first.
+
+Inspect mobility without starting from Controller logs:
+
+```sh
+kubectl get shiftpvmoves
+kubectl get shiftpvmove <move-name> -o yaml
+kubectl get events -n default \
+  --field-selector involvedObject.kind=ShiftPVMove,involvedObject.name=<move-name>
+```
+
+`Reason`, `message`, `lastTransitionTime`, and `lastProgressTime` distinguish an
+automatically retried wait from a terminal `Blocked` move and show the next safe
+operator action. Events are emitted only after a phase, reason, or recovery status
+change; CR status remains the current source of truth. These timestamps do not
+trigger timeout rollback. Cluster-scoped Move events are stored in the `default`
+namespace by the Kubernetes Event API.
+
 Changing `mobility.enabled` from `true` to `false` stops the mobility reconciler
 but keeps the webhook Service, TLS Secret, HTTPS endpoint, and webhook
 configuration. The Controller makes that configuration inert with a match

@@ -49,3 +49,7 @@ The cluster and its temporary host directories are removed on exit. Set
 Argo CD Application deletion uses a separate cluster and entry point documented
 in [`argocd/README.md`](argocd/README.md). Its cluster name, kubeconfig, worker
 directory, and image tag do not overlap this suite.
+
+Published chart/image integration uses another independent cluster and the pinned
+lock documented in [`artifact/README.md`](artifact/README.md). It does not build
+product images from the checkout and does not replace this source E2E suite.

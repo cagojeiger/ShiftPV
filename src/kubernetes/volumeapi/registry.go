@@ -45,16 +45,20 @@ type Pool struct {
 type MoveSpec struct {
 	VolumeID   string
 	SourceNode string
+	Recovery   string
 }
 
 type MoveStatus struct {
 	Phase                string
 	Reason               string
 	Message              string
+	LastTransitionTime   string
+	LastProgressTime     string
 	PersistentVolumeName string
 	ClaimNamespace       string
 	ClaimName            string
 	ConsumerName         string
+	ConsumerUID          string
 	ReplacementName      string
 	DestinationNode      string
 	CandidateNodes       []string
@@ -62,6 +66,10 @@ type MoveStatus struct {
 	CopyJobName          string
 	PromotionJobName     string
 	CleanupJobName       string
+	RecoveryPhase        string
+	RecoveryOwner        string
+	RecoveryReason       string
+	RecoveryMessage      string
 }
 
 type Move struct {
@@ -152,6 +160,16 @@ func (r *Registry) CompareAndSetState(ctx context.Context, volumeID, expectedPha
 	return r.mutateState(ctx, volumeID, func(current State) (State, error) {
 		if current.Phase != expectedPhase || current.ActiveMove != expectedActiveMove || current.OwnerNode != expectedOwner {
 			return State{}, fmt.Errorf("%w: volume %q is phase=%q activeMove=%q owner=%q", ErrStateConflict, volumeID, current.Phase, current.ActiveMove, current.OwnerNode)
+		}
+		// Node publication is independently maintained by the CSI node service.
+		// A controller's earlier observation must not erase a concurrent publish/unpublish.
+		next.PublishedNodes = current.PublishedNodes
+		if next.Phase == PhaseReady {
+			for _, node := range current.PublishedNodes {
+				if node != next.OwnerNode {
+					return State{}, fmt.Errorf("%w: node %q is still published", ErrStateConflict, node)
+				}
+			}
 		}
 		return next, nil
 	})
@@ -378,11 +396,12 @@ func setState(object *unstructured.Unstructured, state State) {
 func moveFrom(object *unstructured.Unstructured) (Move, error) {
 	volumeID, _, _ := unstructured.NestedString(object.Object, "spec", "volumeID")
 	sourceNode, _, _ := unstructured.NestedString(object.Object, "spec", "sourceNode")
+	recovery, _, _ := unstructured.NestedString(object.Object, "spec", "recovery")
 	status, err := moveStatusFrom(object)
 	if err != nil {
 		return Move{}, err
 	}
-	return Move{Name: object.GetName(), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(), Spec: MoveSpec{VolumeID: volumeID, SourceNode: sourceNode}, Status: status}, nil
+	return Move{Name: object.GetName(), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(), Spec: MoveSpec{VolumeID: volumeID, SourceNode: sourceNode, Recovery: recovery}, Status: status}, nil
 }
 
 func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
@@ -397,21 +416,27 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 	evictionRequested, _, _ := unstructured.NestedBool(object.Object, "status", "evictionRequested")
 	return MoveStatus{
 		Phase: read("phase"), Reason: read("reason"), Message: read("message"),
+		LastTransitionTime: read("lastTransitionTime"), LastProgressTime: read("lastProgressTime"),
 		PersistentVolumeName: read("persistentVolumeName"), ClaimNamespace: read("persistentVolumeClaimNamespace"),
-		ClaimName: read("persistentVolumeClaimName"), ConsumerName: read("consumerName"), ReplacementName: read("replacementName"),
+		ClaimName: read("persistentVolumeClaimName"), ConsumerName: read("consumerName"), ConsumerUID: read("consumerUID"), ReplacementName: read("replacementName"),
 		DestinationNode: read("destinationNode"), CandidateNodes: candidates, EvictionRequested: evictionRequested,
 		CopyJobName: read("copyJobName"), PromotionJobName: read("promotionJobName"), CleanupJobName: read("cleanupJobName"),
+		RecoveryPhase: read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
+		RecoveryReason: read("recoveryReason"), RecoveryMessage: read("recoveryMessage"),
 	}, nil
 }
 
 func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 	object.Object["status"] = map[string]any{
 		"phase": status.Phase, "reason": status.Reason, "message": status.Message,
+		"lastTransitionTime": status.LastTransitionTime, "lastProgressTime": status.LastProgressTime,
 		"persistentVolumeName": status.PersistentVolumeName, "persistentVolumeClaimNamespace": status.ClaimNamespace,
-		"persistentVolumeClaimName": status.ClaimName, "consumerName": status.ConsumerName, "replacementName": status.ReplacementName,
+		"persistentVolumeClaimName": status.ClaimName, "consumerName": status.ConsumerName, "consumerUID": status.ConsumerUID, "replacementName": status.ReplacementName,
 		"destinationNode": status.DestinationNode, "candidateNodes": stringSliceToAny(status.CandidateNodes),
 		"evictionRequested": status.EvictionRequested, "copyJobName": status.CopyJobName,
 		"promotionJobName": status.PromotionJobName, "cleanupJobName": status.CleanupJobName,
+		"recoveryPhase": status.RecoveryPhase, "recoveryOwner": status.RecoveryOwner,
+		"recoveryReason": status.RecoveryReason, "recoveryMessage": status.RecoveryMessage,
 	}
 }
 

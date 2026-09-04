@@ -18,20 +18,35 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
+        - name: Reason
+          type: string
+          jsonPath: .status.reason
         - name: Source
           type: string
           jsonPath: .spec.sourceNode
+        - name: Recovery
+          type: string
+          jsonPath: .status.recoveryPhase
         - name: Destination
           type: string
           jsonPath: .status.destinationNode
+        - name: LastProgress
+          type: date
+          jsonPath: .status.lastProgressTime
       schema:
         openAPIV3Schema:
           type: object
           required: [spec]
+          x-kubernetes-validations:
+            - rule: '!has(self.spec.recovery) || (has(self.status) && has(self.status.phase) && self.status.phase == "Blocked")'
+              message: recovery may only be requested on a Blocked move
           properties:
             spec:
               type: object
               required: [volumeID, sourceNode]
+              x-kubernetes-validations:
+                - rule: '!has(oldSelf.recovery) || (has(self.recovery) && self.recovery == oldSelf.recovery)'
+                  message: recovery cannot be removed or changed once requested
               properties:
                 volumeID:
                   type: string
@@ -45,16 +60,34 @@ spec:
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: sourceNode is immutable
+                recovery:
+                  type: string
+                  enum: [ResumeOwner]
             status:
               type: object
               properties:
                 phase:
                   type: string
                   enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, Copying, Promoting, Committing, WaitingForDestinationPublish, CleaningSource, Blocked, Succeeded]
+                recoveryPhase:
+                  type: string
+                  enum: ['', Quiescing, Verifying, Retiring, Resuming, Completing, Recovered]
+                recoveryOwner:
+                  type: string
+                recoveryReason:
+                  type: string
+                recoveryMessage:
+                  type: string
                 reason:
                   type: string
                 message:
                   type: string
+                lastTransitionTime:
+                  type: string
+                  format: date-time
+                lastProgressTime:
+                  type: string
+                  format: date-time
                 persistentVolumeName:
                   type: string
                 persistentVolumeClaimNamespace:
@@ -64,6 +97,8 @@ spec:
                 destinationNode:
                   type: string
                 consumerName:
+                  type: string
+                consumerUID:
                   type: string
                 replacementName:
                   type: string

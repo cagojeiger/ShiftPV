@@ -6,6 +6,10 @@ CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-mobility-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 PHASE_TIMEOUT_SECONDS=${PHASE_TIMEOUT_SECONDS:-180}
+# shellcheck source=test/e2e/kind/mobility/recovery.sh
+source "${ROOT_DIR}/test/e2e/kind/mobility/recovery.sh"
+# shellcheck source=test/e2e/kind/mobility/preflight.sh
+source "${ROOT_DIR}/test/e2e/kind/mobility/preflight.sh"
 
 for command in docker kind kubectl helm sed; do
 	command -v "${command}" >/dev/null || {
@@ -30,6 +34,37 @@ cleanup() {
 	rm -rf -- "${WORK_DIR}"
 }
 trap cleanup EXIT
+
+assert_move_diagnostics() {
+	local move=$1 expected_phase=$2 expected_reason=$3 expected_event=$4
+	local phase reason message transition_time progress_time event_reasons="" deadline
+	phase=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.phase}')
+	reason=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.reason}')
+	message=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.message}')
+	transition_time=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.lastTransitionTime}')
+	progress_time=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.lastProgressTime}')
+	test "${phase}" = "${expected_phase}"
+	test "${reason}" = "${expected_reason}"
+	test -n "${message}"
+	[[ "${transition_time}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]
+	[[ "${progress_time}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]
+	if [[ "${expected_phase}" == Blocked ]]; then
+		grep -Fq 'operator action required' <<<"${message}"
+	else
+		grep -Eq 'automatic retry|no operator action is required' <<<"${message}"
+	fi
+	kubectl get "shiftpvmove/${move}" | sed -n '1p' | grep -q 'REASON.*LASTPROGRESS'
+	deadline=$((SECONDS + 60))
+	while ((SECONDS < deadline)); do
+		event_reasons=$(kubectl -n default get events \
+			--field-selector "involvedObject.kind=ShiftPVMove,involvedObject.name=${move}" \
+			-o jsonpath='{range .items[*]}{.reason}{"\n"}{end}' 2>/dev/null || true)
+		grep -Fxq "${expected_event}" <<<"${event_reasons}" && return
+		sleep 1
+	done
+	echo "missing ShiftPVMove event ${expected_event}; observed: ${event_reasons}" >&2
+	return 1
+}
 
 sed \
 	-e "s|__WORKER_A_POOL__|${WORKER_A_POOL}|g" \
@@ -77,36 +112,56 @@ kubectl -n shiftpv-system wait --for=condition=Ready pod \
 	-l app.kubernetes.io/instance=shiftpv --timeout=5m
 
 BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
+test_preflight
+# Real pre-commit copy failure retains the source recovery regression. The former
+# source-only selector is now rejected non-disruptively by preflight.
+kubectl cordon "${CLUSTER_NAME}-worker2"
 sed \
 	-e "s|__SOURCE_NODE__|${BLOCKED_SOURCE_NODE}|g" \
+	-e '/      nodeSelector:/,+1d' \
 	"${ROOT_DIR}/test/e2e/kind/mobility/manifests/blocked-workload.yaml.tpl" >"${WORK_DIR}/blocked-workload.yaml"
 kubectl apply -f "${WORK_DIR}/blocked-workload.yaml"
 kubectl -n shiftpv-mobility-blocked rollout status deployment/source-only --timeout=5m
 kubectl -n shiftpv-mobility-blocked wait --for=jsonpath='{.status.phase}'=Bound pvc/source-only --timeout=2m
 BLOCKED_PV=$(kubectl -n shiftpv-mobility-blocked get pvc source-only -o jsonpath='{.spec.volumeName}')
 BLOCKED_VOLUME=$(kubectl get "pv/${BLOCKED_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
+kubectl uncordon "${CLUSTER_NAME}-worker2"
 kubectl cordon "${BLOCKED_SOURCE_NODE}"
 for _ in {1..300}; do
 	BLOCKED_MOVE=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${BLOCKED_VOLUME}')].metadata.name}" 2>/dev/null || true)
 	if [[ -n "${BLOCKED_MOVE}" ]]; then
+		if [[ -z "${COPY_FAULT_PATH:-}" ]]; then
+			COPY_FAULT_PATH="${WORKER_B_POOL}/.shiftpv/incoming/${BLOCKED_MOVE}"
+			mkdir -p "${WORKER_B_POOL}/.shiftpv/incoming"
+			test ! -e "${COPY_FAULT_PATH}"
+			touch "${COPY_FAULT_PATH}"
+		fi
 		BLOCKED_PHASE=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
 		[[ "${BLOCKED_PHASE}" == "Blocked" ]] && break
 	fi
 	sleep 1
 done
 test "${BLOCKED_PHASE:-}" = "Blocked"
-test "$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.reason}')" = "UnsupportedSchedulingConstraint"
+test "$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.reason}')" = "CopyFailed"
+assert_move_diagnostics "${BLOCKED_MOVE}" Blocked CopyFailed CopyFailed
 test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.phase}')" = "Blocked"
 test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.ownerNode}')" = "${BLOCKED_SOURCE_NODE}"
 test -f "${WORKER_A_POOL}/volumes/${BLOCKED_VOLUME}/payload"
 test ! -e "${WORKER_B_POOL}/volumes/${BLOCKED_VOLUME}"
 kubectl uncordon "${BLOCKED_SOURCE_NODE}"
+rm -- "${COPY_FAULT_PATH}"
 
-echo "ShiftPV blocked mobility E2E passed: volume=${BLOCKED_VOLUME} move=${BLOCKED_MOVE} reason=UnsupportedSchedulingConstraint"
+echo "ShiftPV blocked mobility E2E passed: volume=${BLOCKED_VOLUME} move=${BLOCKED_MOVE} reason=CopyFailed"
+recover_source_only
 
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/mobility/manifests/wffc-workload.yaml"
 kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=5m
 kubectl -n shiftpv-mobility-test wait --for=jsonpath='{.status.phase}'=Bound pvc/wffc --timeout=2m
+# Recreate once on the owner so admission injects a hostname pin. That pin must
+# not be mistaken for a user constraint during the subsequent normal migration.
+kubectl -n shiftpv-mobility-test delete pod -l app=shiftpv-mobility-wffc --wait=true --timeout=120s
+kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=180s
+test "$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.annotations.shiftpv\.io/placement}')" = owner
 
 PVC_UID=$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.metadata.uid}')
 PV_NAME=$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.spec.volumeName}')
@@ -129,6 +184,12 @@ for _ in {1..120}; do
 	sleep 1
 done
 test -n "${MOVE_NAME}"
+
+if kubectl patch "shiftpvmove/${MOVE_NAME}" --type merge -p '{"spec":{"recovery":"ResumeOwner"}}' >"${WORK_DIR}/early-recovery.txt" 2>&1; then
+	echo 'recovery was accepted before the move was Blocked' >&2
+	exit 1
+fi
+grep -q 'recovery may only be requested on a Blocked move' "${WORK_DIR}/early-recovery.txt"
 
 restart_at_phase() {
 	local phase=$1
@@ -176,6 +237,7 @@ if [[ "${MOVE_PHASE}" != "Succeeded" ]]; then
 	kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2
 	exit 1
 fi
+assert_move_diagnostics "${MOVE_NAME}" Succeeded '' MobilitySucceeded
 
 kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=5m
 NEW_POD=$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.name}')
@@ -200,6 +262,9 @@ fi
 test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
 test -f "${SOURCE_POOL}/.shiftpv/retired/${MOVE_NAME}/payload"
 test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
+
+recover_after_commit_failure
+assert_retained_volumes_unchanged
 
 helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--namespace shiftpv-system \

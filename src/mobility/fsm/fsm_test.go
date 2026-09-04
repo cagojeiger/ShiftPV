@@ -160,7 +160,6 @@ func TestActionFailuresAndDestinationFailureBlock(t *testing.T) {
 		observation Observation
 		reason      string
 	}{
-		{PhasePending, Observation{SourceHealthy: true, UnsafeReason: "UnsupportedConsumer"}, "UnsupportedConsumer"},
 		{PhaseWaitingForDestination, Observation{SourceHealthy: true, DestinationBlocked: true}, "DestinationUnavailable"},
 		{PhaseCopying, Observation{SourceHealthy: true, CopyFailed: true}, "CopyFailed"},
 		{PhasePromoting, Observation{SourceHealthy: true, PromotionFailed: true}, "PromotionFailed"},
@@ -184,6 +183,7 @@ func TestWaitPathsStayInTheCurrentPhase(t *testing.T) {
 		observation Observation
 		action      Action
 	}{
+		{PhasePending, Observation{SourceHealthy: true, UnsafeReason: "UnsupportedConsumer"}, ActionWait},
 		{PhaseLocking, Observation{SourceHealthy: true}, ActionLockVolume},
 		{PhaseEvicting, Observation{SourceHealthy: true, ConsumerExists: true, EvictionRequested: true}, ActionWait},
 		{PhaseWaitingForUnpublish, Observation{SourceHealthy: true, PublishedOnSource: true}, ActionWait},

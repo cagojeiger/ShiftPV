@@ -16,10 +16,13 @@ import (
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
 	controllercsi "github.com/cagojeiger/ShiftPV/src/csi/controller"
@@ -147,7 +150,15 @@ func main() {
 	}
 	go func() { errCh <- certificateManager.Run(ctx) }()
 	if *mobilityEnabled {
-		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, Namespace: *namespace, HelperImage: *mobilityImage, Interval: *mobilityInterval}
+		eventScheme := runtime.NewScheme()
+		if err := corev1.AddToScheme(eventScheme); err != nil {
+			klog.Fatalf("register Kubernetes Event scheme: %v", err)
+		}
+		eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
+		defer eventBroadcaster.Shutdown()
+		eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
+		eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
+		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, Namespace: *namespace, HelperImage: *mobilityImage, Interval: *mobilityInterval, Recorder: eventRecorder}
 		go func() { errCh <- reconciler.Run(ctx) }()
 	}
 	mux := http.NewServeMux()

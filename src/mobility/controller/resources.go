@@ -204,16 +204,28 @@ mv "${source}" "${retired}"
 }
 
 func (r *Reconciler) ensureJob(ctx context.Context, name, nodeName string, names resourceNames, script string, env []corev1.EnvVar, extraMounts []corev1.VolumeMount, extraVolumes []corev1.Volume) error {
+	job, err := r.operationJob(ctx, name, nodeName, names, script, env, extraMounts, extraVolumes)
+	if err != nil {
+		return err
+	}
+	_, err = r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create mobility Job %q: %w", name, err)
+	}
+	return nil
+}
+
+func (r *Reconciler) operationJob(ctx context.Context, name, nodeName string, names resourceNames, script string, env []corev1.EnvVar, extraMounts []corev1.VolumeMount, extraVolumes []corev1.Volume) (*batchv1.Job, error) {
 	backoff := int32(2)
 	ttl := int32(600)
 	deadline := int64(300)
 	poolRoot, err := r.poolMountPath(ctx, nodeName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mounts := append([]corev1.VolumeMount{{Name: "pool", MountPath: "/pool"}}, extraMounts...)
 	volumes := append([]corev1.Volume{{Name: "pool", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: poolRoot, Type: hostPathTypePointer(corev1.HostPathDirectory)}}}}, extraVolumes...)
-	_, err = r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, &batchv1.Job{
+	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: r.Namespace, Labels: transferLabels(names)},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff, TTLSecondsAfterFinished: &ttl, ActiveDeadlineSeconds: &deadline,
@@ -226,11 +238,7 @@ func (r *Reconciler) ensureJob(ctx context.Context, name, nodeName string, names
 				},
 			},
 		},
-	}, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create mobility Job %q: %w", name, err)
-	}
-	return nil
+	}, nil
 }
 
 func (r *Reconciler) poolMountPath(ctx context.Context, nodeName string) (string, error) {

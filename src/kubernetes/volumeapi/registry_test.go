@@ -2,6 +2,7 @@ package volumeapi
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -11,6 +12,55 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
+
+func TestStateCASPreservesConcurrentNodePublication(t *testing.T) {
+	ctx := context.Background()
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{VolumeResource: "ShiftPVVolumeList"})
+	r := &Registry{Client: client}
+	id := "shiftpv-44444444444444444444444444444444"
+	if err := r.Ensure(ctx, id, "source"); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := r.Get(ctx, id)
+	if err := r.SetPublished(ctx, id, "source", true); err != nil {
+		t.Fatal(err)
+	}
+	stale.Phase, stale.ActiveMove = PhaseMoving, "move"
+	if err := r.CompareAndSetState(ctx, id, PhaseReady, "", "source", stale); err != nil {
+		t.Fatal(err)
+	}
+	live, _ := r.Get(ctx, id)
+	if !reflect.DeepEqual(live.PublishedNodes, []string{"source"}) {
+		t.Fatalf("publish lost: %+v", live)
+	}
+	stale.Phase, stale.OwnerNode = PhaseReady, "destination"
+	if err := r.CompareAndSetState(ctx, id, PhaseMoving, "move", "source", stale); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("foreign publication permitted commit: %v", err)
+	}
+	if err := r.SetPublished(ctx, id, "source", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CompareAndSetState(ctx, id, PhaseMoving, "move", "source", stale); err != nil {
+		t.Fatal(err)
+	}
+	live, _ = r.Get(ctx, id)
+	if len(live.PublishedNodes) != 0 {
+		t.Fatalf("unpublish lost: %+v", live)
+	}
+}
+
+func TestRecoveryFieldsRoundTrip(t *testing.T) {
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "move", "uid": "uid"},
+		"spec":     map[string]any{"volumeID": "volume", "sourceNode": "source", "recovery": "ResumeOwner"},
+	}}
+	status := MoveStatus{Phase: "Blocked", ConsumerUID: "consumer-uid", CandidateNodes: []string{}, LastTransitionTime: "2026-09-04T00:00:00Z", LastProgressTime: "2026-09-04T00:00:00Z", RecoveryPhase: "Quiescing", RecoveryOwner: "destination", RecoveryReason: "NodeNotReady", RecoveryMessage: "observe node"}
+	setMoveStatus(object, status)
+	move, err := moveFrom(object)
+	if err != nil || move.Spec.Recovery != "ResumeOwner" || !reflect.DeepEqual(move.Status, status) {
+		t.Fatalf("round trip: %+v %v", move, err)
+	}
+}
 
 func TestRegistryLifecycleAndPoolNodes(t *testing.T) {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{

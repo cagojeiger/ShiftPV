@@ -62,9 +62,10 @@ image-version-check:
 release-workflow-test:
 	./test/release/resolve-image-release.sh
 	./test/release/resolve-chart-release.sh
+	./test/release/validate-artifact-lock.sh
 
 shellcheck:
-	shellcheck build/ci/resolve-image-release.sh build/ci/resolve-chart-release.sh test/release/resolve-image-release.sh test/release/resolve-chart-release.sh test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility/run.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh
+	shellcheck build/ci/resolve-image-release.sh build/ci/resolve-chart-release.sh test/release/resolve-image-release.sh test/release/resolve-chart-release.sh test/release/validate-artifact-lock.sh test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh
 
 actionlint:
 	@if command -v actionlint >/dev/null 2>&1; then \

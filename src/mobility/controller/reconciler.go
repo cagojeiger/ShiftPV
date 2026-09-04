@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
@@ -37,6 +38,8 @@ type Reconciler struct {
 	Namespace   string
 	HelperImage string
 	Interval    time.Duration
+	Now         func() time.Time
+	Recorder    record.EventRecorder
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -75,6 +78,12 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	var reconcileErrors []error
 	for _, move := range moves {
 		phase := fsm.Phase(move.Status.Phase)
+		if phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase != recoveryRecovered {
+			if err := r.reconcileRecovery(ctx, move); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("recover move %s: %w", move.Name, err))
+			}
+			continue
+		}
 		if phase == fsm.PhaseSucceeded || phase == fsm.PhaseBlocked {
 			continue
 		}
@@ -96,6 +105,15 @@ func (r *Reconciler) discoverMoves(ctx context.Context) error {
 	}
 	activeByVolume := make(map[string]bool)
 	for _, move := range moves {
+		if move.Status.RecoveryPhase == recoveryRecovered {
+			continue
+		}
+		if move.Spec.Recovery == "ResumeOwner" && move.Status.Phase == string(fsm.PhaseBlocked) {
+			// The final Volume CAS can precede recovery status persistence. Do not
+			// discover a new transaction across that crash boundary on either owner.
+			activeByVolume[move.Spec.VolumeID] = true
+			continue
+		}
 		state, exists := volumes[move.Spec.VolumeID]
 		if move.Status.Phase != string(fsm.PhaseSucceeded) &&
 			(move.Status.Phase != string(fsm.PhaseBlocked) || (exists && state.OwnerNode == move.Spec.SourceNode)) {
@@ -122,14 +140,17 @@ func (r *Reconciler) discoverMoves(ctx context.Context) error {
 			return fmt.Errorf("preflight volume %s: %w", volumeID, err)
 		}
 		if !observed.FSM.PreconditionsValid {
+			klog.V(2).Infof("deferred ShiftPV mobility for volume %s: %s", volumeID, observed.FSM.UnsafeReason)
 			continue
 		}
 		move, err := r.Repository.CreateMove(ctx, moveGenerateName(volumeID), volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: state.OwnerNode})
 		if err != nil {
 			return err
 		}
+		previous := move.Status
 		move.Status.Phase = string(fsm.PhasePending)
-		if err := r.Repository.SetMoveStatus(ctx, move.Name, move.Status); err != nil {
+		move.Status.Message = mobilityMessage(fsm.PhasePending, "")
+		if err := r.persistMoveStatus(ctx, &move, previous); err != nil {
 			return err
 		}
 		activeByVolume[volumeID] = true
@@ -139,32 +160,27 @@ func (r *Reconciler) discoverMoves(ctx context.Context) error {
 }
 
 func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) error {
+	previous := move.Status
 	if move.Status.Phase == "" {
 		move.Status.Phase = string(fsm.PhasePending)
-		return r.Repository.SetMoveStatus(ctx, move.Name, move.Status)
+		move.Status.Message = mobilityMessage(fsm.PhasePending, "")
+		return r.persistMoveStatus(ctx, &move, previous)
 	}
 	observed, err := r.observe(ctx, move)
 	if err != nil {
-		return err
+		return r.recordMoveError(ctx, &move, previous, "ObservationFailed", "failed to observe Kubernetes state", err)
 	}
 	decision, err := fsm.Decide(fsm.Phase(move.Status.Phase), observed.FSM)
 	if err != nil {
-		return err
+		return r.recordMoveError(ctx, &move, previous, "ActionFailed", "failed to decide the next mobility action", err)
 	}
 	if err := r.execute(ctx, &move, observed, decision); err != nil {
-		return err
+		return r.recordMoveError(ctx, &move, previous, "ActionFailed", "failed to execute the current mobility action", err)
 	}
-	if move.Status.Phase != string(decision.Next) || decision.Reason != "" || decision.Action != fsm.ActionWait {
-		move.Status.Phase = string(decision.Next)
-		move.Status.Reason = decision.Reason
-		if decision.Next != fsm.PhaseBlocked {
-			move.Status.Message = ""
-		}
-		if err := r.Repository.SetMoveStatus(ctx, move.Name, move.Status); err != nil {
-			return err
-		}
-	}
-	return nil
+	move.Status.Phase = string(decision.Next)
+	move.Status.Reason = decision.Reason
+	move.Status.Message = mobilityMessage(decision.Next, decision.Reason)
+	return r.persistMoveStatus(ctx, &move, previous)
 }
 
 func (r *Reconciler) validate() error {
