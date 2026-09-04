@@ -24,6 +24,7 @@ type observation struct {
 	DestinationNode string
 	CandidateNodes  []string
 	Names           resourceNames
+	SourceCordoned  bool
 }
 
 func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observation, error) {
@@ -57,8 +58,19 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	_, sourceRegistered := poolNodes[move.Spec.SourceNode]
 	sourceHealthy := err == nil && nodeReady(sourceNode) && sourceRegistered
 	result.FSM.SourceHealthy = sourceHealthy
+	result.SourceCordoned = sourceNode != nil && sourceNode.Spec.Unschedulable
 	if !sourceHealthy {
 		result.FSM.UnsafeReason = "SourceUnavailable"
+	}
+	// Discovery and Node updates are not atomic. A Move may be created from a
+	// cordoned snapshot just after the source was uncordoned. Before any volume
+	// lock or helper action, prefer the current Node observation and let the
+	// reconciler remove that obsolete transaction even if its PVC is disappearing.
+	if move.Status.Phase == string(fsm.PhasePending) && sourceHealthy && !result.SourceCordoned &&
+		state.Phase == volumeapi.PhaseReady && state.ActiveMove == "" && state.OwnerNode == move.Spec.SourceNode {
+		result.FSM.PreflightDeferred = true
+		result.FSM.UnsafeReason = "SourceNotCordoned"
+		return result, nil
 	}
 
 	for nodeName := range poolNodes {
@@ -155,7 +167,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		}
 	}
 
-	sourceCordoned := sourceNode != nil && sourceNode.Spec.Unschedulable
+	sourceCordoned := result.SourceCordoned
 	preconditions := sourceHealthy && !result.FSM.SourceAuthorityInvalid && sourceCordoned && len(result.CandidateNodes) > 0 && result.Consumer != nil && metav1.GetControllerOf(result.Consumer) != nil
 	// The original consumer is expected to disappear after eviction. Eligibility
 	// diagnostics must not mask CopyFailed/PromotionFailed/CleanupFailed later.

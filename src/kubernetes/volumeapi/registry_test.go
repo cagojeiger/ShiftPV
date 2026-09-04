@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -212,6 +214,46 @@ func TestRegistryCreateMove(t *testing.T) {
 	}
 	if move.Name != "move-volume-abcde" || move.Spec.VolumeID != "volume" || move.Spec.SourceNode != "source" {
 		t.Fatalf("move = %#v", move)
+	}
+}
+
+func TestRegistryDeleteMoveUsesUIDPreconditionAndIsIdempotent(t *testing.T) {
+	move := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1",
+		"kind":       "ShiftPVMove",
+		"metadata":   map[string]any{"name": "move-test", "uid": "move-uid"},
+		"spec":       map[string]any{"volumeID": "volume", "sourceNode": "source"},
+	}}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", MoveResource: "ShiftPVMoveList",
+	}, move)
+	client.PrependReactor("delete", "shiftpvmoves", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deletion := action.(k8stesting.DeleteAction)
+		options := deletion.GetDeleteOptions()
+		if options.Preconditions == nil || options.Preconditions.UID == nil {
+			t.Fatal("Move deletion omitted the UID precondition")
+		}
+		if *options.Preconditions.UID == "wrong-uid" {
+			return true, nil, apierrors.NewConflict(MoveResource.GroupResource(), deletion.GetName(), errors.New("UID precondition failed"))
+		}
+		return false, nil, nil
+	})
+	registry := &Registry{Client: client}
+
+	if err := registry.DeleteMove(context.Background(), "move-test", "wrong-uid"); !apierrors.IsConflict(err) {
+		t.Fatalf("wrong UID deletion error = %v, want conflict", err)
+	}
+	if _, err := client.Resource(MoveResource).Get(context.Background(), "move-test", metav1.GetOptions{}); err != nil {
+		t.Fatalf("wrong UID deleted the Move: %v", err)
+	}
+	if err := registry.DeleteMove(context.Background(), "move-test", "move-uid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.DeleteMove(context.Background(), "move-test", "move-uid"); err != nil {
+		t.Fatalf("idempotent delete failed: %v", err)
+	}
+	if err := registry.DeleteMove(context.Background(), "", ""); err == nil {
+		t.Fatal("empty delete identity was accepted")
 	}
 }
 

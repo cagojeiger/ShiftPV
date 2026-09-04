@@ -18,8 +18,18 @@ import (
 type lostResponseRepository struct {
 	*memoryRepository
 	createMoveResponses int
+	deleteMoveResponses int
 	stateCASResponses   int
 	statusResponses     int
+}
+
+func (r *lostResponseRepository) DeleteMove(ctx context.Context, name, uid string) error {
+	err := r.memoryRepository.DeleteMove(ctx, name, uid)
+	if err == nil && r.deleteMoveResponses > 0 {
+		r.deleteMoveResponses--
+		return fmt.Errorf("API timeout after ShiftPVMove delete was accepted")
+	}
+	return err
 }
 
 func (r *lostResponseRepository) CreateMove(ctx context.Context, generateName string, spec volumeapi.MoveSpec) (volumeapi.Move, error) {
@@ -70,6 +80,38 @@ func TestMoveDiscoveryConvergesAfterCreateResponseLost(t *testing.T) {
 	}
 	if len(inner.moves) != 1 || inner.moves[0].Status.Phase != string(fsm.PhasePending) {
 		t.Fatalf("create retry did not converge without duplication: %#v", inner.moves)
+	}
+}
+
+func TestPendingMoveCancellationConvergesAfterDeleteResponseLost(t *testing.T) {
+	ctx := context.Background()
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	move := volumeapi.Move{
+		Name: "move-test", UID: "move-uid",
+		Spec:   volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)},
+	}
+	inner := &memoryRepository{
+		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source"}},
+		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
+		moves:   []volumeapi.Move{move},
+	}
+	repository := &lostResponseRepository{memoryRepository: inner, deleteMoveResponses: 1}
+	client := fake.NewSimpleClientset(readyNode("source", false), readyNode("destination", false))
+	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+
+	if err := reconciler.ReconcileAll(ctx); err == nil {
+		t.Fatal("lost obsolete Move delete response was hidden")
+	}
+	if len(inner.moves) != 0 {
+		t.Fatalf("accepted obsolete Move delete was not retained: %#v", inner.moves)
+	}
+	if err := reconciler.ReconcileAll(ctx); err != nil {
+		t.Fatalf("obsolete Move delete retry did not converge: %v", err)
+	}
+	state := inner.volumes[volumeID]
+	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || state.OwnerNode != "source" {
+		t.Fatalf("obsolete Move cancellation changed volume authority: %#v", state)
 	}
 }
 

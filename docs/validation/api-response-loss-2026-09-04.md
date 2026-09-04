@@ -55,3 +55,34 @@ The merge-commit baseline CI run
 [`33863353459`](https://github.com/cagojeiger/ShiftPV/actions/runs/33863353459) also completed with
 all seven jobs successful. No Home cluster, release, image, chart, tag, PR or merge was changed by
 this validation step.
+
+## PR CI finding
+
+PR #15's first mobility CI run exposed a separate discovery race after selector, affinity and
+taint preflight had passed. The source was uncordoned and the namespace was deleted, but a
+reconciliation that had just observed the previous cordon created a late Pending Move. The Move
+never locked the Ready volume or changed its source owner, then became `Blocked/VolumeBindingMissing`
+when the PVC disappeared. The success message alone was rejected; the uploaded full-resource
+artifact identified the unexpected Move and preserved Ready/empty-activeMove/source-owner state.
+
+The correction treats only an unstarted Move as obsolete when a current read proves all of these:
+the phase is Pending, the source is healthy and schedulable, and the Volume is Ready with no
+activeMove on that same source. The controller deletes that exact Move with a UID precondition.
+It does not unlock Moving state, cancel an eviction or change owner. A deterministic E2E case now
+creates this stale-discovery shape after binding removal and requires the Move to disappear while
+the retained Volume remains unchanged.
+
+Corrected local result:
+
+- UID-precondition registry tests, cancellation unit tests and all API response-loss tests passed
+  with `-race -count=10`;
+- `make verify`: exit 0, race coverage 84.4%, all static/unit/chart checks passed;
+- fresh cluster `shiftpv-obsolete-move-e2e` explicitly reproduced the stale Pending Move after
+  binding removal and printed `obsolete pre-lock Move cancellation passed`;
+- the same run completed every preflight, copy failure/recovery, three Controller restart and
+  post-commit cleanup failure/recovery scenario with exit 0;
+- final Pod and host payload SHA-256 remained
+  `5e5f6fbe9c6e6e15fec4d9f6bbad305a5d8a5ca18856b05949deca446d7398b1`;
+- the cluster was deleted and `kind get clusters` returned no cluster.
+
+The replacement PR CI run is recorded after completion.

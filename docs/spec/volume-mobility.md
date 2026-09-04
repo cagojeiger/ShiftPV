@@ -55,10 +55,14 @@ Retain PV와 Volume CR이 남아 있어도 `PV.claimRef.uid == PVC.uid`와
   여러 matching PDB도 보류한다. unhealthyPodEvictionPolicy의 예외를 예측하지 않는 보수적
   검사이며, 실제 eviction은 UID precondition을 붙여 Eviction API/PDB가 최종 결정한다.
 
-lock 전 불합격이면 Move를 생성하지 않고 Ready volume/기존 Pod를 유지한다. 이미 생성된
-Pending Move는 reason과 함께 재평가한다. lock 후 eviction 전에 조건이 바뀌면 Moving에서
-기존 Pod를 종료하지 않고 기다린다. 이때 기존 mount는 유지되지만 새 CSI publish는 닫혀
-있다. 요청 결과가 불명확한 eviction을 자동 취소했다고 가정해 unlock하지 않는다.
+lock 전 불합격이면 Move를 생성하지 않고 Ready volume/기존 Pod를 유지한다. discovery와
+Node 갱신은 원자적이지 않으므로 cordon 관찰 직후 source가 uncordon되면 아직 lock하지 않은
+Pending Move가 늦게 생성될 수 있다. 이 경우 current source가 healthy/schedulable이고 Volume이
+같은 source owner의 Ready/빈 activeMove임을 다시 확인한 뒤 Move UID precondition으로 해당
+transaction만 삭제한다. 그 밖의 이미 생성된 Pending Move는 reason과 함께 재평가한다. lock
+후 eviction 전에 조건이 바뀌면 Moving에서 기존 Pod를 종료하지 않고 기다린다. 이때 기존
+mount는 유지되지만 새 CSI publish는 닫혀 있다. 요청 결과가 불명확한 eviction을 자동
+취소했다고 가정해 unlock하지 않는다.
 
 `NoCompatibleDestination`, `DisruptionBudgetDenied` 등의 이유는 기존 Move.status.reason,
 discovery에서 건너뛴 경우 controller verbosity 2 로그로 확인한다. 후보가 추가되거나
@@ -127,6 +131,7 @@ Blocked   -- reconcile --> Blocked
 
 | Current phase | Required observation | Action and next phase |
 |---|---|---|
+| `Pending` | source가 다시 schedulable, Volume은 source owner의 Ready/미잠금 | UID 조건부 Move 삭제, Volume/Pod 유지 |
 | `Pending` | source healthy, supported consumer, candidate 존재 | volume CAS lock, `Locking` |
 | `Pending` / 최초 eviction 전 `Locking`, `Evicting` | preflight 보류 | 기존 phase 유지, 재평가; eviction 안 함 |
 | `Locking` | `Moving`, expected `activeMove`, source owner | Eviction API, `Evicting` |
