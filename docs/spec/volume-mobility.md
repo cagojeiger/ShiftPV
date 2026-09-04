@@ -55,10 +55,14 @@ Retain PV와 Volume CR이 남아 있어도 `PV.claimRef.uid == PVC.uid`와
   여러 matching PDB도 보류한다. unhealthyPodEvictionPolicy의 예외를 예측하지 않는 보수적
   검사이며, 실제 eviction은 UID precondition을 붙여 Eviction API/PDB가 최종 결정한다.
 
-lock 전 불합격이면 Move를 생성하지 않고 Ready volume/기존 Pod를 유지한다. 이미 생성된
-Pending Move는 reason과 함께 재평가한다. lock 후 eviction 전에 조건이 바뀌면 Moving에서
-기존 Pod를 종료하지 않고 기다린다. 이때 기존 mount는 유지되지만 새 CSI publish는 닫혀
-있다. 요청 결과가 불명확한 eviction을 자동 취소했다고 가정해 unlock하지 않는다.
+lock 전 불합격이면 Move를 생성하지 않고 Ready volume/기존 Pod를 유지한다. discovery와
+Node 갱신은 원자적이지 않으므로 cordon 관찰 직후 source가 uncordon되면 아직 lock하지 않은
+Pending Move가 늦게 생성될 수 있다. 이 경우 current source가 healthy/schedulable이고 Volume이
+같은 source owner의 Ready/빈 activeMove임을 다시 확인한 뒤 Move UID precondition으로 해당
+transaction만 삭제한다. 그 밖의 이미 생성된 Pending Move는 reason과 함께 재평가한다. lock
+후 eviction 전에 조건이 바뀌면 Moving에서 기존 Pod를 종료하지 않고 기다린다. 이때 기존
+mount는 유지되지만 새 CSI publish는 닫혀 있다. 요청 결과가 불명확한 eviction을 자동
+취소했다고 가정해 unlock하지 않는다.
 
 `NoCompatibleDestination`, `DisruptionBudgetDenied` 등의 이유는 기존 Move.status.reason,
 discovery에서 건너뛴 경우 controller verbosity 2 로그로 확인한다. 후보가 추가되거나
@@ -127,6 +131,7 @@ Blocked   -- reconcile --> Blocked
 
 | Current phase | Required observation | Action and next phase |
 |---|---|---|
+| `Pending` | source가 다시 schedulable, Volume은 source owner의 Ready/미잠금 | UID 조건부 Move 삭제, Volume/Pod 유지 |
 | `Pending` | source healthy, supported consumer, candidate 존재 | volume CAS lock, `Locking` |
 | `Pending` / 최초 eviction 전 `Locking`, `Evicting` | preflight 보류 | 기존 phase 유지, 재평가; eviction 안 함 |
 | `Locking` | `Moving`, expected `activeMove`, source owner | Eviction API, `Evicting` |
@@ -281,6 +286,15 @@ copy/promotion/cleanup Job은 `activeDeadlineSeconds=300`, `backoffLimit=2`, 완
 4. destination publish가 확인되기 전 source를 retire하지 않는다.
 5. API/CR 상태가 불명확하면 publish와 promotion을 허용하지 않는다.
 6. Controller restart는 CR status와 helper resource 관찰로 같은 action에 수렴한다.
+
+Kubernetes API 요청이 실제 반영된 뒤 응답만 timeout 또는 연결 단절로 유실될 수 있다.
+Controller는 이 경우 성공을 추측하지 않고 현재 phase를 유지한다. 다음 reconcile에서
+결정적 이름의 Move/helper resource, Move status와 Volume CAS 결과를 다시 읽어 이미 반영된
+action은 재사용하고 반영되지 않은 action만 재시도한다. 특히 destination과 copy Job 이름을
+Move status에 먼저 기록하기 전에는 copy resource를 시작하지 않는다. owner commit 응답이
+유실되어도 `Ready`, destination owner, 같은 `activeMove`의 세 값이 모두 관찰되어야
+commit 완료로 인정한다. 성공 정리 중 delete 또는 `activeMove` 해제 응답이 유실되면
+NotFound와 이미 비어 있는 `activeMove`를 멱등 성공으로 처리한다.
 
 ## Closure and limits
 

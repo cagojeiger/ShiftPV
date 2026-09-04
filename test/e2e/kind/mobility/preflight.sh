@@ -30,6 +30,31 @@ assert_preflight_preserves_consumer() {
 	echo "preflight ${scenario} passed: same Pod UID=${uid}, Ready volume=${volume}, no move, data writable"
 }
 
+assert_obsolete_pending_move_cancelled() {
+	local volume=$1 source=$2 move deadline
+	move="obsolete-${volume#shiftpv-}"
+	deadline=$((SECONDS + 60))
+	kubectl create -f - <<EOF
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVMove
+metadata:
+  name: ${move}
+spec:
+  volumeID: ${volume}
+  sourceNode: ${source}
+EOF
+	while ((SECONDS < deadline)); do
+		if ! kubectl get "shiftpvmove/${move}" >/dev/null 2>&1; then
+			assert_retained_volumes_unchanged
+			echo "obsolete pre-lock Move cancellation passed: volume=${volume} source=${source}"
+			return
+		fi
+		sleep 1
+	done
+	echo "obsolete pre-lock Move was not cancelled: ${move}" >&2
+	return 1
+}
+
 test_preflight() {
 	local scenario pod uid pv volume checksum patch controller_pod move
 	for scenario in selector affinity taint pdb; do
@@ -92,5 +117,8 @@ test_preflight() {
 		PREFLIGHT_RETAINED_VOLUMES+=("${volume}")
 		PREFLIGHT_EXPECTED_MOVES+=("${move}")
 		assert_retained_volumes_unchanged
+		if [[ "${scenario}" == taint ]]; then
+			assert_obsolete_pending_move_cancelled "${volume}" "${CLUSTER_NAME}-worker"
+		fi
 	done
 }

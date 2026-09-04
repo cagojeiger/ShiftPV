@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
 )
@@ -280,6 +281,23 @@ func (r *Registry) CreateMove(ctx context.Context, generateName string, spec Mov
 		return Move{}, fmt.Errorf("create ShiftPVMove: %w", err)
 	}
 	return moveFrom(object)
+}
+
+func (r *Registry) DeleteMove(ctx context.Context, name, uid string) error {
+	if err := r.validate(); err != nil {
+		return err
+	}
+	if name == "" || uid == "" {
+		return fmt.Errorf("ShiftPVMove name and UID are required for deletion")
+	}
+	precondition := types.UID(uid)
+	err := r.Client.Resource(MoveResource).Delete(ctx, name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &precondition},
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete ShiftPVMove: %w", err)
+	}
+	return nil
 }
 
 func (r *Registry) GetMove(ctx context.Context, name string) (Move, error) {

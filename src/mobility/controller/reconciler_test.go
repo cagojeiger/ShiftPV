@@ -55,6 +55,19 @@ func (m *memoryRepository) CreateMove(_ context.Context, _ string, spec volumeap
 	m.moves = append(m.moves, move)
 	return move, nil
 }
+func (m *memoryRepository) DeleteMove(_ context.Context, name, uid string) error {
+	for index := range m.moves {
+		if m.moves[index].Name != name {
+			continue
+		}
+		if string(m.moves[index].UID) != uid {
+			return volumeapi.ErrStateConflict
+		}
+		m.moves = append(m.moves[:index], m.moves[index+1:]...)
+		return nil
+	}
+	return nil
+}
 func (m *memoryRepository) ListMoves(context.Context) ([]volumeapi.Move, error) { return m.moves, nil }
 func (m *memoryRepository) SetMoveStatus(_ context.Context, name string, status volumeapi.MoveStatus) error {
 	for index := range m.moves {
@@ -142,6 +155,36 @@ func TestBindingLossAfterLockBlocksWithoutPanic(t *testing.T) {
 	}
 	if repository.volumes[volumeID].Phase != volumeapi.PhaseBlocked {
 		t.Fatalf("volume = %#v", repository.volumes[volumeID])
+	}
+}
+
+func TestPendingMoveIsCancelledWhenSourceWasUncordonedBeforeLock(t *testing.T) {
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	move := volumeapi.Move{
+		Name: "move-test", UID: "move-uid",
+		Spec:   volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)},
+	}
+	repository := &memoryRepository{
+		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source"}},
+		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
+		moves:   []volumeapi.Move{move},
+	}
+	// The binding has already disappeared with its namespace. Since the source
+	// is now schedulable and no lock was taken, this is an obsolete discovery
+	// transaction rather than a VolumeBindingMissing safety failure.
+	client := fake.NewSimpleClientset(readyNode("source", false), readyNode("destination", false))
+	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.moves) != 0 {
+		t.Fatalf("obsolete pre-lock move remained: %#v", repository.moves)
+	}
+	state := repository.volumes[volumeID]
+	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || state.OwnerNode != "source" {
+		t.Fatalf("obsolete move cancellation changed volume authority: %#v", state)
 	}
 }
 
