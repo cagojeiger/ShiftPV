@@ -167,6 +167,22 @@ func TestUnavailableDestinationCannotAdvanceTransaction(t *testing.T) {
 	}
 }
 
+func TestSelectedUnavailableDestinationWaitsBeforeCapacityProbe(t *testing.T) {
+	decision, err := Decide(PhaseWaitingForDestination, Observation{
+		SourceHealthy:          true,
+		ReplacementExists:      true,
+		ReplacementHeld:        true,
+		DestinationScheduled:   true,
+		DestinationUnavailable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Next != PhaseWaitingForCapacity || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
+		t.Fatalf("selected unavailable-destination decision = %#v", decision)
+	}
+}
+
 func TestCommittedOwnerWaitsToReleaseWhileDestinationIsUnavailable(t *testing.T) {
 	decision, err := Decide(PhaseCommitting, Observation{OwnerCommitted: true, DestinationUnavailable: true})
 	if err != nil {

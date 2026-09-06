@@ -325,7 +325,7 @@ run_pre_copy_destination_restart_case() {
 	# Let the controller run on the source and wait without releasing the workload.
 	kubectl uncordon "${SOURCE_NODE}"
 	controller_up
-	assert_destination_unavailable_wait Copying "${SOURCE_NODE}"
+	assert_destination_unavailable_wait WaitingForCapacity "${SOURCE_NODE}"
 	start_node "${DESTINATION_NODE}"
 	finish_destination_move "${namespace}"
 	echo "mobility pre-copy destination restart continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"

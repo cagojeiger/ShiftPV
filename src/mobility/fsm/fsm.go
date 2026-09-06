@@ -137,6 +137,9 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		if !observation.DestinationScheduled {
 			return transition(current, current, ActionEnsurePlacement, "")
 		}
+		if observation.DestinationUnavailable {
+			return transition(current, PhaseWaitingForCapacity, ActionWait, "DestinationUnavailable")
+		}
 		return transition(current, PhaseWaitingForCapacity, ActionEnsureCapacity, "")
 	case PhaseWaitingForCapacity:
 		if observation.DestinationUnavailable {
