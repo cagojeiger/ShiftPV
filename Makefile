@@ -119,3 +119,11 @@ helm-template:
 		printf '%s\n' "$$disabled" | grep -q -- '--mobility-enabled=false'; \
 		printf '%s\n' "$$disabled" | grep -q -- '--webhook-listen-address=:9443'; \
 		! printf '%s\n' "$$disabled" | grep -q -- '--mobility-helper-image='
+	@set -e; kubelet_root=/var/snap/microk8s/common/var/lib/kubelet; \
+		microk8s="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
+			--set node.kubeletRootDir=$$kubelet_root)"; \
+		printf '%s\n' "$$microk8s" | grep -q -- "--target-root=$$kubelet_root/pods"; \
+		printf '%s\n' "$$microk8s" | grep -q -- "--kubelet-registration-path=$$kubelet_root/plugins/csi.shiftpv.io/csi.sock"; \
+		printf '%s\n' "$$microk8s" | grep -q "path: $$kubelet_root/plugins/csi.shiftpv.io"; \
+		printf '%s\n' "$$microk8s" | grep -q "path: $$kubelet_root/plugins_registry"; \
+		printf '%s\n' "$$microk8s" | grep -q "path: $$kubelet_root/pods"

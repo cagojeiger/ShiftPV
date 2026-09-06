@@ -56,6 +56,11 @@ helm install shiftpv shiftpv/shiftpv \
   --namespace shiftpv-system --create-namespace
 ```
 
+The default kubelet state root is `/var/lib/kubelet`. MicroK8s installations
+normally require
+`--set node.kubeletRootDir=/var/snap/microk8s/common/var/lib/kubelet`; see the
+[chart deployment contract](charts/shiftpv/README.md#kubelet-state-root).
+
 The chart does not register storage paths. After installation, create one
 `ShiftPVPool` for each participating node using an already-mounted writable
 host path. The chart version and the controller/node image versions are released

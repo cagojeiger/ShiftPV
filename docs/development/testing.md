@@ -36,6 +36,8 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 - admission 인증서의 최초 생성, 멱등 reconcile, serving/CA 갱신, Secret 삭제 복구,
   dual-CA 전환 중 API 실패, unmanaged resource 거부, hot reload와 mobility 비활성화/
   재활성화 정책 전환, owner UID 검증과 uninstall 중 validation 재생성 차단
+- MicroK8s kubelet root override가 plugin socket, registration과 Pod target host path 전체에
+  일관되게 렌더링되는지 확인
 - CSI capability 광고 범위와 Markdown 내부 링크
 
 ## kind E2E
