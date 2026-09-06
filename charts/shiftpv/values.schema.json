@@ -33,7 +33,11 @@
       "type": "object",
       "required": ["kubeletRootDir", "image"],
       "properties": {
-        "kubeletRootDir": {"type": "string", "pattern": "^/"},
+        "kubeletRootDir": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Host kubelet state root shared by every selected Node Plugin node"
+        },
         "logLevel": {"type": "integer", "minimum": 0},
         "image": {
           "type": "object",

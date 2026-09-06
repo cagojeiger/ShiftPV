@@ -27,6 +27,30 @@ testing an unpublished build.
 Published chart packages are gated until both default component image tags expose
 `linux/amd64` and `linux/arm64` manifests.
 
+### Kubelet state root
+
+`node.kubeletRootDir` must match the kubelet state root on every node selected by
+the Node Plugin DaemonSet. The value controls the CSI plugin socket,
+`plugins_registry`, and Pod volume target host paths. A mismatch can leave the CSI
+workloads Ready while application Pods remain in `FailedMount` because kubelet and
+the Node Plugin are operating on different directories.
+
+The chart default is the conventional `/var/lib/kubelet`. MicroK8s normally uses
+`/var/snap/microk8s/common/var/lib/kubelet`, so install it with an explicit value:
+
+```bash
+helm install shiftpv shiftpv/shiftpv \
+  --namespace shiftpv-system --create-namespace \
+  --set node.kubeletRootDir=/var/snap/microk8s/common/var/lib/kubelet \
+  --wait
+```
+
+For an existing release, pass the same value to `helm upgrade`. The DaemonSet
+rollout is sufficient; a Pending Pod recovers on kubelet's normal mount retry once
+the Node Plugin uses the correct root. One release has one kubelet root. Standardize
+the root or exclude inconsistent nodes with `node.nodeSelector`; a single ShiftPV
+release cannot manage mixed kubelet roots.
+
 After installation, explicitly register one `ShiftPVPool` for every participating
 node before provisioning volumes. `spec.mountPath` is the runtime authority used
 by provisioning helpers, mobility Jobs, and the node plugin on that node.
@@ -98,7 +122,7 @@ committed destination back to the stale source. See the
 Use a matching controller/helper image when testing this source tree: changing a
 chart or CRD alone does not add recovery to an older published binary.
 
-### Upgrade from chart 0.1.3
+### Upgrade from chart 0.1.3 or earlier
 
 The capacity contract makes `ShiftPVPool.spec.capacity.limit` required. Upgrade
 in this order so the new controller never observes the old Pool shape:

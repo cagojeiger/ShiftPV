@@ -18,6 +18,8 @@ mobility:
   helperImage: ghcr.io/cagojeiger/shiftpv-controller:0.1.5
 
 node:
+  # This must match the kubelet state root on every selected node.
+  # MicroK8s uses /var/snap/microk8s/common/var/lib/kubelet by default.
   kubeletRootDir: /var/lib/kubelet
   logLevel: 2
   image:

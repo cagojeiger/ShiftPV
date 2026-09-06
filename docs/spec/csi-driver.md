@@ -24,12 +24,19 @@ Node Plugin DaemonSet (participating worker마다 1개)
 |------|----|
 | driver name | `csi.shiftpv.io` |
 | controller socket | `/run/csi/csi.sock` |
-| node socket | `/var/lib/kubelet/plugins/csi.shiftpv.io/csi.sock` |
+| node socket | `<node.kubeletRootDir>/plugins/csi.shiftpv.io/csi.sock` |
 | topology key | `topology.csi.shiftpv.io/node` |
 | attach required | `false` |
 | lifecycle mode | `Persistent` |
 
 `NodeGetInfo`의 node ID와 topology value는 Kubernetes node name과 같다.
+
+Helm의 `node.kubeletRootDir`는 Node Plugin이 사용하는 CSI plugin socket,
+`plugins_registry`, Pod volume target의 host path 기준이다. 선택된 모든 node의 실제 kubelet
+state root와 일치해야 한다. 기본값은 `/var/lib/kubelet`이고 MicroK8s의 기본 배치는
+`/var/snap/microk8s/common/var/lib/kubelet`을 명시해야 한다. 하나의 release는 하나의 값을
+DaemonSet 전체에 적용하므로 서로 다른 kubelet root를 가진 node를 같은 release로 관리하지
+않는다.
 
 ## RPC surface
 
