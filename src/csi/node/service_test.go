@@ -3,6 +3,8 @@ package node
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -28,9 +30,11 @@ type fakeVolumeRegistry struct {
 	setErr        error
 	publishedNode string
 	published     bool
+	getCalls      atomic.Int32
 }
 
 func (f *fakeVolumeRegistry) Get(context.Context, string) (volumeapi.State, error) {
+	f.getCalls.Add(1)
 	return f.state, f.getErr
 }
 
@@ -136,6 +140,33 @@ func TestNodePublishFailsClosedForDynamicVolumeState(t *testing.T) {
 				t.Fatalf("fail-closed request reached binder: %#v", binder)
 			}
 		})
+	}
+}
+
+func TestConcurrentMovingPublishesUseOneLiveReadAndReturnFailClosed(t *testing.T) {
+	const requests = 64
+	registry := &fakeVolumeRegistry{state: volumeapi.State{Phase: volumeapi.PhaseMoving, OwnerNode: "worker-a"}}
+	service := configuredService(&fakeBinder{})
+	service.Volumes = registry
+	var wait sync.WaitGroup
+	errors := make(chan error, requests)
+	for range requests {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := service.NodePublishVolume(context.Background(), validPublishRequest())
+			errors <- err
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("concurrent Moving publish returned %v", err)
+		}
+	}
+	if got := registry.getCalls.Load(); got != requests {
+		t.Fatalf("volume state reads = %d, want exactly %d", got, requests)
 	}
 }
 

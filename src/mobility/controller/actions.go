@@ -22,6 +22,10 @@ func (r *Reconciler) execute(ctx context.Context, move *volumeapi.Move, observed
 		return r.lockVolume(ctx, move, observed)
 	case fsm.ActionEvictConsumer:
 		return r.evictConsumer(ctx, move, observed)
+	case fsm.ActionEnsurePlacement:
+		return r.ensurePlacement(ctx, move, observed)
+	case fsm.ActionDeletePlacement:
+		return r.deletePlacement(ctx, *move)
 	case fsm.ActionReleasePlacement:
 		return r.releasePlacement(ctx, move, observed)
 	case fsm.ActionEnsureCopy:
@@ -96,14 +100,24 @@ func (r *Reconciler) evictConsumer(ctx context.Context, move *volumeapi.Move, ob
 
 func (r *Reconciler) releasePlacement(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	if observed.Replacement == nil {
-		return fmt.Errorf("replacement Pod is not observed")
+		return nil
 	}
 	name := observed.Replacement.Name
 	namespace := observed.Replacement.Namespace
+	uid := observed.Replacement.UID
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		pod, err := r.Client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
 			return err
+		}
+		if pod.UID != uid || (move.Status.ReplacementUID != "" && string(pod.UID) != move.Status.ReplacementUID) {
+			return fmt.Errorf("replacement Pod identity changed before placement release")
+		}
+		if pod.Spec.NodeSelector["kubernetes.io/hostname"] != move.Status.DestinationNode {
+			return fmt.Errorf("replacement Pod is not pinned to destination %q", move.Status.DestinationNode)
 		}
 		gates := pod.Spec.SchedulingGates[:0]
 		for _, gate := range pod.Spec.SchedulingGates {
@@ -112,9 +126,21 @@ func (r *Reconciler) releasePlacement(ctx context.Context, move *volumeapi.Move,
 			}
 		}
 		if len(gates) == len(pod.Spec.SchedulingGates) {
-			return nil
+			if pod.Annotations[placementAnnotationKey] == "owner" {
+				return nil
+			}
+			if pod.Annotations == nil {
+				pod.Annotations = map[string]string{}
+			}
+			pod.Annotations[placementAnnotationKey] = "owner"
+			_, err = r.Client.CoreV1().Pods(namespace).Update(ctx, pod, metav1.UpdateOptions{})
+			return err
 		}
 		pod.Spec.SchedulingGates = gates
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[placementAnnotationKey] = "owner"
 		_, err = r.Client.CoreV1().Pods(namespace).Update(ctx, pod, metav1.UpdateOptions{})
 		return err
 	}); err != nil {
@@ -125,16 +151,20 @@ func (r *Reconciler) releasePlacement(ctx context.Context, move *volumeapi.Move,
 }
 
 func (r *Reconciler) ensureCopy(ctx context.Context, move *volumeapi.Move, observed observation) error {
-	if observed.DestinationNode == "" {
-		return fmt.Errorf("destination node is not observed")
+	if observed.DestinationNode == "" || observed.Replacement == nil || !hasPlacementHold(observed.Replacement) {
+		return fmt.Errorf("scheduled destination and held replacement Pod are required")
 	}
 	previous := move.Status
 	move.Status.DestinationNode = observed.DestinationNode
 	move.Status.ReplacementName = observed.Replacement.Name
+	move.Status.ReplacementUID = string(observed.Replacement.UID)
 	move.Status.CopyJobName = observed.Names.CopyJob
 	// Persist the destination before starting disk-side work, including API retries.
 	if err := r.persistMoveStatus(ctx, move, previous); err != nil {
 		return err
+	}
+	if err := r.pinReplacement(ctx, *move); err != nil {
+		return fmt.Errorf("pin held replacement Pod: %w", err)
 	}
 	return r.ensureCopyResources(ctx, *move, observed.Names)
 }
@@ -157,6 +187,9 @@ func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, obse
 	}
 	if observed.FSM.OwnerCommitted {
 		return nil
+	}
+	if err := r.requireScheduledPlacement(ctx, *move); err != nil {
+		return err
 	}
 	next := volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: destination, ActiveMove: move.Name, PublishedNodes: append([]string(nil), observed.Volume.PublishedNodes...)}
 	err := r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseMoving, move.Name, move.Spec.SourceNode, next)

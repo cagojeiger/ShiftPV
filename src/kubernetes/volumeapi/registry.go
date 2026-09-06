@@ -61,6 +61,7 @@ type MoveStatus struct {
 	ConsumerName         string
 	ConsumerUID          string
 	ReplacementName      string
+	ReplacementUID       string
 	DestinationNode      string
 	CandidateNodes       []string
 	EvictionRequested    bool
@@ -437,6 +438,7 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		LastTransitionTime: read("lastTransitionTime"), LastProgressTime: read("lastProgressTime"),
 		PersistentVolumeName: read("persistentVolumeName"), ClaimNamespace: read("persistentVolumeClaimNamespace"),
 		ClaimName: read("persistentVolumeClaimName"), ConsumerName: read("consumerName"), ConsumerUID: read("consumerUID"), ReplacementName: read("replacementName"),
+		ReplacementUID:  read("replacementUID"),
 		DestinationNode: read("destinationNode"), CandidateNodes: candidates, EvictionRequested: evictionRequested,
 		CopyJobName: read("copyJobName"), PromotionJobName: read("promotionJobName"), CleanupJobName: read("cleanupJobName"),
 		RecoveryPhase: read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
@@ -450,6 +452,7 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 		"lastTransitionTime": status.LastTransitionTime, "lastProgressTime": status.LastProgressTime,
 		"persistentVolumeName": status.PersistentVolumeName, "persistentVolumeClaimNamespace": status.ClaimNamespace,
 		"persistentVolumeClaimName": status.ClaimName, "consumerName": status.ConsumerName, "consumerUID": status.ConsumerUID, "replacementName": status.ReplacementName,
+		"replacementUID":  status.ReplacementUID,
 		"destinationNode": status.DestinationNode, "candidateNodes": stringSliceToAny(status.CandidateNodes),
 		"evictionRequested": status.EvictionRequested, "copyJobName": status.CopyJobName,
 		"promotionJobName": status.PromotionJobName, "cleanupJobName": status.CleanupJobName,

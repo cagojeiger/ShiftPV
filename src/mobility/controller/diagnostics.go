@@ -24,6 +24,7 @@ type progressSnapshot struct {
 	ConsumerName         string
 	ConsumerUID          string
 	ReplacementName      string
+	ReplacementUID       string
 	DestinationNode      string
 	EvictionRequested    bool
 	CopyJobName          string
@@ -72,7 +73,7 @@ func progressOf(status volumeapi.MoveStatus) progressSnapshot {
 		Phase: status.Phase, RecoveryPhase: status.RecoveryPhase,
 		PersistentVolumeName: status.PersistentVolumeName, ClaimNamespace: status.ClaimNamespace,
 		ClaimName: status.ClaimName, ConsumerName: status.ConsumerName, ConsumerUID: status.ConsumerUID,
-		ReplacementName: status.ReplacementName, DestinationNode: status.DestinationNode,
+		ReplacementName: status.ReplacementName, ReplacementUID: status.ReplacementUID, DestinationNode: status.DestinationNode,
 		EvictionRequested: status.EvictionRequested, CopyJobName: status.CopyJobName,
 		PromotionJobName: status.PromotionJobName, CleanupJobName: status.CleanupJobName,
 		RecoveryOwner: status.RecoveryOwner,
@@ -105,6 +106,8 @@ func mobilityMessage(phase fsm.Phase, reason string) string {
 		return "automatic retry; waiting for destination promotion"
 	case fsm.PhaseCommitting:
 		return "automatic retry; committing the destination as authoritative owner"
+	case fsm.PhaseReleasingDestination:
+		return "automatic retry; releasing the destination reservation after owner commit"
 	case fsm.PhaseWaitingForDestinationPublish:
 		return "automatic retry; waiting for the destination node to publish the volume"
 	case fsm.PhaseCleaningSource:
@@ -128,7 +131,7 @@ func waitReasonMessage(reason string) string {
 		return "the workload shape is outside the supported single-consumer, single-ShiftPV-PVC contract"
 	case "BarePodUnsupported", "UnsupportedWorkloadController", "CustomSchedulerUnsupported":
 		return "the workload controller or scheduler is outside the supported mobility contract"
-	case "SchedulingGateUnsupported", "InterPodAffinityUnsupported", "HardTopologySpreadUnsupported", "ExplicitNodeNameUnsupported":
+	case "SchedulingGateUnsupported", "InterPodAffinityUnsupported", "TopologySpreadUnsupported", "ResourceClaimUnsupported", "SchedulerVolumeUnsupported", "ExplicitNodeNameUnsupported":
 		return "a hard scheduling constraint cannot be evaluated safely by ShiftPV; remove it or move the workload explicitly"
 	default:
 		return "mobility is waiting because " + reason

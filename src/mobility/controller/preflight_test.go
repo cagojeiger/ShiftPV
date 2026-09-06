@@ -75,7 +75,7 @@ func TestPreflightDefersWithoutLockOrEviction(t *testing.T) {
 		{"inter pod", "InterPodAffinityUnsupported", func(_ *corev1.Pod, rs *appsv1.ReplicaSet, _ *corev1.Node, _ *corev1.PersistentVolume) {
 			rs.Spec.Template.Spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{TopologyKey: corev1.LabelHostname}}}}
 		}},
-		{"hard spread", "HardTopologySpreadUnsupported", func(_ *corev1.Pod, rs *appsv1.ReplicaSet, _ *corev1.Node, _ *corev1.PersistentVolume) {
+		{"hard spread", "TopologySpreadUnsupported", func(_ *corev1.Pod, rs *appsv1.ReplicaSet, _ *corev1.Node, _ *corev1.PersistentVolume) {
 			rs.Spec.Template.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{WhenUnsatisfiable: corev1.DoNotSchedule}}
 		}},
 	} {

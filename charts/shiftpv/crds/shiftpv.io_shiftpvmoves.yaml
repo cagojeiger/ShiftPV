@@ -68,7 +68,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, Copying, Promoting, Committing, WaitingForDestinationPublish, CleaningSource, Blocked, Succeeded]
+                  enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, Copying, Promoting, Committing, ReleasingDestination, WaitingForDestinationPublish, CleaningSource, Blocked, Succeeded]
                 recoveryPhase:
                   type: string
                   enum: ['', Quiescing, Verifying, Retiring, Resuming, Completing, Recovered]
@@ -101,6 +101,8 @@ spec:
                 consumerUID:
                   type: string
                 replacementName:
+                  type: string
+                replacementUID:
                   type: string
                 evictionRequested:
                   type: boolean

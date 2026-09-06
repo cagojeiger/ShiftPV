@@ -70,7 +70,14 @@ Helm resource가 아니며 같은 namespace 재설치 후에도 남는다.
 `NodePublishVolume`은 RWO Filesystem, writable publish, 안전한 volume ID, kubelet
 pods 아래 target path인지 확인한다. 이어 `ShiftPVVolume.status`를 조회해 phase가
 `Ready`이고 owner가 현재 node이며 canonical source directory가 실제로 있을 때만 bind
-mount한다. 상태 조회 실패, `Moving`, `Blocked`, owner 불일치는 fail-closed다.
+mount한다. 상태 조회 실패, `Moving`, `Blocked`, owner 불일치는 즉시 fail-closed다.
+`Moving`에서 CSI 호출을 장시간 유지하지 않는다. Controller가 workload를 scheduling gate
+아래 두고 destination data promotion과 owner commit 뒤에 release하므로 정상 이동의 publish는
+`Ready` owner에서 재시도된다. 이 경계의 근거는
+[node publish 검증](../validation/node-publish-wait-rejection-2026-09-05.md)에 기록한다.
+
+동시에 들어오는 `NodePublishVolume`도 요청마다 현재 `ShiftPVVolume`을 한 번 읽고 독립적으로
+승인 또는 즉시 거부한다. CSI 요청별 polling goroutine이나 Kubernetes watch는 만들지 않는다.
 
 successful publish/unpublish는 `publishedNodes`를 갱신한다. 이 값은 이동 전 실제
 unpublish와 이동 후 publish를 확인하는 관찰값이며, owner 권한을 대신하지 않는다.
@@ -86,14 +93,39 @@ unmount한 뒤에도 디렉터리 제거가 `EBUSY`로 실패할 수 있기 때�
 mount는 별도의 `Bidirectional` mount로 host에 unpublish를 전달하고, `/host`는 그
 host-side mount/unmount 변화를 다시 수신한다.
 
+## Performance boundary
+
+정상 publish 뒤 애플리케이션 I/O는 node-local bind mount를 통해 등록된 filesystem으로
+직접 전달된다. ShiftPV Controller, CSI sidecar와 network copy 경로는 정상 read/write에
+참여하지 않는다. 따라서 정상 I/O의 throughput, latency, durability는 Pool filesystem,
+underlying device, mount option, encryption과 workload I/O pattern의 특성이다. ShiftPV는
+이 값에 대한 수치 SLO를 제공하지 않는다.
+
+CSI lifecycle 성능은 데이터 경로와 별도로 판단한다.
+
+- provisioning latency는 PVC/consumer 생성부터 WFFC scheduling, external-provisioner의
+  `CreateVolume`, helper Pod의 directory 생성, PV bind와 첫 Pod Ready까지를 포함한다.
+- republish latency는 새 Pod 생성부터 `NodePublishVolume`과 Pod Ready까지다. 기존 Pod의
+  termination grace와 workload shutdown 시간은 별도 측정한다.
+- Controller, Node Plugin과 sidecar의 chart 기본 resources는 비어 있다. Kubernetes가
+  보장하는 request/limit가 필요하면 운영자가 `controller.resources`, `node.resources`,
+  `sidecars.*.resources`를 명시해야 한다.
+- 성능 결과에는 Kubernetes 버전, node CPU/memory, 실제 Pool mount/device/filesystem,
+  dataset 크기와 file count, cache 조건, 동시 workload와 표본 수를 함께 기록한다.
+
+측정된 성능은 제품 보장값이 아니라 해당 환경의 증거이며
+[dated validation](../validation/home-public-chart-performance-2026-09-05.md)에 기록한다.
+
 ## Idempotency and deletion
 
 - 같은 `CreateVolume` 재시도는 ConfigMap과 `ShiftPVVolume`의 최초 owner가 같을 때 같은
   ID와 namespace opt-in 규칙에 따른 topology를 반환한다.
 - Kubernetes API의 timeout, server unavailable, throttling은 `Unavailable`로
   반환한다. 호출 context의 deadline/cancellation은 해당 gRPC code를 유지한다.
-- reservation 생성이나 삭제의 응답이 유실되어 실제 반영 여부가 모호해도 다음
-  CSI 재시도는 현재 ConfigMap 상태를 읽어 동일 결과로 수렴한다.
+- reservation이나 `ShiftPVVolume` 생성·삭제의 응답이 유실되어 실제 반영 여부가 모호해도
+  다음 CSI 재시도는 남은 두 기록을 각각 확인해 동일 결과로 수렴한다. reservation은 이미
+  없지만 `ShiftPVVolume`이 남은 부분 삭제도 현재 owner에서 directory delete를 반복한 뒤
+  Volume 상태를 제거한다.
 - helper Pod가 directory 작업 중 실패하면 외부 파일시스템의 일시 장애로 취급해
   `Unavailable`을 반환한다. Create 실패는 reservation을, Delete 실패는
   reservation과 directory를 보존해 다음 CSI 재시도가 같은 상태에서 계속된다.
@@ -102,21 +134,10 @@ host-side mount/unmount 변화를 다시 수신한다.
 - 이미 올바르게 mount된 target publish와 이미 unmount된 unpublish는 성공한다.
 - `DeleteVolume`은 dynamic owner node에서 directory를 제거한 다음 reservation과
   `ShiftPVVolume`을 제거한다. phase가 `Ready`가 아니거나 `activeMove`가 남아 있으면
-  data 삭제를 거부한다. 존재하지 않는 reservation은 성공한다.
+  data 삭제를 거부한다. reservation과 `ShiftPVVolume`이 모두 없을 때만 이미 완료된
+  삭제로 성공한다.
 - 제공 chart의 StorageClass는 `Retain` 고정이므로 PVC/PV 삭제 경로에서
   `DeleteVolume`은 자동 호출되지 않는다.
 
-## Validation
-
-- `make verify`의 race test, 80% coverage gate, vet, build와 Helm 검사 통과
-- 서로 다른 host directory를 가진 2-worker kind에서 ShiftPV를 기본
-  StorageClass로 지정
-- `storageClassName` 없는 PVC가 `shiftpv`를 선택하고 CSI PV에 Bound
-- Pod가 volume을 mount해 데이터를 쓰고 재생성 후 동일 checksum 확인
-- workload 중지 후 Helm uninstall 시 PVC/PV/reservation/data 유지
-- 같은 namespace와 Pool 등록으로 재설치하고 Pod를 다시 만들면 checksum 유지
-- worker pool의 실제 ENOSPC/read-only 장애에서 `Unavailable`, 상태 보존과 복구 후
-  재시도 수렴 확인
-- source-only scheduling constraint는 source authority를 보존한 `Blocked`로 종료
-- 정상 cordon 이동은 `Copying`/`Committing` 중 Controller 강제 재시작 후에도 동일
-  transaction과 PVC/PV/checksum을 유지하며 `Succeeded`로 수렴
+검증 방법은 [development testing](../development/testing.md), 실행 결과는
+[validation evidence](../validation/README.md)를 따른다.

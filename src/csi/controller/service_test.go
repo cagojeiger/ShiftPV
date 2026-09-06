@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -25,6 +26,36 @@ type fakeVolumeRegistry struct {
 	state     volumeapi.State
 	poolNodes []string
 }
+
+type retryDeleteVolumeRegistry struct {
+	state       volumeapi.State
+	exists      bool
+	deleteCalls int
+	deleteFirst bool
+}
+
+func (r *retryDeleteVolumeRegistry) Ensure(context.Context, string, string) error { return nil }
+
+func (r *retryDeleteVolumeRegistry) Get(_ context.Context, id string) (volumeapi.State, error) {
+	if !r.exists {
+		return volumeapi.State{}, apierrors.NewNotFound(schema.GroupResource{Group: "shiftpv.io", Resource: "shiftpvvolumes"}, id)
+	}
+	return r.state, nil
+}
+
+func (r *retryDeleteVolumeRegistry) Delete(context.Context, string) error {
+	r.deleteCalls++
+	if r.deleteCalls == 1 {
+		if r.deleteFirst {
+			r.exists = false
+		}
+		return apierrors.NewTimeoutError("volume state delete response timed out", 1)
+	}
+	r.exists = false
+	return nil
+}
+
+func (*retryDeleteVolumeRegistry) PoolNodes(context.Context) ([]string, error) { return nil, nil }
 
 func (f *fakeVolumeRegistry) Ensure(context.Context, string, string) error { return nil }
 func (f *fakeVolumeRegistry) Get(context.Context, string) (volumeapi.State, error) {
@@ -632,6 +663,77 @@ func TestDeleteVolumeConvergesAfterAmbiguousReservationDeleteTimeout(t *testing.
 	}
 	if operator.deleteCalls != 1 {
 		t.Fatalf("idempotent retry repeated directory deletion: %d calls", operator.deleteCalls)
+	}
+}
+
+func TestDeleteVolumeConvergesWhenReservationIsGoneButVolumeStateRemains(t *testing.T) {
+	id, err := volume.IDFromName("pvc-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewClientset(reservation(id, "source"))
+	operator := &fakeDirectoryOperator{}
+	registry := &retryDeleteVolumeRegistry{
+		state:  volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: "source"},
+		exists: true,
+	}
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator, Volumes: registry}
+	request := &csi.DeleteVolumeRequest{VolumeId: id}
+
+	if _, err := service.DeleteVolume(context.Background(), request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected retryable Unavailable, got %v", err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), id, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("reservation remained after the first delete: %v", err)
+	}
+	if !registry.exists || registry.deleteCalls != 1 {
+		t.Fatalf("volume state failure was not retained for retry: exists=%t calls=%d", registry.exists, registry.deleteCalls)
+	}
+
+	if _, err := service.DeleteVolume(context.Background(), request); err != nil {
+		t.Fatalf("retry did not remove the orphaned volume state: %v", err)
+	}
+	if registry.exists || registry.deleteCalls != 2 {
+		t.Fatalf("volume state retry did not converge: exists=%t calls=%d", registry.exists, registry.deleteCalls)
+	}
+	if operator.deleteCalls != 2 {
+		t.Fatalf("idempotent directory delete calls = %d, want 2", operator.deleteCalls)
+	}
+
+	if _, err := service.DeleteVolume(context.Background(), request); err != nil {
+		t.Fatalf("completed delete was not idempotent: %v", err)
+	}
+	if operator.deleteCalls != 2 || registry.deleteCalls != 2 {
+		t.Fatalf("completed retry repeated deletion: directory=%d state=%d", operator.deleteCalls, registry.deleteCalls)
+	}
+}
+
+func TestDeleteVolumeConvergesAfterVolumeStateDeleteResponseIsLost(t *testing.T) {
+	id, err := volume.IDFromName("pvc-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewClientset(reservation(id, "source"))
+	operator := &fakeDirectoryOperator{}
+	registry := &retryDeleteVolumeRegistry{
+		state:       volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: "source"},
+		exists:      true,
+		deleteFirst: true,
+	}
+	service := &Service{Client: client, Namespace: "shiftpv-system", Operator: operator, Volumes: registry}
+	request := &csi.DeleteVolumeRequest{VolumeId: id}
+
+	if _, err := service.DeleteVolume(context.Background(), request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected retryable Unavailable, got %v", err)
+	}
+	if registry.exists {
+		t.Fatal("accepted volume state deletion was not retained")
+	}
+	if _, err := service.DeleteVolume(context.Background(), request); err != nil {
+		t.Fatalf("retry after the lost response did not converge: %v", err)
+	}
+	if operator.deleteCalls != 1 || registry.deleteCalls != 1 {
+		t.Fatalf("retry repeated completed deletion: directory=%d state=%d", operator.deleteCalls, registry.deleteCalls)
 	}
 }
 

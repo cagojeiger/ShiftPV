@@ -178,6 +178,65 @@ func TestRecoveryWaitsForOldHelpersAndFailedVerification(t *testing.T) {
 	}
 }
 
+func TestRecoveryQuiescesScheduledPlacementBeforeDestinationIsRecorded(t *testing.T) {
+	r, repo, client := recoveryFixture(t, "source")
+	move := repo.moves[0]
+	move.Status.DestinationNode = ""
+	move.Status.CandidateNodes = []string{"destination"}
+	move.Status.RecoveryOwner = "source"
+	move.Status.RecoveryPhase = recoveryQuiescing
+	repo.moves[0] = move
+
+	names := namesFor(move.Name)
+	placement := r.placementPod(move, &corev1.Pod{}, names)
+	placement.UID = "placement-uid"
+	placement.Spec.NodeName = "destination"
+	if _, err := client.CoreV1().Pods("system").Create(context.Background(), placement, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.ReconcileAll(context.Background()); err != nil {
+		t.Fatalf("scheduled reservation blocked recovery before destination persistence: %v", err)
+	}
+	if _, err := client.CoreV1().Pods("system").Get(context.Background(), names.PlacementPod, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("placement reservation remained after quiesce: %v", err)
+	}
+	if repo.moves[0].Status.RecoveryReason != "" || repo.moves[0].Status.RecoveryPhase != recoveryQuiescing {
+		t.Fatalf("unexpected recovery state after reservation deletion: %+v", repo.moves[0].Status)
+	}
+	if err := r.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if repo.moves[0].Status.RecoveryPhase != recoveryVerifying {
+		t.Fatalf("recovery did not advance after reservation disappearance: %+v", repo.moves[0].Status)
+	}
+}
+
+func TestRecoveryRejectsUnrecordedDataHelper(t *testing.T) {
+	r, repo, client := recoveryFixture(t, "source")
+	move := repo.moves[0]
+	move.Status.DestinationNode = ""
+	move.Status.RecoveryOwner = "source"
+	move.Status.RecoveryPhase = recoveryQuiescing
+	repo.moves[0] = move
+
+	names := namesFor(move.Name)
+	_, err := client.CoreV1().Pods("system").Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: names.SourcePod, UID: "unknown-helper", Labels: transferLabels(names)},
+		Spec:       corev1.PodSpec{NodeName: "unknown"},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.ReconcileAll(context.Background()); err == nil {
+		t.Fatal("unrecorded data helper was accepted")
+	}
+	if repo.moves[0].Status.RecoveryReason != "RecoveryStepFailed" || !strings.Contains(repo.moves[0].Status.RecoveryMessage, "unrecorded node") {
+		t.Fatalf("unexpected recovery error: %+v", repo.moves[0].Status)
+	}
+}
+
 func TestRecoveryPlacementHonorsPDBAndPodUID(t *testing.T) {
 	r, repo, client := recoveryFixture(t, "source")
 	move := repo.moves[0]

@@ -21,6 +21,7 @@ const (
 	HostnameLabel          = "kubernetes.io/hostname"
 	PlacementHold          = "shiftpv.io/placement-hold"
 	PlacementKey           = "shiftpv.io/placement"
+	ManagedLabel           = "shiftpv.io/managed"
 	MobilityNamespaceLabel = "shiftpv.io/admission"
 )
 
@@ -190,14 +191,24 @@ func pinToOwner(pod *corev1.Pod, ownerNode string) ([]patchOperation, error) {
 }
 
 func annotationPatch(pod *corev1.Pod, value string) []patchOperation {
+	operations := []patchOperation{}
 	if pod.Annotations == nil {
-		return []patchOperation{{Operation: "add", Path: "/metadata/annotations", Value: map[string]string{PlacementKey: value}}}
+		operations = append(operations, patchOperation{Operation: "add", Path: "/metadata/annotations", Value: map[string]string{PlacementKey: value}})
+	} else {
+		operation := "add"
+		if _, exists := pod.Annotations[PlacementKey]; exists {
+			operation = "replace"
+		}
+		operations = append(operations, patchOperation{Operation: operation, Path: "/metadata/annotations/shiftpv.io~1placement", Value: value})
+	}
+	if pod.Labels == nil {
+		return append(operations, patchOperation{Operation: "add", Path: "/metadata/labels", Value: map[string]string{ManagedLabel: "true"}})
 	}
 	operation := "add"
-	if _, exists := pod.Annotations[PlacementKey]; exists {
+	if _, exists := pod.Labels[ManagedLabel]; exists {
 		operation = "replace"
 	}
-	return []patchOperation{{Operation: operation, Path: "/metadata/annotations/shiftpv.io~1placement", Value: value}}
+	return append(operations, patchOperation{Operation: operation, Path: "/metadata/labels/shiftpv.io~1managed", Value: "true"})
 }
 
 func denied(message string) *admissionv1.AdmissionResponse {

@@ -14,6 +14,7 @@ const (
 	PhaseCopying                      Phase = "Copying"
 	PhasePromoting                    Phase = "Promoting"
 	PhaseCommitting                   Phase = "Committing"
+	PhaseReleasingDestination         Phase = "ReleasingDestination"
 	PhaseWaitingForDestinationPublish Phase = "WaitingForDestinationPublish"
 	PhaseCleaningSource               Phase = "CleaningSource"
 	PhaseSucceeded                    Phase = "Succeeded"
@@ -26,6 +27,8 @@ const (
 	ActionWait             Action = "Wait"
 	ActionLockVolume       Action = "LockVolume"
 	ActionEvictConsumer    Action = "EvictConsumer"
+	ActionEnsurePlacement  Action = "EnsurePlacement"
+	ActionDeletePlacement  Action = "DeletePlacement"
 	ActionReleasePlacement Action = "ReleasePlacement"
 	ActionEnsureCopy       Action = "EnsureCopy"
 	ActionEnsurePromotion  Action = "EnsurePromotion"
@@ -47,6 +50,7 @@ type Observation struct {
 	PublishedOnSource      bool
 	ReplacementExists      bool
 	ReplacementHeld        bool
+	PlacementExists        bool
 	DestinationScheduled   bool
 	DestinationBlocked     bool
 	DestinationUnavailable bool
@@ -113,23 +117,35 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "")
 		}
 		if !observation.ReplacementHeld {
-			return transition(current, PhaseWaitingForDestination, ActionWait, "")
+			return blocked(current, reasonOr(observation.UnsafeReason, "PlacementHoldLost")), nil
 		}
-		return transition(current, PhaseWaitingForDestination, ActionReleasePlacement, "")
+		return transition(current, PhaseWaitingForDestination, ActionEnsurePlacement, "")
 	case PhaseWaitingForDestination:
 		if observation.DestinationBlocked {
 			return blocked(current, reasonOr(observation.UnsafeReason, "DestinationUnavailable")), nil
 		}
-		if !observation.DestinationScheduled {
+		if !observation.ReplacementExists {
 			return transition(current, current, ActionWait, "")
+		}
+		if !observation.ReplacementHeld {
+			return blocked(current, reasonOr(observation.UnsafeReason, "PlacementHoldLost")), nil
+		}
+		if !observation.DestinationScheduled {
+			return transition(current, current, ActionEnsurePlacement, "")
 		}
 		return transition(current, PhaseCopying, ActionEnsureCopy, "")
 	case PhaseCopying:
 		if observation.DestinationUnavailable {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
+		if observation.DestinationBlocked {
+			return blocked(current, reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+		}
 		if observation.CopyFailed {
 			return blocked(current, reasonOr(observation.UnsafeReason, "CopyFailed")), nil
+		}
+		if !observation.PlacementExists || !observation.DestinationScheduled {
+			return transition(current, current, ActionEnsurePlacement, "")
 		}
 		if observation.CopyComplete {
 			return transition(current, PhasePromoting, ActionEnsurePromotion, "")
@@ -139,8 +155,14 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		if observation.DestinationUnavailable {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
+		if observation.DestinationBlocked {
+			return blocked(current, reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+		}
 		if observation.PromotionFailed {
 			return blocked(current, reasonOr(observation.UnsafeReason, "PromotionFailed")), nil
+		}
+		if !observation.PlacementExists || !observation.DestinationScheduled {
+			return transition(current, current, ActionEnsurePlacement, "")
 		}
 		if observation.PromotionComplete {
 			return transition(current, PhaseCommitting, ActionCommitOwner, "")
@@ -148,12 +170,32 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		return transition(current, current, ActionEnsurePromotion, "")
 	case PhaseCommitting:
 		if observation.OwnerCommitted {
-			return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
+			if observation.DestinationUnavailable {
+				return transition(current, current, ActionWait, "DestinationUnavailable")
+			}
+			return transition(current, PhaseReleasingDestination, ActionDeletePlacement, "")
 		}
 		if observation.DestinationUnavailable {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
+		if observation.DestinationBlocked {
+			return blocked(current, reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+		}
+		if !observation.PlacementExists || !observation.DestinationScheduled {
+			return transition(current, current, ActionEnsurePlacement, "")
+		}
 		return transition(current, current, ActionCommitOwner, "")
+	case PhaseReleasingDestination:
+		if observation.DestinationUnavailable {
+			return transition(current, current, ActionWait, "DestinationUnavailable")
+		}
+		if observation.PlacementExists {
+			return transition(current, current, ActionDeletePlacement, "")
+		}
+		if observation.ReplacementExists && observation.ReplacementHeld {
+			return transition(current, PhaseWaitingForDestinationPublish, ActionReleasePlacement, "")
+		}
+		return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
 	case PhaseWaitingForDestinationPublish:
 		if observation.DestinationUnavailable {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
@@ -202,7 +244,8 @@ var allowedTransitions = map[Phase][]Phase{
 	PhaseWaitingForDestination:        {PhaseWaitingForDestination, PhaseCopying, PhaseBlocked},
 	PhaseCopying:                      {PhaseCopying, PhasePromoting, PhaseBlocked},
 	PhasePromoting:                    {PhasePromoting, PhaseCommitting, PhaseBlocked},
-	PhaseCommitting:                   {PhaseCommitting, PhaseWaitingForDestinationPublish, PhaseBlocked},
+	PhaseCommitting:                   {PhaseCommitting, PhaseReleasingDestination, PhaseBlocked},
+	PhaseReleasingDestination:         {PhaseReleasingDestination, PhaseWaitingForDestinationPublish, PhaseBlocked},
 	PhaseWaitingForDestinationPublish: {PhaseWaitingForDestinationPublish, PhaseCleaningSource, PhaseBlocked},
 	PhaseCleaningSource:               {PhaseCleaningSource, PhaseSucceeded, PhaseBlocked},
 	PhaseSucceeded:                    {PhaseSucceeded},

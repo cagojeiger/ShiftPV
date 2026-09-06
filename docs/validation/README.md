@@ -17,6 +17,10 @@
 | [api-response-loss-2026-09-04.md](api-response-loss-2026-09-04.md) | Move/helper 생성, 상태 기록, owner CAS와 정리 요청의 반영 후 응답 유실 수렴 |
 | [mobility-filesystem-faults-2026-09-04.md](mobility-filesystem-faults-2026-09-04.md) | 실제 destination ENOSPC/read-only와 partial staging의 source-owner 복구 |
 | [mobility-node-restarts-2026-09-05.md](mobility-node-restarts-2026-09-05.md) | active Move의 source/destination Kind node 중단과 명시적 source-owner 복구 |
+| [home-public-chart-performance-2026-09-05.md](home-public-chart-performance-2026-09-05.md) | 공개 Helm chart의 Home lifecycle baseline, cross-node 이동 병목과 destination publish A/B 검증 |
+| [node-publish-wait-rejection-2026-09-05.md](node-publish-wait-rejection-2026-09-05.md) | CSI 호출 내부 대기 최적화의 API 효율 증거와 node-restart 반증, 폐기 결정 |
+| [event-driven-placement-2026-09-05.md](event-driven-placement-2026-09-05.md) | held workload, scheduler placement reservation, coalescing watch와 destination restart 수렴 |
+| [g0-safety-2026-09-06.md](g0-safety-2026-09-06.md) | checksum copy 검증, DeleteVolume 부분 삭제 재시도, reservation 복구 회귀와 전체 Kind 재검증 |
 
 검증 문서는 당시의 환경과 결과를 보존하는 snapshot이다. 현재 branch의 통과 여부는
 같은 테스트를 다시 실행하거나 해당 commit의 CI check로 판단한다.

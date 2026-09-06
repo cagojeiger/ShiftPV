@@ -18,6 +18,7 @@ import (
 
 type resourceNames struct {
 	Base          string
+	PlacementPod  string
 	Secret        string
 	Config        string
 	SourcePod     string
@@ -31,7 +32,7 @@ func namesFor(moveName string) resourceNames {
 	sum := sha256.Sum256([]byte(moveName))
 	base := "shiftpv-move-" + hex.EncodeToString(sum[:6])
 	return resourceNames{
-		Base: base, Secret: base + "-auth", Config: base + "-config", SourcePod: base + "-source",
+		Base: base, PlacementPod: base + "-placement", Secret: base + "-auth", Config: base + "-config", SourcePod: base + "-source",
 		SourceService: base + "-source", CopyJob: base + "-copy", PromotionJob: base + "-promote", CleanupJob: base + "-cleanup",
 	}
 }
@@ -162,7 +163,7 @@ staging="/pool/.shiftpv/incoming/${MOVE_NAME}"
 mkdir -p "${staging}"
 export RSYNC_PASSWORD="$(cat /auth/password)"
 rsync -a --delete "rsync://shiftpv@${SOURCE_SERVICE}/data/" "${staging}/"
-rsync -a --checksum --delete --dry-run "rsync://shiftpv@${SOURCE_SERVICE}/data/" "${staging}/" > /tmp/rsync-diff
+rsync -a --checksum --delete --dry-run --itemize-changes "rsync://shiftpv@${SOURCE_SERVICE}/data/" "${staging}/" > /tmp/rsync-diff
 test ! -s /tmp/rsync-diff
 printf '%s\n' "${MOVE_NAME}" > "${staging}/.shiftpv-move-id"
 `

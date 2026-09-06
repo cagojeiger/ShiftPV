@@ -76,7 +76,7 @@ independently.
 - [Documentation map](docs/README.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Current contracts](docs/spec/README.md)
-- [Development and CI checks](docs/development/testing.md)
+- [Development](docs/development/README.md)
 - [Runtime validation](docs/validation/README.md)
 
 ## Status

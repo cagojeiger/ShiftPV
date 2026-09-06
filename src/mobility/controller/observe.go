@@ -21,6 +21,7 @@ type observation struct {
 	Claim           *corev1.PersistentVolumeClaim
 	Consumer        *corev1.Pod
 	Replacement     *corev1.Pod
+	Placement       *corev1.Pod
 	DestinationNode string
 	CandidateNodes  []string
 	Names           resourceNames
@@ -87,6 +88,9 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		if nodeReady(node) && !node.Spec.Unschedulable {
 			result.CandidateNodes = append(result.CandidateNodes, nodeName)
 		}
+	}
+	if len(move.Status.CandidateNodes) != 0 {
+		result.CandidateNodes = append([]string(nil), move.Status.CandidateNodes...)
 	}
 
 	persistentVolumes, err := r.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
@@ -214,15 +218,49 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 			result.FSM.DestinationBlocked = true
 			result.FSM.UnsafeReason = "UnsupportedSchedulingConstraint"
 		}
-		if result.Replacement.Spec.NodeName != "" {
-			if contains(result.CandidateNodes, result.Replacement.Spec.NodeName) {
-				result.DestinationNode = result.Replacement.Spec.NodeName
+		if result.Replacement.Spec.NodeName != "" && result.DestinationNode != "" && result.Replacement.Spec.NodeName != result.DestinationNode {
+			result.FSM.DestinationBlocked = true
+			result.FSM.UnsafeReason = "InvalidDestination"
+		}
+	}
+	var placementErr error
+	if move.Name != "" && move.Status.Phase != "" {
+		placement, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, result.Names.PlacementPod, metav1.GetOptions{})
+		if err == nil {
+			result.Placement = placement
+		} else {
+			placementErr = err
+		}
+	}
+	if result.Placement != nil {
+		placement := result.Placement
+		// Keep the workload held until the reservation is actually NotFound. A
+		// deletion timestamp starts termination but does not prove that scheduler
+		// capacity has been released or that the exact object has disappeared.
+		result.FSM.PlacementExists = true
+		if identityErr := validatePlacementIdentity(placement, move, result.Names); identityErr != nil {
+			result.FSM.DestinationBlocked = true
+			result.FSM.UnsafeReason = "PlacementReservationConflict"
+		} else if placement.DeletionTimestamp != nil {
+			// Wait for API disappearance before recreating the reservation or
+			// releasing the held workload.
+		} else if placement.Status.Phase == corev1.PodFailed {
+			result.FSM.DestinationBlocked = true
+			result.FSM.UnsafeReason = "PlacementReservationFailed"
+		} else if placement.Spec.NodeName != "" {
+			if move.Status.DestinationNode != "" && placement.Spec.NodeName != move.Status.DestinationNode {
+				result.FSM.DestinationBlocked = true
+				result.FSM.UnsafeReason = "InvalidDestination"
+			} else if contains(result.CandidateNodes, placement.Spec.NodeName) {
+				result.DestinationNode = placement.Spec.NodeName
 				result.FSM.DestinationScheduled = true
 			} else {
 				result.FSM.DestinationBlocked = true
 				result.FSM.UnsafeReason = "InvalidDestination"
 			}
 		}
+	} else if placementErr != nil && !apierrors.IsNotFound(placementErr) {
+		return result, fmt.Errorf("read placement reservation Pod: %w", placementErr)
 	}
 	if result.DestinationNode != "" {
 		_, registered := poolNodes[result.DestinationNode]

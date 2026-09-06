@@ -143,24 +143,32 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 	unlock := s.lifecycles.lock(req.GetVolumeId())
 	defer unlock()
 	cm, err := s.Client.CoreV1().ConfigMaps(s.Namespace).Get(ctx, req.GetVolumeId(), metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return &csi.DeleteVolumeResponse{}, nil
-	}
-	if err != nil {
+	reservationMissing := apierrors.IsNotFound(err)
+	if err != nil && !reservationMissing {
 		return nil, kubernetesAPIError("read volume reservation", err)
 	}
-	nodeName := cm.Data["nodeName"]
+	nodeName := ""
+	if !reservationMissing {
+		nodeName = cm.Data["nodeName"]
+	}
+	volumeStateExists := false
 	if s.Volumes != nil {
 		state, stateErr := s.Volumes.Get(ctx, req.GetVolumeId())
 		if stateErr != nil && !apierrors.IsNotFound(stateErr) {
 			return nil, kubernetesAPIError("read volume state", stateErr)
 		}
-		if stateErr == nil && state.OwnerNode != "" {
+		if stateErr == nil {
+			volumeStateExists = true
+		}
+		if volumeStateExists && state.OwnerNode != "" {
 			if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" {
 				return nil, status.Errorf(codes.FailedPrecondition, "volume is phase=%q activeMove=%q", state.Phase, state.ActiveMove)
 			}
 			nodeName = state.OwnerNode
 		}
+	}
+	if reservationMissing && !volumeStateExists {
+		return &csi.DeleteVolumeResponse{}, nil
 	}
 	if nodeName == "" {
 		return nil, status.Error(codes.FailedPrecondition, "volume reservation has no owner node")
@@ -168,10 +176,12 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 	if err := s.Operator.Delete(ctx, nodeName, req.GetVolumeId()); err != nil {
 		return nil, directoryOperationError("delete volume directory", err)
 	}
-	if err := s.Client.CoreV1().ConfigMaps(s.Namespace).Delete(ctx, req.GetVolumeId(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return nil, kubernetesAPIError("delete volume reservation", err)
+	if !reservationMissing {
+		if err := s.Client.CoreV1().ConfigMaps(s.Namespace).Delete(ctx, req.GetVolumeId(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return nil, kubernetesAPIError("delete volume reservation", err)
+		}
 	}
-	if s.Volumes != nil {
+	if volumeStateExists {
 		if err := s.Volumes.Delete(ctx, req.GetVolumeId()); err != nil {
 			return nil, kubernetesAPIError("delete volume state", err)
 		}

@@ -20,6 +20,7 @@ import (
 const (
 	admissionNamespaceLabel = "shiftpv.io/admission"
 	placementHoldName       = "shiftpv.io/placement-hold"
+	placementAnnotationKey  = "shiftpv.io/placement"
 )
 
 type Repository interface {
@@ -41,6 +42,7 @@ type Reconciler struct {
 	Interval    time.Duration
 	Now         func() time.Time
 	Recorder    record.EventRecorder
+	Wake        <-chan struct{}
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -60,6 +62,7 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-r.Wake:
 		case <-ticker.C:
 		}
 	}

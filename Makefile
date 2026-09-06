@@ -65,7 +65,7 @@ release-workflow-test:
 	./test/release/validate-artifact-lock.sh
 
 shellcheck:
-	shellcheck build/ci/resolve-image-release.sh build/ci/resolve-chart-release.sh test/release/resolve-image-release.sh test/release/resolve-chart-release.sh test/release/validate-artifact-lock.sh test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh
+	shellcheck build/ci/resolve-image-release.sh build/ci/resolve-chart-release.sh test/release/resolve-image-release.sh test/release/resolve-chart-release.sh test/release/validate-artifact-lock.sh test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh test/performance/evaluate-home-mobility.sh
 
 actionlint:
 	@if command -v actionlint >/dev/null 2>&1; then \
@@ -81,19 +81,19 @@ helm-lint:
 	helm lint charts/shiftpv
 
 helm-template:
-	@first=$$(mktemp); second=$$(mktemp); \
+	@set -e; first=$$(mktemp); second=$$(mktemp); \
 		trap 'rm -f "$$first" "$$second"' EXIT; \
 		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$first"; \
 		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$second"; \
 		cmp -s "$$first" "$$second"
-	@rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
+	@set -e; rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
 		--set controller.image.repository=controller --set controller.image.tag=test \
 		--set node.image.repository=node --set node.image.tag=test \
 		--set mobility.helperImage=helper:test)"; \
 		printf '%s\n' "$$rendered" | grep -q 'image: "controller:test"'; \
 		printf '%s\n' "$$rendered" | grep -q 'image: "node:test"'; \
 		printf '%s\n' "$$rendered" | grep -q '"helm.sh/hook": pre-delete'; \
-		printf '%s\n' "$$rendered" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
+		! printf '%s\n' "$$rendered" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
 		printf '%s\n' "$$rendered" | grep -q 'command: \["/shiftpv-uninstall-guard"\]'; \
 		printf '%s\n' "$$rendered" | grep -q -- '--mobility-helper-image=helper:test'; \
 		printf '%s\n' "$$rendered" | grep -q -- '--webhook-service-name=shiftpv-webhook'; \
@@ -108,7 +108,10 @@ helm-template:
 		! printf '%s\n' "$$rendered" | grep -q '^kind: ValidatingWebhookConfiguration$$'; \
 		! printf '%s\n' "$$rendered" | grep -q '^kind: Secret$$'; \
 		printf '%s\n' "$$rendered" | grep -q 'mountPropagation: HostToContainer'
-	@disabled="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 --set mobility.enabled=false)"; \
+	@set -e; argocd="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 --set lifecycle.uninstallMode=argocd)"; \
+		printf '%s\n' "$$argocd" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
+		! printf '%s\n' "$$argocd" | grep -q '"helm.sh/hook": pre-delete'
+	@set -e; disabled="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 --set mobility.enabled=false)"; \
 		printf '%s\n' "$$disabled" | grep -q '^kind: Service$$'; \
 		printf '%s\n' "$$disabled" | grep -q 'name: shiftpv-webhook'; \
 		printf '%s\n' "$$disabled" | grep -q -- '--mobility-enabled=false'; \

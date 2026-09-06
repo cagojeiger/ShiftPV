@@ -132,14 +132,19 @@ func unsupportedPlacement(spec corev1.PodSpec) string {
 		return "SchedulingGateUnsupported"
 	}
 	if a := spec.Affinity; a != nil {
-		if (a.PodAffinity != nil && len(a.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0) ||
-			(a.PodAntiAffinity != nil && len(a.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0) {
+		if a.PodAffinity != nil || a.PodAntiAffinity != nil {
 			return "InterPodAffinityUnsupported"
 		}
 	}
-	for _, spread := range spec.TopologySpreadConstraints {
-		if spread.WhenUnsatisfiable == corev1.DoNotSchedule {
-			return "HardTopologySpreadUnsupported"
+	if len(spec.TopologySpreadConstraints) != 0 {
+		return "TopologySpreadUnsupported"
+	}
+	if len(spec.ResourceClaims) != 0 {
+		return "ResourceClaimUnsupported"
+	}
+	for _, volume := range spec.Volumes {
+		if volume.Ephemeral != nil || volume.CSI != nil {
+			return "SchedulerVolumeUnsupported"
 		}
 	}
 	return ""
