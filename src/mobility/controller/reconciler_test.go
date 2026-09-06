@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -21,6 +23,16 @@ type memoryRepository struct {
 	volumes map[string]volumeapi.State
 	pools   []volumeapi.Pool
 	moves   []volumeapi.Move
+}
+
+type countingRepository struct {
+	memoryRepository
+	listVolumeCalls atomic.Int32
+}
+
+func (c *countingRepository) ListVolumes(ctx context.Context) (map[string]volumeapi.State, error) {
+	c.listVolumeCalls.Add(1)
+	return c.memoryRepository.ListVolumes(ctx)
 }
 
 func (m *memoryRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
@@ -232,6 +244,51 @@ func TestObserveMarksSelectedNotReadyDestinationUnavailable(t *testing.T) {
 	}
 }
 
+func TestObserveKeepsTerminatingPlacementReservedUntilNotFound(t *testing.T) {
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	move := volumeapi.Move{
+		Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{
+			Phase: string(fsm.PhaseReleasingDestination), ConsumerName: "old-consumer", ConsumerUID: "old-consumer-uid",
+			ReplacementName: "consumer", ReplacementUID: "consumer-uid", CandidateNodes: []string{"destination"}, DestinationNode: "destination",
+		},
+	}
+	repository := &memoryRepository{
+		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name}},
+		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
+		moves:   []volumeapi.Move{move},
+	}
+	objects := mobilityObjects(volumeID)
+	replacement := objects[len(objects)-1].(*corev1.Pod)
+	replacement.Spec.NodeName = ""
+	replacement.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: placementHoldName}}
+	reconciler := &Reconciler{Client: fake.NewSimpleClientset(objects...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	placement := reconciler.placementPod(move, replacement, namesFor(move.Name))
+	placement.UID = "placement-uid"
+	placement.Spec.NodeName = "destination"
+	now := metav1.Now()
+	placement.DeletionTimestamp = &now
+	placement.Finalizers = []string{"test.shiftpv.io/hold"}
+	if _, err := reconciler.Client.CoreV1().Pods("system").Create(context.Background(), placement, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	observed, err := reconciler.observe(context.Background(), move)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.FSM.PlacementExists || observed.FSM.DestinationScheduled {
+		t.Fatalf("terminating placement observation = %#v", observed.FSM)
+	}
+	decision, err := fsm.Decide(fsm.PhaseReleasingDestination, observed.FSM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Action != fsm.ActionDeletePlacement || decision.Next != fsm.PhaseReleasingDestination {
+		t.Fatalf("terminating placement released workload: %#v", decision)
+	}
+}
+
 func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
@@ -271,26 +328,33 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	}
 
 	replacement := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "replacement", Namespace: "workload"},
-		Spec:       corev1.PodSpec{NodeName: "destination", SchedulingGates: []corev1.PodSchedulingGate{{Name: placementHoldName}}, Volumes: claimVolumes()},
+		ObjectMeta: metav1.ObjectMeta{Name: "replacement", Namespace: "workload", UID: "replacement-uid"},
+		Spec:       corev1.PodSpec{SchedulingGates: []corev1.PodSchedulingGate{{Name: placementHoldName}}, Volumes: claimVolumes()},
 	}
 	if _, err := client.CoreV1().Pods("workload").Create(ctx, replacement, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	observed.Replacement = replacement
+	observed.Names = namesFor(move.Name)
+	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsurePlacement}); err != nil {
+		t.Fatal(err)
+	}
+	placement, err := client.CoreV1().Pods("system").Get(ctx, observed.Names.PlacementPod, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement.Spec.NodeName = "destination"
+	if _, err := client.CoreV1().Pods("system").Update(ctx, placement, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	observed.Placement = placement
 	observed.DestinationNode = "destination"
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionReleasePlacement}); err != nil {
+	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsureCopy}); err != nil {
 		t.Fatal(err)
 	}
 	updated, _ := client.CoreV1().Pods("workload").Get(ctx, "replacement", metav1.GetOptions{})
-	if hasPlacementHold(updated) {
-		t.Fatal("placement hold was not released")
-	}
-
-	observed.Replacement = updated
-	observed.Names = namesFor(move.Name)
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsureCopy}); err != nil {
-		t.Fatal(err)
+	if !hasPlacementHold(updated) || updated.Spec.NodeSelector[corev1.LabelHostname] != "destination" {
+		t.Fatalf("replacement was not held and pinned: %#v", updated.Spec)
 	}
 	if _, err := client.BatchV1().Jobs("system").Get(ctx, observed.Names.CopyJob, metav1.GetOptions{}); err == nil {
 		t.Fatal("copy Job was created before source readiness")
@@ -327,6 +391,16 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	}
 	if repository.volumes[volumeID].OwnerNode != "destination" {
 		t.Fatalf("owner was not committed: %#v", repository.volumes[volumeID])
+	}
+	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionDeletePlacement}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionReleasePlacement}); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ = client.CoreV1().Pods("workload").Get(ctx, "replacement", metav1.GetOptions{})
+	if hasPlacementHold(updated) || updated.Annotations[placementAnnotationKey] != "owner" {
+		t.Fatalf("placement hold was not released as owner after commit: %#v", updated)
 	}
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsureCleanup}); err != nil {
 		t.Fatal(err)
@@ -413,6 +487,44 @@ func TestReconcileAllAndCanceledRun(t *testing.T) {
 	}
 	if err := (&Reconciler{}).validate(); err == nil {
 		t.Fatal("invalid reconciler was accepted")
+	}
+}
+
+func TestRunReconcilesImmediatelyOnWake(t *testing.T) {
+	repository := &countingRepository{memoryRepository: memoryRepository{volumes: map[string]volumeapi.State{}}}
+	wake := make(chan struct{}, 1)
+	reconciler := &Reconciler{
+		Client: fake.NewSimpleClientset(), Repository: repository,
+		Namespace: "system", HelperImage: "helper", Interval: time.Hour, Wake: wake,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- reconciler.Run(ctx) }()
+	waitForCalls := func(want int32) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for repository.listVolumeCalls.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if got := repository.listVolumeCalls.Load(); got < want {
+			t.Fatalf("ListVolumes calls = %d, want at least %d", got, want)
+		}
+	}
+	waitForCalls(1)
+	time.Sleep(20 * time.Millisecond)
+	if got := repository.listVolumeCalls.Load(); got != 1 {
+		t.Fatalf("idle reconciler performed %d ListVolumes calls before an event", got)
+	}
+	wake <- struct{}{}
+	waitForCalls(2)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reconciler did not stop after cancellation")
 	}
 }
 

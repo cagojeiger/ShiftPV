@@ -10,7 +10,7 @@ ShiftPV가 소유하는 책임은 다음과 같다.
 - cordon된 owner node에서 이동 transaction 생성
 - 이동 중 CSI publish 차단
 - 기존 consumer eviction과 실제 unpublish 확인
-- replacement Pod의 Placement Hold와 Release
+- replacement Pod의 Placement Hold, 내부 placement reservation, destination pin과 Release
 - authenticated rsync copy, destination-local promotion, owner commit, source retire
 - 각 관찰과 action 결과를 `ShiftPVMove.status`에 저장하고 재조정
 
@@ -34,6 +34,10 @@ Pod의 `Pending` 또는 `PodScheduled=False/Unschedulable` 자체는 trigger가 
 Node/Pool을 읽을 수 없거나 Node가 NotReady이면 자동 이동을 시작하지 않는다. bare Pod,
 여러 consumer, 한 Pod의 여러 ShiftPV PVC와 custom scheduler는 지원 입력이 아니다.
 
+ShiftPV는 Node를 cordon하지 않고 이미 설정된 `Node.spec.unschedulable`을 관찰한다. Namespace
+opt-in은 ShiftPV 대상만 제한하며 cordon에 반응하는 다른 workload나 controller를 격리하지
+않는다.
+
 ## Non-disruptive preflight
 
 discovery, lock 직전, 최초 eviction 및 거부 후 재시도 직전에 같은 read-only 점검을 한다.
@@ -49,8 +53,9 @@ Retain PV와 Volume CR이 남아 있어도 `PV.claimRef.uid == PVC.uid`와
 - candidate의 현재 label, Ready/cordon 상태, NoSchedule/NoExecute taint와 양쪽 toleration,
   기존 PV의 required node affinity를 검사한다. Kubernetes `component-helpers`의 node
   affinity matcher를 사용한다. Equal/Exists toleration만 사용하며 alpha 비교 operator는 제외한다.
-- required inter-Pod affinity/anti-affinity, DoNotSchedule topology spread, 별도 scheduling
-  gate는 사전 판정 범위 밖이므로 보수적으로 보류한다. soft preference는 scheduler에 맡긴다.
+- inter-Pod affinity/anti-affinity, topology spread, resource claim, generic ephemeral/inline
+  CSI volume과 별도 scheduling gate는 내부 reservation으로 원래 의미를 보존할 수 없어
+  보수적으로 보류한다. node affinity의 hard/soft preference는 scheduler에 맡긴다.
 - matching PDB가 있으면 최신 observedGeneration과 양수 disruptionsAllowed가 필요하다.
   여러 matching PDB도 보류한다. unhealthyPodEvictionPolicy의 예외를 예측하지 않는 보수적
   검사이며, 실제 eviction은 UID precondition을 붙여 Eviction API/PDB가 최종 결정한다.
@@ -87,7 +92,11 @@ authority가 아니다.
 
 ## Reconcile loop
 
-Controller는 기본 2초 간격으로 다음 루프를 반복한다.
+Controller는 관련 Node, managed workload Pod, mobility helper Pod/Job,
+`ShiftPVPool`/`ShiftPVVolume`/`ShiftPVMove` 변경을 하나의 coalescing event stream으로 받아
+즉시 다음 루프를 실행한다. 동시에 기본 30초 safety interval을 유지해 watch 재연결 사이의
+누락이나 일시적 API 오류도 유한 시간 안에 다시 관찰한다. CSI 요청은 이 watch를 소유하지
+않으며, idle 상태에서 2초마다 전체 상태를 조회하지 않는다.
 
 ```text
 Kubernetes API + ShiftPV CR + Job 상태 관찰
@@ -101,7 +110,7 @@ Kubernetes API + ShiftPV CR + Job 상태 관찰
                     v
        CR status/CAS owner 상태 저장
                     |
-                    +---------------------> 다음 reconcile
+                    +---------------------> 다음 event 또는 safety tick
 ```
 
 관찰, 결정, action과 영속 상태가 제품 Controller 안에 있으므로 host-side runner가
@@ -120,6 +129,7 @@ Pending
   -> Copying
   -> Promoting
   -> Committing
+  -> ReleasingDestination
   -> WaitingForDestinationPublish
   -> CleaningSource
   -> Succeeded
@@ -137,12 +147,13 @@ Blocked   -- reconcile --> Blocked
 | `Locking` | `Moving`, expected `activeMove`, source owner | Eviction API, `Evicting` |
 | `Evicting` | original consumer 없음 | `WaitingForUnpublish` |
 | `WaitingForUnpublish` | source가 `publishedNodes`에서 제거됨 | `WaitingForReplacement` |
-| `WaitingForReplacement` | workload controller의 replacement Pod 존재 | Placement Release, `WaitingForDestination` |
-| `WaitingForDestination` | scheduler가 candidate node에 Pod 지정 | copy resources 생성, `Copying` |
+| `WaitingForReplacement` | held replacement Pod 존재 | placement reservation 생성, `WaitingForDestination` |
+| `WaitingForDestination` | scheduler가 reservation을 candidate node에 지정 | destination/replacement UID 영속화, held replacement를 destination에 pin, copy resources 생성, `Copying` |
 | `Copying` / `Promoting` / commit 전 `Committing` | 선택된 destination이 NotReady 또는 Pool 미등록 | 현재 phase와 source authority 유지, `DestinationUnavailable` 자동 대기 |
 | `Copying` | copy Job complete | promotion Job 생성, `Promoting` |
 | `Promoting` | promotion Job complete | owner CAS commit, `Committing` |
-| `Committing` | destination owner와 `Ready` read-back | `WaitingForDestinationPublish` |
+| `Committing` | destination owner와 `Ready` read-back | reservation UID 조건부 삭제, `ReleasingDestination` |
+| `ReleasingDestination` | reservation 삭제 관찰, held replacement identity/pin 일치 | Placement Hold 제거와 `placement=owner` 기록, `WaitingForDestinationPublish` |
 | `WaitingForDestinationPublish` / `CleaningSource` | authoritative destination이 NotReady 또는 Pool 미등록 | 현재 phase와 destination authority 유지, source retire 보류 |
 | `WaitingForDestinationPublish` | destination이 `publishedNodes`에 존재 | cleanup Job 생성, `CleaningSource` |
 | `CleaningSource` | source retire Job complete | transfer resource 정리, `Succeeded` |
@@ -210,7 +221,7 @@ controller가 정리한다. Kubernetes 1.35 이상에서 Job terminal condition�
 기존 설치에서는 새 controller 실행 전에 CRD schema를 명시적으로 갱신해야 한다. Helm의
 `crds/`는 기존 CRD를 upgrade하지 않는다. [Helm CRD 제한](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/)
 
-## 운영 진단 계약
+## Operator diagnostics
 
 `ShiftPVMove.status`는 이동 transaction의 운영 진단 journal이다.
 
@@ -246,15 +257,33 @@ accessible topology로 허용한다. opt-in하지 않았거나 provisioner metad
 - 기존 hostname selector가 현재 owner와 충돌하거나 bound ShiftPV volume이 여러 개면
   admission을 거부한다.
 
-Controller는 source unpublish 뒤 Placement Release를 한 번 수행한다. 이 Hold는 Kubernetes
-Pod Scheduling Readiness의 `spec.schedulingGates`로 구현한다. Placement Handoff 이후
-kube-scheduler가 실제 Pod spec 전체를 평가하고 Controller는 `pod.spec.nodeName`을
-destination으로 채택한다. candidate와 충돌하는 hostname selector 또는 candidate 밖의
-binding은 promotion 전에 `Blocked`다.
+Controller는 source unpublish 뒤에도 실제 replacement의 Hold를 유지한다. 이 Hold는
+Kubernetes Pod Scheduling Readiness의 `spec.schedulingGates`로 구현한다. 대신 Move UID가
+소유하고 결정적 이름을 가진 placement reservation Pod를 `shiftpv-system`에 만든다.
+reservation은 candidate node affinity, workload의 node selector/node affinity,
+toleration, scheduler/priority/runtime class/OS, host network/port와 aggregate resource
+request를 복제한다. kube-scheduler가 reservation에 지정한 node를 destination으로
+영속화하고, 실제 replacement는 Hold가 있는 동안 같은 hostname에 pin한다.
+
+copy, promotion과 commit 전에는 reservation이 같은 destination에 계속 scheduled되어야
+한다. preemption, eviction 또는 수동 삭제로 사라지면 persisted destination 하나만 후보로
+재생성하고, 다시 scheduled된 것을 확인할 때까지 다음 action을 실행하지 않는다. owner CAS
+직전에도 exact Move UID가 소유한 reservation과 destination node를 live read로 재검증한다.
+
+inter-Pod affinity/anti-affinity, topology spread, resource claim, generic ephemeral/inline
+CSI scheduling volume은 reservation으로 동일한 의미를 만들 수 없으므로 preflight에서
+제외한다. destination이 정해지지 않으면 copy하지 않는다. destination이 일시적으로
+NotReady가 되면 source authority와 held workload를 유지하고 자동 재평가한다.
+
+promotion과 owner commit read-back 뒤 `ReleasingDestination`에서 reservation을 UID
+precondition으로 삭제한다. 그 삭제를 관찰한 뒤에만 replacement Hold를 제거하고
+`shiftpv.io/placement=owner`를 기록한다. 따라서 kubelet은 owner가 `Ready`가 되기 전에
+실제 workload의 destination CSI target을 만들지 않는다.
 
 CSI Node Plugin은 `ShiftPVVolume`이 `Ready`이고 현재 node가 owner이며 final directory가
-있을 때만 `NodePublishVolume`을 허용한다. `Moving`, `Blocked`, owner 불일치와 CR 조회
-실패는 fail-closed다.
+있을 때만 `NodePublishVolume`을 허용한다. `Moving`, `Blocked`, owner 불일치와 CR 조회 실패는
+즉시 fail-closed다. `Moving` 중 CSI 요청을 유지하는 방식은 node 재시작 뒤 kubelet의 미완성
+volume metadata 정리를 막을 수 있으므로 사용하지 않는다.
 
 ## Copy, promotion and commit
 
@@ -267,7 +296,8 @@ retired:    <pool>/.shiftpv/retired/<move-name>/
 Controller image를 helper image로 사용한다. source와 destination helper의 hostPath는 각
 node의 `ShiftPVPool.spec.mountPath`에서 해석한다. source Pod는 one-time Secret으로 인증하는
 read-only rsync daemon이고 destination copy Job은 staging에 `rsync -a --delete`를 실행한
-뒤 checksum dry-run 결과가 비어 있는지 확인한다. promotion Job은 move marker와 device ID를
+뒤 checksum dry-run의 itemized 변경 목록이 비어 있는지 확인한다. promotion Job은 이 검사를
+통과한 뒤에만 쓰는 move marker와 device ID를
 검사한 뒤 같은 filesystem에서 `mv`로 final directory를 만든다.
 
 copy가 ENOSPC로 실패하면 staging에는 일부 파일이나 비어 있거나 불완전한
@@ -281,8 +311,9 @@ destination으로 바꾸지 않는다.
 
 owner commit은 expected `phase=Moving`, source owner와 `activeMove=<move>`를 전제로 하는
 status CAS다. phase와 owner를 destination/Ready로 바꿔도 `activeMove`는 유지한다.
-commit read-back 뒤 kubelet의 CSI retry가 destination publish를 기록해야 source cleanup을
-실행한다. cleanup은 source를 즉시 삭제하지 않고 recoverable retired path로 rename한다.
+commit read-back 뒤 reservation 삭제와 workload Hold 해제를 순서대로 끝낸다. 이후 kubelet의
+첫 정상 CSI publish가 destination publication을 기록해야 source cleanup을 실행한다.
+cleanup은 source를 즉시 삭제하지 않고 recoverable retired path로 rename한다.
 cleanup과 transfer resource 정리가 끝나야 `activeMove`를 비우고 Move를 Succeeded로 만든다.
 CSI `DeleteVolume`은 phase가 Ready가 아니거나 active move가 있으면 거부한다.
 
@@ -294,11 +325,12 @@ copy/promotion/cleanup Job은 `activeDeadlineSeconds=300`, `backoffLimit=2`, 완
 1. source unpublish가 확인되기 전 copy를 시작하지 않는다.
 2. verified staging을 promotion하기 전 owner를 바꾸지 않는다.
 3. owner CAS가 성공하기 전 destination CSI publish를 열지 않는다.
-4. destination publish가 확인되기 전 source를 retire하지 않는다.
-5. 선택된 destination이 Ready이고 Pool에 등록된 상태를 다시 확인하기 전 commit 또는
+4. owner commit 뒤 placement reservation 삭제를 관찰하기 전 workload Hold를 해제하지 않는다.
+5. destination publish가 확인되기 전 source를 retire하지 않는다.
+6. 선택된 destination이 Ready이고 Pool에 등록된 상태를 다시 확인하기 전 commit 또는
    source retire를 진행하지 않는다.
-6. API/CR 상태가 불명확하면 publish와 promotion을 허용하지 않는다.
-7. Controller restart는 CR status와 helper resource 관찰로 같은 action에 수렴한다.
+7. API/CR 상태가 불명확하면 publish와 promotion을 허용하지 않는다.
+8. Controller restart는 CR status와 helper resource 관찰로 같은 action에 수렴한다.
 
 Kubernetes API 요청이 실제 반영된 뒤 응답만 timeout 또는 연결 단절로 유실될 수 있다.
 Controller는 이 경우 성공을 추측하지 않고 현재 phase를 유지한다. 다음 reconcile에서
@@ -312,16 +344,17 @@ NotFound와 이미 비어 있는 `activeMove`를 멱등 성공으로 처리한�
 ## Closure and limits
 
 FSM 그래프와 reconcile control loop는 닫혀 있다. 모든 알려진 phase는 허용된 transition과
-action을 반환하고 `Succeeded` 또는 `Blocked`는 안정적인 terminal self-loop다. kind 검증은
-두 terminal 결과와 `Copying`, `Promoting`, commit CAS 직후 `Committing` 중 Controller 강제
-재시작 수렴을 확인한다. 실제 Kind node 중단 검증은 copy 전 destination 상실을 안전하게
-Blocked 처리하고, `Copying`/`Promoting` 중 선택된 destination 상실과 commit 후 destination
-상실을 같은 phase에서 기다렸다 node 복귀 후 자동 수렴하는 것도 확인한다.
+action을 반환하고 `Succeeded` 또는 `Blocked`는 안정적인 terminal self-loop다. 재시작과 node
+중단 검증 결과는 [validation evidence](../validation/README.md)에 기록한다.
 
 종료 시간이 bounded라는 뜻은 아니다. workload controller가 replacement를 만들지 않거나
 scheduler가 constraint/resource 부족으로 결정을 내리지 못하거나 destination publish가
 계속 실패하면 해당 waiting phase에 머문다. 현재 구현은 phase-level deadline, 자동 Pod
 교체, automatic rollback, leader election, replication, failover와 backup을 제공하지 않는다.
+reservation 삭제와 실제 workload gate 해제는 Kubernetes scheduler와 원자적으로 묶이지
+않는다. 그 짧은 handoff 사이에 다른 workload가 capacity를 선점하면 owner는 destination에
+남고 source cleanup은 publish 전까지 보류되지만 replacement는 capacity가 생길 때까지
+Pending일 수 있다.
 opt-in namespace는 placement webhook outage 동안 새 Pod admission이 실패한다. chart는
 Controller replica를 1개로 제한하고 Deployment strategy를 `Recreate`로 고정해 upgrade 중
 old/new mobility reconciler가 겹치지 않게 한다.

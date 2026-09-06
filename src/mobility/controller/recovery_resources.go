@@ -31,7 +31,18 @@ func (r *Reconciler) quiesceMove(ctx context.Context, move volumeapi.Move) (bool
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if pod.Spec.NodeName != move.Spec.SourceNode && (move.Status.DestinationNode == "" || pod.Spec.NodeName != move.Status.DestinationNode) {
+		placement := pod.Name == names.PlacementPod && pod.Labels["shiftpv.io/role"] == placementRole
+		if placement {
+			if err := validatePlacementIdentity(pod, move, names); err != nil {
+				return false, err
+			}
+		}
+		// A placement Pod only reserves scheduler capacity and never mounts or
+		// mutates volume data. It may already be scheduled before the controller
+		// durably records DestinationNode, so recovery can safely remove the exact
+		// Move-owned reservation regardless of its assigned node. Every data helper
+		// remains restricted to a recorded source or destination.
+		if !placement && pod.Spec.NodeName != move.Spec.SourceNode && (move.Status.DestinationNode == "" || pod.Spec.NodeName != move.Status.DestinationNode) {
 			return false, fmt.Errorf("helper Pod %q has unrecorded node %q", pod.Name, pod.Spec.NodeName)
 		}
 		quiet = false

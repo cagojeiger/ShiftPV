@@ -93,8 +93,22 @@ wait_for_move() {
 	return 1
 }
 
+placement_pod_for_move() {
+	local pod owner
+	while IFS= read -r pod; do
+		[[ -n "${pod}" ]] || continue
+		owner=$(kubectl -n shiftpv-system get "${pod}" \
+			-o jsonpath='{.metadata.ownerReferences[?(@.kind=="ShiftPVMove")].name}' 2>/dev/null || true)
+		if [[ "${owner}" == "${MOVE_NAME}" ]]; then
+			printf '%s\n' "${pod#pod/}"
+			return
+		fi
+	done < <(kubectl -n shiftpv-system get pod -l shiftpv.io/role=placement -o name 2>/dev/null || true)
+	return 1
+}
+
 pause_before_copy() {
-	local deadline=$((SECONDS + 300)) phase="" replacement="" replacement_node=""
+	local deadline=$((SECONDS + 300)) phase="" replacement="" replacement_node="" replacement_hold="" placement="" placement_node=""
 	while ((SECONDS < deadline)); do
 		phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
 		if [[ "${phase}" == WaitingForDestination ]]; then
@@ -116,15 +130,25 @@ pause_before_copy() {
 	while ((SECONDS < deadline)); do
 		replacement=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.replacementName}' 2>/dev/null || true)
 		if [[ -z "${replacement}" ]]; then
-			replacement=$(kubectl -n "${TEST_NAMESPACE}" get pod -l "app=${TEST_NAMESPACE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+			replacement=$(kubectl -n "${TEST_NAMESPACE}" get pod \
+				-l "app=${TEST_NAMESPACE},shiftpv.io/managed=true" \
+				-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 		fi
 		if [[ -n "${replacement}" ]]; then
 			replacement_node=$(kubectl -n "${TEST_NAMESPACE}" get "pod/${replacement}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
-			[[ "${replacement_node}" == "${DESTINATION_NODE}" ]] && return
+			replacement_hold=$(kubectl -n "${TEST_NAMESPACE}" get "pod/${replacement}" \
+				-o jsonpath='{.spec.schedulingGates[?(@.name=="shiftpv.io/placement-hold")].name}' 2>/dev/null || true)
+			placement=$(placement_pod_for_move || true)
+			if [[ -n "${placement}" ]]; then
+				placement_node=$(kubectl -n shiftpv-system get "pod/${placement}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+				if [[ -z "${replacement_node}" && "${replacement_hold}" == "shiftpv.io/placement-hold" && "${placement_node}" == "${DESTINATION_NODE}" ]]; then
+					return
+				fi
+			fi
 		fi
 		sleep 0.2
 	done
-	echo "replacement Pod was not scheduled on ${DESTINATION_NODE}: pod=${replacement} node=${replacement_node}" >&2
+	echo "placement reservation was not safely selected on ${DESTINATION_NODE}: replacement=${replacement} replacementNode=${replacement_node} hold=${replacement_hold} placement=${placement} placementNode=${placement_node}" >&2
 	return 1
 }
 
@@ -203,12 +227,35 @@ assert_destination_unavailable_wait() {
 	fi
 }
 
+assert_destination_publish_metadata() {
+	local namespace=$1 pod=$2 pod_uid volume_data_path placement
+	pod_uid=$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.metadata.uid}')
+	volume_data_path="/var/lib/kubelet/pods/${pod_uid}/volumes/kubernetes.io~csi/${PV_NAME}/vol_data.json"
+	if ! docker exec "${DESTINATION_NODE}" test -f "${volume_data_path}"; then
+		echo "destination kubelet CSI metadata is missing: ${volume_data_path}" >&2
+		docker exec "${DESTINATION_NODE}" find "/var/lib/kubelet/pods/${pod_uid}/volumes" -maxdepth 4 -print >&2 2>/dev/null || true
+		return 1
+	fi
+	if docker exec "${DESTINATION_NODE}" journalctl -u kubelet --no-pager 2>&1 \
+		| grep -E 'failed to open volume data file.*vol_data\.json|vol_data\.json.*no such file or directory'; then
+		echo 'destination kubelet reported incomplete CSI volume metadata' >&2
+		return 1
+	fi
+	placement=$(placement_pod_for_move || true)
+	if [[ -n "${placement}" ]]; then
+		echo "placement reservation remained after successful move: ${placement}" >&2
+		return 1
+	fi
+}
+
 finish_destination_move() {
 	local namespace=$1 pod checksum
 	kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=600s
 	kubectl -n "${namespace}" rollout status deployment/writer --timeout=180s
 	pod=$(kubectl -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
 	test "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
+	test "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.metadata.annotations.shiftpv\.io/placement}')" = owner
+	test -z "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.spec.schedulingGates[?(@.name=="shiftpv.io/placement-hold")].name}')"
 	checksum=$(kubectl -n "${namespace}" exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')
 	test "${checksum}" = "${SOURCE_CHECKSUM}"
 	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
@@ -218,6 +265,7 @@ finish_destination_move() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 	test ! -e "${WORKER_A_POOL}/volumes/${VOLUME_ID}"
 	test -f "${WORKER_B_POOL}/volumes/${VOLUME_ID}/payload"
+	assert_destination_publish_metadata "${namespace}" "${pod}"
 }
 
 cleanup_case() {
@@ -265,6 +313,25 @@ run_copying_source_restart_case() {
 	cleanup_case "${namespace}"
 }
 
+run_pre_copy_destination_restart_case() {
+	local namespace=$1 payload=$2
+	TEST_NAMESPACE="${namespace}"
+	create_source_workload "${namespace}" "${payload}"
+	kubectl cordon "${SOURCE_NODE}"
+	wait_for_move
+	pause_before_copy
+	stop_node "${DESTINATION_NODE}"
+	# The destination reservation is durable, but the source remains authoritative.
+	# Let the controller run on the source and wait without releasing the workload.
+	kubectl uncordon "${SOURCE_NODE}"
+	controller_up
+	assert_destination_unavailable_wait Copying "${SOURCE_NODE}"
+	start_node "${DESTINATION_NODE}"
+	finish_destination_move "${namespace}"
+	echo "mobility pre-copy destination restart continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"
+	cleanup_case "${namespace}"
+}
+
 run_destination_restart_case() {
 	local namespace=$1 payload=$2 fault_phase=$3 expected_owner=$4
 	TEST_NAMESPACE="${namespace}"
@@ -299,11 +366,37 @@ helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--wait \
 	--timeout 5m
 
-run_case shiftpv-node-restart-source 'ShiftPV source node restart recovery' "${SOURCE_NODE}" SourceUnavailable
-run_case shiftpv-node-restart-destination 'ShiftPV destination node restart recovery' "${DESTINATION_NODE}" InvalidDestination
-run_copying_source_restart_case shiftpv-node-restart-copying-source 'ShiftPV Copying source restart recovery'
-run_destination_restart_case shiftpv-node-restart-copying-destination 'ShiftPV Copying destination restart continuation' Copying "${SOURCE_NODE}"
-run_destination_restart_case shiftpv-node-restart-promoting-destination 'ShiftPV Promoting destination restart continuation' Promoting "${SOURCE_NODE}"
-run_destination_restart_case shiftpv-node-restart-committed-destination 'ShiftPV committed destination restart continuation' WaitingForDestinationPublish "${DESTINATION_NODE}"
+case ${MOBILITY_NODE_RESTART_CASE:-all} in
+all)
+	run_case shiftpv-node-restart-source 'ShiftPV source node restart recovery' "${SOURCE_NODE}" SourceUnavailable
+	run_pre_copy_destination_restart_case shiftpv-node-restart-destination 'ShiftPV pre-copy destination node restart continuation'
+	run_copying_source_restart_case shiftpv-node-restart-copying-source 'ShiftPV Copying source restart recovery'
+	run_destination_restart_case shiftpv-node-restart-copying-destination 'ShiftPV Copying destination restart continuation' Copying "${SOURCE_NODE}"
+	run_destination_restart_case shiftpv-node-restart-promoting-destination 'ShiftPV Promoting destination restart continuation' Promoting "${SOURCE_NODE}"
+	run_destination_restart_case shiftpv-node-restart-committed-destination 'ShiftPV committed destination restart continuation' WaitingForDestinationPublish "${DESTINATION_NODE}"
+	;;
+source)
+	run_case shiftpv-node-restart-source 'ShiftPV source node restart recovery' "${SOURCE_NODE}" SourceUnavailable
+	;;
+destination)
+	run_pre_copy_destination_restart_case shiftpv-node-restart-destination 'ShiftPV pre-copy destination node restart continuation'
+	;;
+copying-source)
+	run_copying_source_restart_case shiftpv-node-restart-copying-source 'ShiftPV Copying source restart recovery'
+	;;
+copying-destination)
+	run_destination_restart_case shiftpv-node-restart-copying-destination 'ShiftPV Copying destination restart continuation' Copying "${SOURCE_NODE}"
+	;;
+promoting-destination)
+	run_destination_restart_case shiftpv-node-restart-promoting-destination 'ShiftPV Promoting destination restart continuation' Promoting "${SOURCE_NODE}"
+	;;
+committed-destination)
+	run_destination_restart_case shiftpv-node-restart-committed-destination 'ShiftPV committed destination restart continuation' WaitingForDestinationPublish "${DESTINATION_NODE}"
+	;;
+*)
+	echo "unsupported MOBILITY_NODE_RESTART_CASE: ${MOBILITY_NODE_RESTART_CASE}" >&2
+	exit 1
+	;;
+esac
 
 echo 'ShiftPV mobility node-container restart recovery passed'

@@ -129,7 +129,7 @@ func TestMutatePodSkipsNonShiftPVAndPinsExistingSelector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].Operation != "replace" || operations[0].Path != "/metadata/annotations/shiftpv.io~1placement" {
+	if len(operations) != 2 || operations[0].Operation != "replace" || operations[0].Path != "/metadata/annotations/shiftpv.io~1placement" || operations[1].Path != "/metadata/labels" {
 		t.Fatalf("operations = %#v", operations)
 	}
 }
@@ -143,7 +143,7 @@ func TestMutatePodGatingIsIdempotentAndNodeReadyRequiresCondition(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].Path != "/metadata/annotations/shiftpv.io~1placement" {
+	if len(operations) != 2 || operations[0].Path != "/metadata/annotations/shiftpv.io~1placement" || operations[1].Path != "/metadata/labels" {
 		t.Fatalf("idempotent placement hold operations = %#v", operations)
 	}
 	if NodeReady(&corev1.Node{}) {

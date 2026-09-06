@@ -50,7 +50,7 @@ func main() {
 		helperCPULimit          = flag.String("helper-cpu-limit", "100m", "helper Pod CPU limit")
 		helperMemoryLimit       = flag.String("helper-memory-limit", "64Mi", "helper Pod memory limit")
 		mobilityEnabled         = flag.Bool("mobility-enabled", true, "run the automatic cordon mobility reconciler and admission webhook")
-		mobilityInterval        = flag.Duration("mobility-interval", 2*time.Second, "mobility reconciliation interval")
+		mobilityInterval        = flag.Duration("mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
 		mobilityImage           = flag.String("mobility-helper-image", "shiftpv-rsync-helper:dev", "rsync mobility helper image")
 		webhookAddress          = flag.String("webhook-listen-address", ":9443", "mobility admission HTTPS listen address")
 		webhookService          = flag.String("webhook-service-name", "shiftpv-webhook", "mobility admission Service name")
@@ -158,7 +158,8 @@ func main() {
 		defer eventBroadcaster.Shutdown()
 		eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
 		eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
-		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, Namespace: *namespace, HelperImage: *mobilityImage, Interval: *mobilityInterval, Recorder: eventRecorder}
+		wake := mobilitycontroller.WatchEvents(ctx, client, dynamicClient, *namespace)
+		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, Namespace: *namespace, HelperImage: *mobilityImage, Interval: *mobilityInterval, Recorder: eventRecorder, Wake: wake}
 		go func() { errCh <- reconciler.Run(ctx) }()
 	}
 	mux := http.NewServeMux()

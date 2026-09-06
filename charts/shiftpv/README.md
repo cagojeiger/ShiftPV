@@ -46,6 +46,10 @@ restricted to cluster storage operators. Root (`/`) is rejected.
 Automatic mobility is opt-in per workload namespace. Label only namespaces whose
 controller-owned, single-PVC workloads follow the current mobility contract.
 
+ShiftPV does not cordon nodes. A cordon is a cluster-wide maintenance signal, so
+inspect other workloads and controllers that react to it before changing the node.
+Use a dedicated node or an approved maintenance window for mobility validation.
+
 ```bash
 kubectl label namespace my-workload shiftpv.io/admission=enabled
 ```
@@ -134,7 +138,7 @@ Key configurable values:
 | `controller.image.*` | Controller and CSI provisioner-facing binary image |
 | `node.image.*` | Node Plugin binary image |
 | `mobility.helperImage` | rsync-capable helper image; the Controller image satisfies this contract |
-| `mobility.enabled`, `mobility.interval`, `mobility.webhookPort` | cordon reconciler and admission policy; the HTTPS endpoint remains available while disabled |
+| `mobility.enabled`, `mobility.interval`, `mobility.webhookPort` | event-driven cordon reconciler, bounded safety interval (default `30s`), and admission policy; the HTTPS endpoint remains available while disabled |
 | `node.kubeletRootDir` | kubelet state root, normally `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | participating node selection |
 | `helperPod.image`, `helperPod.timeout`, `helperPod.resources` | node-local directory helper |

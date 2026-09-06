@@ -121,18 +121,25 @@ func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testin
 		Name:   "move-test",
 		UID:    "move-uid",
 		Spec:   volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
-		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForDestination)},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForDestination), ClaimNamespace: "workload", CandidateNodes: []string{"destination"}},
 	}
 	inner := &memoryRepository{
 		pools: []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
 		moves: []volumeapi.Move{move},
 	}
 	repository := &lostResponseRepository{memoryRepository: inner, statusResponses: 1}
-	client := fake.NewSimpleClientset()
+	replacement := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "replacement", Namespace: "workload", UID: "replacement-uid"},
+		Spec: corev1.PodSpec{
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: placementHoldName}},
+			Volumes:         claimVolumes(),
+		},
+	}
+	client := fake.NewSimpleClientset(replacement)
 	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
 	observed := observation{
 		DestinationNode: "destination",
-		Replacement:     &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "replacement", Namespace: "workload"}},
+		Replacement:     replacement,
 		Names:           namesFor(move.Name),
 	}
 
@@ -143,7 +150,7 @@ func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testin
 		t.Fatal("copy resources started before the destination status write was acknowledged")
 	}
 	persisted := inner.moves[0]
-	if persisted.Status.DestinationNode != "destination" || persisted.Status.CopyJobName != observed.Names.CopyJob {
+	if persisted.Status.DestinationNode != "destination" || persisted.Status.CopyJobName != observed.Names.CopyJob || persisted.Status.ReplacementUID != "replacement-uid" {
 		t.Fatalf("accepted destination journal was not retained: %+v", persisted.Status)
 	}
 	if err := reconciler.ensureCopy(ctx, &persisted, observed); err != nil {
@@ -271,12 +278,17 @@ func TestVolumeLockConvergesAfterCASResponseLost(t *testing.T) {
 func TestOwnerCommitConvergesAfterCASResponseLost(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{DestinationNode: "destination"}}
+	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{
+		CandidateNodes: []string{"destination"}, DestinationNode: "destination",
+	}}
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
 		Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name,
 	}}}
 	repository := &lostResponseRepository{memoryRepository: inner, stateCASResponses: 1}
-	reconciler := &Reconciler{Repository: repository}
+	reconciler := &Reconciler{Repository: repository, Namespace: "system", HelperImage: "helper"}
+	placement := reconciler.placementPod(move, &corev1.Pod{}, namesFor(move.Name))
+	placement.Spec.NodeName = "destination"
+	reconciler.Client = fake.NewSimpleClientset(placement)
 	observed := observation{Volume: inner.volumes[volumeID], DestinationNode: "destination"}
 
 	if err := reconciler.commitOwner(ctx, &move, observed); err == nil {

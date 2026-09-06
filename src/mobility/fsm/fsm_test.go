@@ -10,10 +10,11 @@ func TestHappyPathIsClosed(t *testing.T) {
 		{SourceHealthy: true, ConsumerExists: false},
 		{SourceHealthy: true, PublishedOnSource: false},
 		{SourceHealthy: true, ReplacementExists: true, ReplacementHeld: true},
-		{SourceHealthy: true, DestinationScheduled: true},
-		{SourceHealthy: true, CopyComplete: true},
-		{SourceHealthy: true, PromotionComplete: true},
+		{SourceHealthy: true, ReplacementExists: true, ReplacementHeld: true, PlacementExists: true, DestinationScheduled: true},
+		{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true, CopyComplete: true},
+		{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true, PromotionComplete: true},
 		{OwnerCommitted: true},
+		{ReplacementExists: true, ReplacementHeld: true},
 		{PublishedOnDestination: true},
 		{CleanupComplete: true},
 	}
@@ -22,11 +23,12 @@ func TestHappyPathIsClosed(t *testing.T) {
 		ActionEvictConsumer,
 		ActionWait,
 		ActionWait,
-		ActionReleasePlacement,
+		ActionEnsurePlacement,
 		ActionEnsureCopy,
 		ActionEnsurePromotion,
 		ActionCommitOwner,
-		ActionWait,
+		ActionDeletePlacement,
+		ActionReleasePlacement,
 		ActionEnsureCleanup,
 		ActionMarkSucceeded,
 	}
@@ -135,7 +137,7 @@ func TestCommittedOwnerSurvivesCommittingCrashWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Next != PhaseWaitingForDestinationPublish || decision.Action != ActionWait {
+	if decision.Next != PhaseReleasingDestination || decision.Action != ActionDeletePlacement {
 		t.Fatalf("committed crash-window decision = %#v", decision)
 	}
 }
@@ -148,6 +150,7 @@ func TestUnavailableDestinationCannotAdvanceTransaction(t *testing.T) {
 		{PhaseCopying, Observation{SourceHealthy: true, DestinationUnavailable: true, CopyComplete: true}},
 		{PhasePromoting, Observation{SourceHealthy: true, DestinationUnavailable: true, PromotionComplete: true}},
 		{PhaseCommitting, Observation{SourceHealthy: true, DestinationUnavailable: true}},
+		{PhaseReleasingDestination, Observation{DestinationUnavailable: true}},
 		{PhaseWaitingForDestinationPublish, Observation{DestinationUnavailable: true, PublishedOnDestination: true}},
 		{PhaseCleaningSource, Observation{DestinationUnavailable: true, CleanupComplete: true}},
 	}
@@ -162,12 +165,12 @@ func TestUnavailableDestinationCannotAdvanceTransaction(t *testing.T) {
 	}
 }
 
-func TestCommittedOwnerAdvancesOutOfCommittingEvenWhenDestinationIsUnavailable(t *testing.T) {
+func TestCommittedOwnerWaitsToReleaseWhileDestinationIsUnavailable(t *testing.T) {
 	decision, err := Decide(PhaseCommitting, Observation{OwnerCommitted: true, DestinationUnavailable: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Next != PhaseWaitingForDestinationPublish || decision.Action != ActionWait {
+	if decision.Next != PhaseCommitting || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
 		t.Fatalf("committed unavailable-destination decision = %#v", decision)
 	}
 }
@@ -193,6 +196,9 @@ func TestActionFailuresAndDestinationFailureBlock(t *testing.T) {
 		reason      string
 	}{
 		{PhaseWaitingForDestination, Observation{SourceHealthy: true, DestinationBlocked: true}, "DestinationUnavailable"},
+		{PhaseCopying, Observation{SourceHealthy: true, DestinationBlocked: true, UnsafeReason: "PlacementReservationFailed"}, "PlacementReservationFailed"},
+		{PhasePromoting, Observation{SourceHealthy: true, DestinationBlocked: true, UnsafeReason: "InvalidDestination"}, "InvalidDestination"},
+		{PhaseCommitting, Observation{SourceHealthy: true, DestinationBlocked: true, UnsafeReason: "PlacementReservationConflict"}, "PlacementReservationConflict"},
 		{PhaseCopying, Observation{SourceHealthy: true, CopyFailed: true}, "CopyFailed"},
 		{PhasePromoting, Observation{SourceHealthy: true, PromotionFailed: true}, "PromotionFailed"},
 		{PhaseCleaningSource, Observation{CleanupFailed: true}, "CleanupFailed"},
@@ -221,9 +227,10 @@ func TestWaitPathsStayInTheCurrentPhase(t *testing.T) {
 		{PhaseWaitingForUnpublish, Observation{SourceHealthy: true, PublishedOnSource: true}, ActionWait},
 		{PhaseWaitingForReplacement, Observation{SourceHealthy: true}, ActionWait},
 		{PhaseWaitingForDestination, Observation{SourceHealthy: true}, ActionWait},
-		{PhaseCopying, Observation{SourceHealthy: true}, ActionEnsureCopy},
-		{PhasePromoting, Observation{SourceHealthy: true}, ActionEnsurePromotion},
-		{PhaseCommitting, Observation{SourceHealthy: true}, ActionCommitOwner},
+		{PhaseCopying, Observation{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true}, ActionEnsureCopy},
+		{PhasePromoting, Observation{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true}, ActionEnsurePromotion},
+		{PhaseCommitting, Observation{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true}, ActionCommitOwner},
+		{PhaseReleasingDestination, Observation{PlacementExists: true}, ActionDeletePlacement},
 		{PhaseWaitingForDestinationPublish, Observation{}, ActionWait},
 		{PhaseCleaningSource, Observation{}, ActionEnsureCleanup},
 	}
@@ -234,6 +241,23 @@ func TestWaitPathsStayInTheCurrentPhase(t *testing.T) {
 		}
 		if decision.Next != test.phase || decision.Action != test.action {
 			t.Errorf("phase %q decision = %#v", test.phase, decision)
+		}
+	}
+}
+
+func TestPlacementReservationIsRecreatedBeforeCommit(t *testing.T) {
+	for _, phase := range []Phase{PhaseCopying, PhasePromoting, PhaseCommitting} {
+		for _, observation := range []Observation{
+			{SourceHealthy: true},
+			{SourceHealthy: true, PlacementExists: true},
+		} {
+			decision, err := Decide(phase, observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Next != phase || decision.Action != ActionEnsurePlacement {
+				t.Errorf("phase %q reservation decision = %#v", phase, decision)
+			}
 		}
 	}
 }
