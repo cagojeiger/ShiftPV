@@ -68,7 +68,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, Copying, Promoting, Committing, ReleasingDestination, WaitingForDestinationPublish, CleaningSource, Blocked, Succeeded]
+                  enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, WaitingForCapacity, Copying, Promoting, Committing, ReleasingDestination, WaitingForDestinationPublish, CleaningSource, Blocked, Succeeded]
                 recoveryPhase:
                   type: string
                   enum: ['', Quiescing, Verifying, Retiring, Resuming, Completing, Recovered]
@@ -95,6 +95,14 @@ spec:
                 persistentVolumeClaimName:
                   type: string
                 destinationNode:
+                  type: string
+                sourceBytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                capacityApproved:
+                  type: boolean
+                capacityReason:
                   type: string
                 consumerName:
                   type: string

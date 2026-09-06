@@ -17,6 +17,7 @@ ADR은 현재 구현의 구조적 결정을 한 문서에 하나씩 기록한다
 | [0008](0008-explicit-owner-recovery.md) | Blocked 이동에서 현재 owner를 명시적으로 재개 | Accepted |
 | [0009](0009-nondisruptive-mobility-preflight.md) | 이동 전 consumer를 보존하는 사전 점검 | Accepted |
 | [0010](0010-operator-visible-mobility-diagnostics.md) | 기존 Move journal을 운영 진단에 사용 | Accepted |
+| [0011](0011-pool-filesystem-capacity-admission.md) | Pool filesystem 총량으로 신규 할당 제어 | Accepted |
 
 파일 이름은 `NNNN-kebab-title.md` 형식을 사용한다. 구체적인 필드, 상태 전이, 명령과
 테스트 결과는 ADR에 복제하지 않는다. 새 구조적 결정이나 기존 결정의 대체는 새 ADR로

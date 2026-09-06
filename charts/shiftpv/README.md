@@ -8,8 +8,9 @@ StorageClass is not the cluster default unless explicitly enabled.
 
 Each selected node must already have a writable filesystem mounted at the path
 declared by that node's `ShiftPVPool.spec.mountPath`. Paths may differ by node.
-The chart never creates, formats, mounts, or repairs those filesystems. Initial
-V1 records PVC capacity but does not enforce a hard write limit.
+The chart never creates, formats, mounts, or repairs those filesystems. ShiftPV
+uses each Pool's aggregate reservation limit and current filesystem availability
+for new-volume admission, but does not enforce a per-volume write limit.
 
 ```bash
 helm repo add shiftpv https://cagojeiger.github.io/ShiftPV
@@ -23,6 +24,8 @@ For repository development, replace `shiftpv/shiftpv` with
 the initial chart release was `0.1.0`; its defaults select the separately released
 controller and node images. Override those image values together only when
 testing an unpublished build.
+Published chart packages are gated until both default component image tags expose
+`linux/amd64` and `linux/arm64` manifests.
 
 After installation, explicitly register one `ShiftPVPool` for every participating
 node before provisioning volumes. `spec.mountPath` is the runtime authority used
@@ -36,8 +39,12 @@ metadata:
 spec:
   nodeName: worker-a
   mountPath: /mnt/shiftpv
+  capacity:
+    limit: 500Gi
 ```
 
+`capacity.limit` is the total requested capacity that ShiftPV may reserve on that
+Pool. It is not the disk size and does not reserve space from other processes.
 Pool CRs are cluster operating state; the Helm release does not create or own
 them. Because the privileged Node Plugin resolves these paths through a host-root
 mount, permission to create or change Pool CRs is security-sensitive and must be
@@ -72,7 +79,7 @@ converged to the new CA. If the Secret is lost, the Controller recovers the old
 trust root from the current webhook configuration before switching certificates.
 These periods are fixed product contracts rather than chart values.
 
-### Recovery and CRD upgrades
+### Recovery
 
 The source-tree controller checks live Pod and ReplicaSet/StatefulSet template
 constraints, destination taints/PV topology, and PDB allowance before locking or
@@ -91,16 +98,65 @@ committed destination back to the stale source. See the
 Use a matching controller/helper image when testing this source tree: changing a
 chart or CRD alone does not add recovery to an older published binary.
 
-Before upgrading an existing installation, apply the target chart's CRD schemas
-without deleting the existing CRDs, then upgrade the controller. For a local chart:
+### Upgrade from chart 0.1.3
+
+The capacity contract makes `ShiftPVPool.spec.capacity.limit` required. Upgrade
+in this order so the new controller never observes the old Pool shape:
+
+1. Apply the target CRDs and explicitly take ownership from the Helm field
+   manager. Never delete and recreate a CRD.
+2. Add a capacity limit to every existing Pool. Choose a limit no larger than
+   the storage allocation that operators intend ShiftPV to reserve on that
+   mounted filesystem.
+3. Upgrade the Helm release and wait for the Controller and Node Plugin.
+
+Set `TARGET_CHART_VERSION` to the chart being installed from the repository:
+
+```sh
+TARGET_CHART_VERSION=x.y.z
+helm repo update shiftpv
+helm show crds shiftpv/shiftpv --version "${TARGET_CHART_VERSION}" | \
+  kubectl apply --server-side --field-manager=shiftpv-crds \
+    --force-conflicts -f -
+```
+
+For a local chart checkout, the equivalent CRD command is:
 
 ```sh
 helm show crds ./charts/shiftpv | \
-  kubectl apply --server-side --field-manager=shiftpv-crds -f -
+  kubectl apply --server-side --field-manager=shiftpv-crds \
+    --force-conflicts -f -
 ```
 
-Helm's `crds/` installation path does not upgrade existing CRDs. Do not disable
-mobility or downgrade to a controller without recovery support while recovery is
+Then repair every Pool:
+
+```sh
+kubectl get shiftpvpools.shiftpv.io -o name
+kubectl patch shiftpvpool <pool-name> --type=merge \
+  -p '{"spec":{"capacity":{"limit":"500Gi"}}}'
+```
+
+Upgrade using the same values file used to install the release:
+
+```sh
+helm upgrade shiftpv shiftpv/shiftpv \
+  --version "${TARGET_CHART_VERSION}" \
+  --namespace shiftpv-system --values shiftpv-values.yaml --wait
+```
+
+For a local chart checkout, use:
+
+```sh
+helm upgrade shiftpv ./charts/shiftpv \
+  --namespace shiftpv-system --values shiftpv-values.yaml --wait
+```
+
+Repeat the patch for every Pool before the Helm upgrade. The new controller
+fails closed for provisioning and moves when a Pool has no valid limit. Helm's
+`crds/` installation path does not upgrade existing CRDs; `--force-conflicts`
+is intentional because the initial Helm installation owns `.spec.versions`.
+
+Do not disable mobility or downgrade to a controller without recovery support while recovery is
 in progress; confirm `recoveryPhase=Recovered` and `activeMove` empty first.
 
 Inspect mobility without starting from Controller logs:
@@ -129,7 +185,8 @@ condition. The Controller refuses to update same-named certificate resources
 without ShiftPV managed labels and expected owner references.
 
 The CSI driver name, topology key, `WaitForFirstConsumer`, `Retain`, RWO
-filesystem support, and disabled expansion are fixed product contracts.
+filesystem support, Pool capacity admission, and disabled expansion are fixed
+product contracts.
 
 Key configurable values:
 
@@ -141,7 +198,7 @@ Key configurable values:
 | `mobility.enabled`, `mobility.interval`, `mobility.webhookPort` | event-driven cordon reconciler, bounded safety interval (default `30s`), and admission policy; the HTTPS endpoint remains available while disabled |
 | `node.kubeletRootDir` | kubelet state root, normally `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | participating node selection |
-| `helperPod.image`, `helperPod.timeout`, `helperPod.resources` | node-local directory helper |
+| `helperPod.image`, `helperPod.timeout`, `helperPod.resources` | node-local directory and capacity helper; a custom image must provide `sh`, `stat`, `du`, `awk`, `mkdir`, and `rm` |
 | `lifecycle.uninstallMode` | uninstall owner: `helm` (default, fail fast) or `argocd` (wait and retry) |
 | `storageClass.create`, `storageClass.name`, `storageClass.defaultClass` | StorageClass publication and explicit default-class opt-in |
 | `controller.resources`, `node.resources`, `sidecars.*.resources` | workload resources |

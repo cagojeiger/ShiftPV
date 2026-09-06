@@ -21,7 +21,8 @@ var (
 	PoolResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvpools"}
 	MoveResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvmoves"}
 
-	ErrStateConflict = errors.New("ShiftPV state precondition failed")
+	ErrStateConflict     = errors.New("ShiftPV state precondition failed")
+	ErrPoolConfiguration = errors.New("ShiftPV Pool configuration is invalid")
 )
 
 const (
@@ -38,9 +39,10 @@ type State struct {
 }
 
 type Pool struct {
-	Name      string
-	NodeName  string
-	MountPath string
+	Name          string
+	NodeName      string
+	MountPath     string
+	CapacityLimit string
 }
 
 type MoveSpec struct {
@@ -63,6 +65,9 @@ type MoveStatus struct {
 	ReplacementName      string
 	ReplacementUID       string
 	DestinationNode      string
+	SourceBytes          int64
+	CapacityApproved     bool
+	CapacityReason       string
 	CandidateNodes       []string
 	EvictionRequested    bool
 	CopyJobName          string
@@ -80,6 +85,13 @@ type Move struct {
 	ResourceVersion string
 	Spec            MoveSpec
 	Status          MoveStatus
+}
+
+func MoveReservesDestination(move Move, state State, nodeName string) bool {
+	return move.Status.CapacityApproved &&
+		move.Status.DestinationNode == nodeName &&
+		state.OwnerNode != nodeName &&
+		state.ActiveMove == move.Name
 }
 
 type Registry struct {
@@ -210,19 +222,20 @@ func (r *Registry) Pools(ctx context.Context) ([]Pool, error) {
 	for index := range list.Items {
 		nodeName, _, _ := unstructured.NestedString(list.Items[index].Object, "spec", "nodeName")
 		mountPath, _, _ := unstructured.NestedString(list.Items[index].Object, "spec", "mountPath")
+		capacityLimit, _, _ := unstructured.NestedString(list.Items[index].Object, "spec", "capacity", "limit")
 		mountPath = filepath.Clean(mountPath)
 		if nodeName == "" || !filepath.IsAbs(mountPath) || mountPath == "/" {
-			return nil, fmt.Errorf("ShiftPVPool %q has invalid nodeName or mountPath", list.Items[index].GetName())
+			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName or mountPath", ErrPoolConfiguration, list.Items[index].GetName())
 		}
 		if _, duplicate := nodes[nodeName]; duplicate {
-			return nil, fmt.Errorf("multiple ShiftPVPools are registered for node %q", nodeName)
+			return nil, fmt.Errorf("%w: multiple ShiftPVPools are registered for node %q", ErrPoolConfiguration, nodeName)
 		}
 		nodes[nodeName] = struct{}{}
-		result = append(result, Pool{Name: list.Items[index].GetName(), NodeName: nodeName, MountPath: mountPath})
+		result = append(result, Pool{Name: list.Items[index].GetName(), NodeName: nodeName, MountPath: mountPath, CapacityLimit: capacityLimit})
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].NodeName < result[right].NodeName })
 	if len(result) == 0 {
-		return nil, fmt.Errorf("no ShiftPVPool nodes are registered")
+		return nil, fmt.Errorf("%w: no ShiftPVPool nodes are registered", ErrPoolConfiguration)
 	}
 	return result, nil
 }
@@ -246,7 +259,7 @@ func (r *Registry) PoolNodes(ctx context.Context) ([]string, error) {
 
 func (r *Registry) PoolForNode(ctx context.Context, nodeName string) (Pool, error) {
 	if nodeName == "" {
-		return Pool{}, fmt.Errorf("node name is required")
+		return Pool{}, fmt.Errorf("%w: node name is required", ErrPoolConfiguration)
 	}
 	pools, err := r.Pools(ctx)
 	if err != nil {
@@ -258,12 +271,12 @@ func (r *Registry) PoolForNode(ctx context.Context, nodeName string) (Pool, erro
 			continue
 		}
 		if result.NodeName != "" {
-			return Pool{}, fmt.Errorf("multiple ShiftPVPools are registered for node %q", nodeName)
+			return Pool{}, fmt.Errorf("%w: multiple ShiftPVPools are registered for node %q", ErrPoolConfiguration, nodeName)
 		}
 		result = pool
 	}
 	if result.NodeName == "" {
-		return Pool{}, fmt.Errorf("no ShiftPVPool is registered for node %q", nodeName)
+		return Pool{}, fmt.Errorf("%w: no ShiftPVPool is registered for node %q", ErrPoolConfiguration, nodeName)
 	}
 	return result, nil
 }
@@ -433,13 +446,16 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		return MoveStatus{}, fmt.Errorf("decode candidateNodes: %w", err)
 	}
 	evictionRequested, _, _ := unstructured.NestedBool(object.Object, "status", "evictionRequested")
+	sourceBytes, _, _ := unstructured.NestedInt64(object.Object, "status", "sourceBytes")
+	capacityApproved, _, _ := unstructured.NestedBool(object.Object, "status", "capacityApproved")
 	return MoveStatus{
 		Phase: read("phase"), Reason: read("reason"), Message: read("message"),
 		LastTransitionTime: read("lastTransitionTime"), LastProgressTime: read("lastProgressTime"),
 		PersistentVolumeName: read("persistentVolumeName"), ClaimNamespace: read("persistentVolumeClaimNamespace"),
 		ClaimName: read("persistentVolumeClaimName"), ConsumerName: read("consumerName"), ConsumerUID: read("consumerUID"), ReplacementName: read("replacementName"),
 		ReplacementUID:  read("replacementUID"),
-		DestinationNode: read("destinationNode"), CandidateNodes: candidates, EvictionRequested: evictionRequested,
+		DestinationNode: read("destinationNode"), SourceBytes: sourceBytes, CapacityApproved: capacityApproved,
+		CapacityReason: read("capacityReason"), CandidateNodes: candidates, EvictionRequested: evictionRequested,
 		CopyJobName: read("copyJobName"), PromotionJobName: read("promotionJobName"), CleanupJobName: read("cleanupJobName"),
 		RecoveryPhase: read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
 		RecoveryReason: read("recoveryReason"), RecoveryMessage: read("recoveryMessage"),
@@ -453,7 +469,9 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 		"persistentVolumeName": status.PersistentVolumeName, "persistentVolumeClaimNamespace": status.ClaimNamespace,
 		"persistentVolumeClaimName": status.ClaimName, "consumerName": status.ConsumerName, "consumerUID": status.ConsumerUID, "replacementName": status.ReplacementName,
 		"replacementUID":  status.ReplacementUID,
-		"destinationNode": status.DestinationNode, "candidateNodes": stringSliceToAny(status.CandidateNodes),
+		"destinationNode": status.DestinationNode, "sourceBytes": status.SourceBytes,
+		"capacityApproved": status.CapacityApproved, "capacityReason": status.CapacityReason,
+		"candidateNodes":    stringSliceToAny(status.CandidateNodes),
 		"evictionRequested": status.EvictionRequested, "copyJobName": status.CopyJobName,
 		"promotionJobName": status.PromotionJobName, "cleanupJobName": status.CleanupJobName,
 		"recoveryPhase": status.RecoveryPhase, "recoveryOwner": status.RecoveryOwner,

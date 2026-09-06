@@ -101,7 +101,7 @@ func TestRegistryLifecycleAndPoolNodes(t *testing.T) {
 		t.Fatalf("pool nodes = %#v", nodes)
 	}
 	registered, err := registry.PoolForNode(ctx, "node-b")
-	if err != nil || registered.Name != "pool-b" || registered.MountPath != "/mnt/shiftpv" {
+	if err != nil || registered.Name != "pool-b" || registered.MountPath != "/mnt/shiftpv" || registered.CapacityLimit != "10Gi" {
 		t.Fatalf("PoolForNode = %#v, %v", registered, err)
 	}
 }
@@ -262,6 +262,9 @@ func pool(name, nodeName string) *unstructured.Unstructured {
 		"apiVersion": "shiftpv.io/v1alpha1",
 		"kind":       "ShiftPVPool",
 		"metadata":   map[string]any{"name": name},
-		"spec":       map[string]any{"nodeName": nodeName, "mountPath": "/mnt/shiftpv"},
+		"spec": map[string]any{
+			"nodeName": nodeName, "mountPath": "/mnt/shiftpv",
+			"capacity": map[string]any{"limit": "10Gi"},
+		},
 	}}
 }

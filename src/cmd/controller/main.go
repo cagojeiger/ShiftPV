@@ -34,6 +34,7 @@ import (
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
 	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
 	mobilitycontroller "github.com/cagojeiger/ShiftPV/src/mobility/controller"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 	webhookcertificate "github.com/cagojeiger/ShiftPV/src/webhook/certificate"
 )
 
@@ -111,7 +112,11 @@ func main() {
 			},
 		},
 	}
-	controllerService := &controllercsi.Service{Client: client, Namespace: *namespace, Operator: operator, Volumes: volumeRegistry, ProvisioningGate: quiesceGate}
+	poolLocks := &poolcapacity.Locker{}
+	controllerService := &controllercsi.Service{
+		Client: client, Namespace: *namespace, Operator: operator, Volumes: volumeRegistry,
+		CapacityPools: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
+	}
 	identityService := &identity.Service{Version: version}
 
 	errCh := make(chan error, 5)
@@ -159,7 +164,7 @@ func main() {
 		eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
 		eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
 		wake := mobilitycontroller.WatchEvents(ctx, client, dynamicClient, *namespace)
-		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, Namespace: *namespace, HelperImage: *mobilityImage, Interval: *mobilityInterval, Recorder: eventRecorder, Wake: wake}
+		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, Interval: *mobilityInterval, Recorder: eventRecorder, Wake: wake}
 		go func() { errCh <- reconciler.Run(ctx) }()
 	}
 	mux := http.NewServeMux()

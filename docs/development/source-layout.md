@@ -58,6 +58,7 @@ ShiftPV/
 | `src/csi/*` | CSI service, capability, request/response와 status code |
 | `src/kubernetes/helperpod` | node-local filesystem 작업용 helper Pod adapter |
 | `src/kubernetes/volumeapi` | Pool, Volume, Move resource와 status persistence |
+| `src/pool/capacity` | Pool filesystem statfs 값의 안전한 byte 변환 |
 | `src/lifecycle/*` | 안전한 uninstall과 component deletion admission |
 | `src/mobility/admission` | bound ShiftPV workload의 owner pin 또는 Placement Hold |
 | `src/mobility/controller` | cluster 관찰, 이동 action, recovery와 diagnostics 조정 |

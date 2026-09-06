@@ -72,6 +72,13 @@ docker build \
   "${ROOT_DIR}"
 kind load docker-image shiftpv:dev --name "${CLUSTER_NAME}"
 
+if [[ "${UPGRADE_ONLY:-0}" == "1" ]]; then
+	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
+		"${ROOT_DIR}/test/e2e/kind/upgrade.sh"
+	echo "ShiftPV focused chart upgrade E2E passed"
+	exit 0
+fi
+
 install_shiftpv() {
 	local default_class=${1:-true}
 	helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
@@ -100,7 +107,18 @@ run_mobility_node_restarts() {
 		"${ROOT_DIR}/test/e2e/kind/mobility-node-restarts.sh"
 }
 
+run_pool_capacity() {
+	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/pool-capacity.sh"
+}
+
 install_shiftpv true
+
+run_pool_capacity
+
+if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
+	echo "ShiftPV focused Pool capacity E2E passed"
+	exit 0
+fi
 
 if [[ "${MOBILITY_FILESYSTEM_FAULTS_ONLY:-0}" == "1" ]]; then
 	run_mobility_filesystem_faults

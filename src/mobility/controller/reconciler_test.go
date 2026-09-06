@@ -349,6 +349,8 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	}
 	observed.Placement = placement
 	observed.DestinationNode = "destination"
+	move.Status.CapacityApproved = true
+	move.Status.SourceBytes = 1
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsureCopy}); err != nil {
 		t.Fatal(err)
 	}

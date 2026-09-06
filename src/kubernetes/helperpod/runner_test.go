@@ -69,6 +69,46 @@ func TestCreateUsesRegisteredNodeMountPath(t *testing.T) {
 	}
 }
 
+func TestStatFSReturnsRegisteredPoolFilesystemCapacity(t *testing.T) {
+	client, created := clientWithPodTerminationMessage(t, "100 25 4096 12\n")
+	runner := validRunner(client)
+
+	stats, err := runner.StatFS(context.Background(), "worker-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TotalBytes != 409600 || stats.AvailableBytes != 102400 || stats.AvailableInodes != 12 {
+		t.Fatalf("stats = %+v", stats)
+	}
+	want := []string{"sh", "-c", "stat -f -c '%b %a %S %d' /pool > /dev/termination-log"}
+	if got := created.pod.Spec.Containers[0].Command; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("command = %#v", got)
+	}
+}
+
+func TestStatFSRejectsMissingHelperResult(t *testing.T) {
+	client, _ := clientWithPodPhase(t, corev1.PodSucceeded, "")
+	runner := validRunner(client)
+
+	if _, err := runner.StatFS(context.Background(), "worker-a"); err == nil || !isRetryable(err) {
+		t.Fatalf("expected retryable result error, got %v", err)
+	}
+}
+
+func TestVolumeUsageReturnsQuiescedDirectoryBytes(t *testing.T) {
+	client, created := clientWithPodTerminationMessage(t, "12345\n")
+	runner := validRunner(client)
+
+	bytes, err := runner.VolumeUsage(context.Background(), "worker-a", testVolumeID)
+	if err != nil || bytes != 12345 {
+		t.Fatalf("usage = %d, err = %v", bytes, err)
+	}
+	command := created.pod.Spec.Containers[0].Command
+	if len(command) != 5 || command[4] != "/pool/volumes/"+testVolumeID {
+		t.Fatalf("command = %#v", command)
+	}
+}
+
 func TestRunReportsFailedHelperPodAndCleansItUp(t *testing.T) {
 	client, _ := clientWithPodPhase(t, corev1.PodFailed, "operation failed")
 	runner := validRunner(client)
@@ -224,6 +264,32 @@ func clientWithPodPhase(t *testing.T, phase corev1.PodPhase, message string) (*f
 		pod.Namespace = action.GetNamespace()
 		pod.Status.Phase = phase
 		pod.Status.Message = message
+		captured.pod = pod.DeepCopy()
+		if err := client.Tracker().Add(pod); err != nil {
+			return true, nil, err
+		}
+		return true, pod, nil
+	})
+	return client, captured
+}
+
+func clientWithPodTerminationMessage(t *testing.T, message string) (*fake.Clientset, *createdPod) {
+	t.Helper()
+	client := fake.NewClientset()
+	captured := &createdPod{}
+	client.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		create := action.(k8stesting.CreateAction)
+		pod := create.GetObject().(*corev1.Pod).DeepCopy()
+		pod.Name = "helper-1"
+		pod.Namespace = action.GetNamespace()
+		pod.Status.Phase = corev1.PodSucceeded
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: "operation",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 0,
+				Message:  message,
+			}},
+		}}
 		captured.pod = pod.DeepCopy()
 		if err := client.Tracker().Add(pod); err != nil {
 			return true, nil, err

@@ -5,3 +5,5 @@ metadata:
 spec:
   nodeName: __WORKER_NODE__
   mountPath: /mnt/shiftpv
+  capacity:
+    limit: 10Gi

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -51,22 +54,59 @@ func (r *Runner) Delete(ctx context.Context, nodeName, volumeID string) error {
 	return r.run(ctx, nodeName, volumeID, []string{"rm", "-rf", path})
 }
 
+func (r *Runner) StatFS(ctx context.Context, nodeName string) (poolcapacity.Filesystem, error) {
+	output, err := r.runForResult(ctx, nodeName, "pool-capacity", []string{
+		"sh", "-c", "stat -f -c '%b %a %S %d' /pool > /dev/termination-log",
+	})
+	if err != nil {
+		return poolcapacity.Filesystem{}, err
+	}
+	stats, err := poolcapacity.ParseStatOutput(output)
+	if err != nil {
+		return poolcapacity.Filesystem{}, retryableError{err: fmt.Errorf("decode helper statfs result: %w", err)}
+	}
+	return stats, nil
+}
+
+func (r *Runner) VolumeUsage(ctx context.Context, nodeName, volumeID string) (int64, error) {
+	path, err := volume.Path(mountPath, volumeID)
+	if err != nil {
+		return 0, err
+	}
+	output, err := r.runForResult(ctx, nodeName, volumeID, []string{
+		"sh", "-c", "du -sb \"$1\" | awk '{print $1}' > /dev/termination-log", "shiftpv-du", path,
+	})
+	if err != nil {
+		return 0, err
+	}
+	bytes, err := strconv.ParseInt(strings.TrimSpace(output), 10, 64)
+	if err != nil || bytes < 0 {
+		return 0, retryableError{err: fmt.Errorf("decode helper volume usage result %q", output)}
+	}
+	return bytes, nil
+}
+
 func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []string) error {
+	_, err := r.runForResult(ctx, nodeName, volumeID, command)
+	return err
+}
+
+func (r *Runner) runForResult(ctx context.Context, nodeName, volumeID string, command []string) (string, error) {
 	if nodeName == "" {
-		return fmt.Errorf("node name is required")
+		return "", fmt.Errorf("node name is required")
 	}
 	poolRoot, err := r.poolRoot(ctx, nodeName)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !filepath.IsAbs(poolRoot) {
-		return fmt.Errorf("pool root must be absolute")
+		return "", fmt.Errorf("pool root must be absolute")
 	}
 	if r.Client == nil {
-		return fmt.Errorf("Kubernetes client is required")
+		return "", fmt.Errorf("Kubernetes client is required")
 	}
 	if r.Namespace == "" || r.Image == "" || r.Timeout <= 0 {
-		return fmt.Errorf("helper Pod configuration is incomplete")
+		return "", fmt.Errorf("helper Pod configuration is incomplete")
 	}
 
 	hostPathType := corev1.HostPathDirectory
@@ -105,12 +145,13 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 		},
 	}, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("create helper Pod: %w", classifyKubernetesAPIError(err))
+		return "", fmt.Errorf("create helper Pod: %w", classifyKubernetesAPIError(err))
 	}
 	defer func() {
 		_ = r.Client.CoreV1().Pods(r.Namespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{GracePeriodSeconds: &zero})
 	}()
 
+	result := ""
 	err = wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, r.Timeout, true, func(pollCtx context.Context) (bool, error) {
 		current, getErr := r.Client.CoreV1().Pods(r.Namespace).Get(pollCtx, pod.Name, metav1.GetOptions{})
 		if getErr != nil {
@@ -121,6 +162,9 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 		}
 		switch current.Status.Phase {
 		case corev1.PodSucceeded:
+			if len(current.Status.ContainerStatuses) == 1 && current.Status.ContainerStatuses[0].State.Terminated != nil {
+				result = current.Status.ContainerStatuses[0].State.Terminated.Message
+			}
 			return true, nil
 		case corev1.PodFailed:
 			return false, retryableError{err: fmt.Errorf("helper Pod failed: %s", current.Status.Message)}
@@ -129,9 +173,9 @@ func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []s
 		}
 	})
 	if err != nil {
-		return fmt.Errorf("wait for helper Pod on node %q: %w", nodeName, err)
+		return "", fmt.Errorf("wait for helper Pod on node %q: %w", nodeName, err)
 	}
-	return nil
+	return result, nil
 }
 
 func (r *Runner) poolRoot(ctx context.Context, nodeName string) (string, error) {

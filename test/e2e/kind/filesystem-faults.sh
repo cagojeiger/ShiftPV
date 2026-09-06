@@ -60,10 +60,10 @@ wait_for_unavailable_event() {
   exit 1
 }
 
-# Overlay the fault worker pool with a tiny tmpfs and exhaust its inodes. The
-# helper Pod can still mount the pool, but mkdir for the volume must hit ENOSPC.
+# Overlay the fault worker pool with a byte-sufficient tmpfs and exhaust only
+# its inodes. Pool byte admission passes, then mkdir must still hit ENOSPC.
 docker exec "${FAULT_NODE}" mount \
-  -t tmpfs -o size=1m,nr_inodes=8 shiftpv-enospc "${FAULT_POOL_PATH}"
+	-t tmpfs -o size=128m,nr_inodes=8 shiftpv-enospc "${FAULT_POOL_PATH}"
 MOUNT_STATE=enospc
 docker exec "${FAULT_NODE}" sh -ec '
   mkdir -p /srv/shiftpv-b/volumes

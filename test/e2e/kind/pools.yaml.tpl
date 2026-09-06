@@ -5,6 +5,8 @@ metadata:
 spec:
   nodeName: __WORKER_A_NODE__
   mountPath: /mnt/shiftpv
+  capacity:
+    limit: 10Gi
 ---
 apiVersion: shiftpv.io/v1alpha1
 kind: ShiftPVPool
@@ -13,3 +15,5 @@ metadata:
 spec:
   nodeName: __WORKER_B_NODE__
   mountPath: /srv/shiftpv-b
+  capacity:
+    limit: 10Gi

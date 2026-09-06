@@ -126,6 +126,7 @@ Pending
   -> WaitingForUnpublish
   -> WaitingForReplacement
   -> WaitingForDestination
+  -> WaitingForCapacity
   -> Copying
   -> Promoting
   -> Committing
@@ -148,7 +149,9 @@ Blocked   -- reconcile --> Blocked
 | `Evicting` | original consumer 없음 | `WaitingForUnpublish` |
 | `WaitingForUnpublish` | source가 `publishedNodes`에서 제거됨 | `WaitingForReplacement` |
 | `WaitingForReplacement` | held replacement Pod 존재 | placement reservation 생성, `WaitingForDestination` |
-| `WaitingForDestination` | scheduler가 reservation을 candidate node에 지정 | destination/replacement UID 영속화, held replacement를 destination에 pin, copy resources 생성, `Copying` |
+| `WaitingForDestination` | scheduler가 reservation을 candidate node에 지정 | `WaitingForCapacity`에서 destination Pool admission 시작 |
+| `WaitingForCapacity` | source 실제 bytes, destination 총예약과 statfs 여유 충족 | 승인을 Move status에 영속화하고 held replacement를 destination에 pin, copy resources 생성, `Copying` |
+| `WaitingForCapacity` | 논리 예약 또는 물리 여유 부족 | copy/owner 변경 없이 `Blocked`; source recovery 가능 |
 | `Copying` / `Promoting` / commit 전 `Committing` | 선택된 destination이 NotReady 또는 Pool 미등록 | 현재 phase와 source authority 유지, `DestinationUnavailable` 자동 대기 |
 | `Copying` | copy Job complete | promotion Job 생성, `Promoting` |
 | `Promoting` | promotion Job complete | owner CAS commit, `Committing` |
@@ -159,7 +162,7 @@ Blocked   -- reconcile --> Blocked
 | `CleaningSource` | source retire Job complete | transfer resource 정리, `Succeeded` |
 
 각 non-terminal phase에는 허용된 self-transition 또는 다음 transition만 있다. source
-unhealthy, scheduling constraint 충돌, copy/promotion/cleanup Job 실패는 `Blocked`로 끝난다.
+unhealthy, scheduling constraint 충돌, destination capacity 부족, copy/promotion/cleanup Job 실패는 `Blocked`로 끝난다.
 `Blocked`는 자동 rollback/retry가 없는 terminal 이동 결과이며 source 또는 이미 commit된
 destination authority를 추측해서 바꾸지 않는다. lock 전 지원되는 preflight 불합격은 대기한다.
 authority/binding이 사라지는 안전 위반은 Move만 Blocked이고 아직 소유하지 않은 Ready volume은 변경하지 않는다. lock 이후
@@ -335,8 +338,9 @@ copy/promotion/cleanup Job은 `activeDeadlineSeconds=300`, `backoffLimit=2`, 완
 Kubernetes API 요청이 실제 반영된 뒤 응답만 timeout 또는 연결 단절로 유실될 수 있다.
 Controller는 이 경우 성공을 추측하지 않고 현재 phase를 유지한다. 다음 reconcile에서
 결정적 이름의 Move/helper resource, Move status와 Volume CAS 결과를 다시 읽어 이미 반영된
-action은 재사용하고 반영되지 않은 action만 재시도한다. 특히 destination과 copy Job 이름을
-Move status에 먼저 기록하기 전에는 copy resource를 시작하지 않는다. owner commit 응답이
+action은 재사용하고 반영되지 않은 action만 재시도한다. 특히 destination, source bytes,
+capacity 승인과 copy Job 이름을 Move status에 먼저 기록하기 전에는 copy resource를 시작하지
+않는다. owner commit 응답이
 유실되어도 `Ready`, destination owner, 같은 `activeMove`의 세 값이 모두 관찰되어야
 commit 완료로 인정한다. 성공 정리 중 delete 또는 `activeMove` 해제 응답이 유실되면
 NotFound와 이미 비어 있는 `activeMove`를 멱등 성공으로 처리한다.
