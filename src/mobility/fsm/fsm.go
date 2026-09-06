@@ -11,6 +11,7 @@ const (
 	PhaseWaitingForUnpublish          Phase = "WaitingForUnpublish"
 	PhaseWaitingForReplacement        Phase = "WaitingForReplacement"
 	PhaseWaitingForDestination        Phase = "WaitingForDestination"
+	PhaseWaitingForCapacity           Phase = "WaitingForCapacity"
 	PhaseCopying                      Phase = "Copying"
 	PhasePromoting                    Phase = "Promoting"
 	PhaseCommitting                   Phase = "Committing"
@@ -28,6 +29,7 @@ const (
 	ActionLockVolume       Action = "LockVolume"
 	ActionEvictConsumer    Action = "EvictConsumer"
 	ActionEnsurePlacement  Action = "EnsurePlacement"
+	ActionEnsureCapacity   Action = "EnsureCapacity"
 	ActionDeletePlacement  Action = "DeletePlacement"
 	ActionReleasePlacement Action = "ReleasePlacement"
 	ActionEnsureCopy       Action = "EnsureCopy"
@@ -54,6 +56,8 @@ type Observation struct {
 	DestinationScheduled   bool
 	DestinationBlocked     bool
 	DestinationUnavailable bool
+	CapacityApproved       bool
+	CapacityBlocked        bool
 	CopyComplete           bool
 	CopyFailed             bool
 	PromotionComplete      bool
@@ -133,7 +137,24 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		if !observation.DestinationScheduled {
 			return transition(current, current, ActionEnsurePlacement, "")
 		}
-		return transition(current, PhaseCopying, ActionEnsureCopy, "")
+		if observation.DestinationUnavailable {
+			return transition(current, PhaseWaitingForCapacity, ActionWait, "DestinationUnavailable")
+		}
+		return transition(current, PhaseWaitingForCapacity, ActionEnsureCapacity, "")
+	case PhaseWaitingForCapacity:
+		if observation.DestinationUnavailable {
+			return transition(current, current, ActionWait, "DestinationUnavailable")
+		}
+		if observation.DestinationBlocked {
+			return blocked(current, reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+		}
+		if observation.CapacityBlocked {
+			return blocked(current, reasonOr(observation.UnsafeReason, "DestinationCapacityInsufficient")), nil
+		}
+		if observation.CapacityApproved {
+			return transition(current, PhaseCopying, ActionEnsureCopy, "")
+		}
+		return transition(current, current, ActionEnsureCapacity, "")
 	case PhaseCopying:
 		if observation.DestinationUnavailable {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
@@ -241,7 +262,8 @@ var allowedTransitions = map[Phase][]Phase{
 	PhaseEvicting:                     {PhaseEvicting, PhaseWaitingForUnpublish, PhaseBlocked},
 	PhaseWaitingForUnpublish:          {PhaseWaitingForUnpublish, PhaseWaitingForReplacement, PhaseBlocked},
 	PhaseWaitingForReplacement:        {PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseBlocked},
-	PhaseWaitingForDestination:        {PhaseWaitingForDestination, PhaseCopying, PhaseBlocked},
+	PhaseWaitingForDestination:        {PhaseWaitingForDestination, PhaseWaitingForCapacity, PhaseBlocked},
+	PhaseWaitingForCapacity:           {PhaseWaitingForCapacity, PhaseCopying, PhaseBlocked},
 	PhaseCopying:                      {PhaseCopying, PhasePromoting, PhaseBlocked},
 	PhasePromoting:                    {PhasePromoting, PhaseCommitting, PhaseBlocked},
 	PhaseCommitting:                   {PhaseCommitting, PhaseReleasingDestination, PhaseBlocked},
@@ -275,7 +297,7 @@ func terminal(phase Phase) bool {
 func beforeCommit(phase Phase) bool {
 	switch phase {
 	case PhasePending, PhaseLocking, PhaseEvicting, PhaseWaitingForUnpublish,
-		PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseCopying, PhasePromoting,
+		PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseWaitingForCapacity, PhaseCopying, PhasePromoting,
 		PhaseCommitting:
 		return true
 	default:

@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -52,8 +53,12 @@ type Service struct {
 	Namespace        string
 	Operator         DirectoryOperator
 	Volumes          VolumeRegistry
+	CapacityPools    PoolCapacityRegistry
+	CapacityProbe    PoolCapacityProbe
+	PoolLocks        *poolcapacity.Locker
 	ProvisioningGate ProvisioningGate
 	lifecycles       volumeLifecycles
+	poolLifecycles   volumeLifecycles
 }
 
 func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
@@ -222,6 +227,16 @@ func (s *Service) reserve(ctx context.Context, id, requestName, nodeName string,
 		"nodeName":    nodeName,
 		"capacity":    strconv.FormatInt(capacity, 10),
 	}
+	if s.CapacityPools != nil || s.CapacityProbe != nil {
+		if s.CapacityPools == nil || s.CapacityProbe == nil {
+			return status.Error(codes.Internal, "Pool capacity admission is incompletely configured")
+		}
+		return s.reserveWithinPool(ctx, id, requestName, nodeName, capacity, data)
+	}
+	return s.createReservation(ctx, id, requestName, data)
+}
+
+func (s *Service) createReservation(ctx context.Context, id, requestName string, data map[string]string) error {
 	_, err := s.Client.CoreV1().ConfigMaps(s.Namespace).Create(ctx, &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: id,
@@ -242,12 +257,7 @@ func (s *Service) reserve(ctx context.Context, id, requestName, nodeName string,
 	if getErr != nil {
 		return kubernetesAPIError("read existing volume reservation", getErr)
 	}
-	for key, value := range data {
-		if existing.Data[key] != value {
-			return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible %s", requestName, key)
-		}
-	}
-	return nil
+	return validateReservation(existing, requestName, data)
 }
 
 func kubernetesAPIError(operation string, err error) error {
@@ -281,8 +291,7 @@ func volumeResponse(id, nodeName string, poolNodes []string, capacity int64) *cs
 		VolumeId:      id,
 		CapacityBytes: capacity,
 		VolumeContext: map[string]string{
-			NodeContextKey:         nodeName,
-			CapacityEnforcementKey: capacityEnforcementNone,
+			NodeContextKey: nodeName,
 		},
 		AccessibleTopology: topologies,
 	}}
@@ -315,18 +324,16 @@ func requestedCapacity(capacityRange *csi.CapacityRange) (int64, error) {
 func validateParameters(parameters map[string]string) error {
 	for key, value := range parameters {
 		switch key {
-		case CapacityEnforcementKey:
-			if value != capacityEnforcementNone {
-				return fmt.Errorf("%s must be %q", CapacityEnforcementKey, capacityEnforcementNone)
-			}
 		case PVCNameKey, PVCNamespaceKey, PVNameKey:
 			// Added by csi-provisioner --extra-create-metadata, not by the StorageClass.
+		case CapacityEnforcementKey:
+			// Retained as a no-op for StorageClass immutability and upgrades from 0.1.3.
+			if value != capacityEnforcementNone {
+				return fmt.Errorf("unsupported StorageClass parameter %q value %q", key, value)
+			}
 		default:
 			return fmt.Errorf("unsupported StorageClass parameter %q", key)
 		}
-	}
-	if parameters[CapacityEnforcementKey] != capacityEnforcementNone {
-		return fmt.Errorf("%s=%s is required", CapacityEnforcementKey, capacityEnforcementNone)
 	}
 	return nil
 }

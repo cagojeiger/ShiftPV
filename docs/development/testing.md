@@ -15,7 +15,9 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 
 현재 엣지 테스트는 다음 실패 비용이 큰 경로를 포함한다.
 
-- 잘못된 capacity, topology, access mode와 StorageClass parameter
+- 잘못된 requested capacity, Pool limit, topology, access mode와 StorageClass parameter
+- Pool 총예약 경계, 현재 owner 합산, 동시 reservation과 statfs 실패의 fail-closed 처리
+- 이동 source bytes 측정, destination 논리/물리 admission과 승인 상태 재시작 보존
 - CreateVolume idempotency와 directory 생성 실패 후 retry reservation
 - DeleteVolume 실패 시 reservation 보존
 - owner node 불일치, unsafe target, read-only/raw-block publish 거부
@@ -52,31 +54,42 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 
 합격 조건은 다음과 같다.
 
-1. ShiftPV가 기본 StorageClass로 선언된다.
-2. `storageClassName`이 없는 PVC가 `shiftpv`를 선택하고 Bound가 된다.
-3. PV의 CSI driver가 `csi.shiftpv.io`이고 Pod가 volume을 mount해 데이터를 쓴다.
-4. Controller Pod와 owner node의 Node Plugin Pod를 강제 교체해도 실행 중 데이터와
+1. 같은 Pool filesystem의 ShiftPV 외부 파일 소비를 statfs가 반영해 신규 PVC를 거부하고,
+   외부 파일 제거 뒤 같은 PVC가 수렴한다.
+2. 빈 PVC의 requested bytes도 Pool 총예약에 포함되고 삭제 뒤 한 번만 반환된다.
+3. ShiftPV가 기본 StorageClass로 선언된다.
+4. `storageClassName`이 없는 PVC가 `shiftpv`를 선택하고 Bound가 된다.
+5. PV의 CSI driver가 `csi.shiftpv.io`이고 Pod가 volume을 mount해 데이터를 쓴다.
+6. Controller Pod와 owner node의 Node Plugin Pod를 강제 교체해도 실행 중 데이터와
    이후 Pod 재생성 checksum이 유지된다.
-5. Pod 재생성 후 checksum이 유지된다.
-6. ShiftPV workload가 실행 중이면 Helm 제거가 실패하고 release와 mount가 유지된다.
-7. workload를 중지해도 retained PVC/PV/Volume이 남아 있으면 제거가 실패한다.
-8. lifecycle `ValidatingWebhookConfiguration`을 명시적으로 제거하고 `--no-hooks`로
+7. Pod 재생성 후 checksum이 유지된다.
+8. ShiftPV workload가 실행 중이면 Helm 제거가 실패하고 release와 mount가 유지된다.
+9. workload를 중지해도 retained PVC/PV/Volume이 남아 있으면 제거가 실패한다.
+10. lifecycle `ValidatingWebhookConfiguration`을 명시적으로 제거하고 `--no-hooks`로
    긴급 제거한 뒤에도 PVC, PV, reservation과 데이터가 남는다.
-9. 같은 namespace와 Pool 등록으로 재설치하면 같은 데이터를 다시 mount한다.
-10. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
+11. 같은 namespace와 Pool 등록으로 재설치하면 같은 데이터를 다시 mount한다.
+12. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
    기본값이 유지되고, 명시적으로 `shiftpv`를 선택한 PVC만 ShiftPV로 provision된다.
-11. 고정 worker의 pool을 inode가 고갈된 tmpfs로 가려 provisioning이
+13. 고정 worker의 pool을 inode가 고갈된 tmpfs로 가려 provisioning이
    `Unavailable`로 실패하고 reservation을 보존한 뒤, 복구 시 같은 volume으로 bind된다.
-12. 같은 volume의 pool을 read-only로 바꿔 deletion이 `Unavailable`로 실패할 때
+14. 같은 volume의 pool을 read-only로 바꿔 deletion이 `Unavailable`로 실패할 때
     reservation과 데이터를 보존하고, read-write 복구 후 삭제가 완료된다.
-13. 이동 copy 중 실제 ENOSPC가 불완전한 staging을 남겨도 `Blocked/CopyFailed`와 source
+15. 이동 copy 중 실제 ENOSPC가 불완전한 staging을 남겨도 `Blocked/CopyFailed`와 source
     authority를 유지하고, 용량 복구 후 `ResumeOwner`가 staging을 격리한다.
-14. 검증된 copy 뒤 destination을 read-only로 바꾸면 promotion이
+16. 검증된 copy 뒤 destination을 read-only로 바꾸면 promotion이
     `Blocked/PromotionFailed`로 owner commit 전에 멈추고, read-write 복구 후 같은 source로
     재개한다.
 
 테스트는 성공과 실패 모두 cluster와 임시 host directory를 정리한다.
 `KEEP_CLUSTER=1`은 로컬 실패 진단에만 사용한다.
+
+Pool capacity 경로만 빠르게 재현할 때는 다음 focused mode를 사용한다.
+
+```bash
+POOL_CAPACITY_ONLY=1 \
+  CLUSTER_NAME=shiftpv-capacity-focused \
+  ./test/e2e/kind/run.sh
+```
 
 filesystem mobility 두 경로만 빠르게 재현할 때는 별도 cluster 이름으로 실행한다.
 
@@ -207,6 +220,12 @@ Component version file이 `main`에서 변경되고 CI가 성공하면 해당 �
 manifest다. Release branch는 version file 변경을 준비하는 용도이며, merge된 `main`
 commit의 CI 성공이 실제 이미지 배포를 trigger한다.
 
+차트 릴리스는 성공한 `Release Images` workflow가 끝난 뒤 시작한다. 이미지 변경이 없으면
+해당 workflow가 build/publish를 생략하고 정상 완료하므로 chart-only release도 진행된다.
+차트 package를 게시하기 전에는 chart가 참조하는 controller/node version tag의
+`linux/amd64`, `linux/arm64` manifest가 GHCR에 실제로 존재하는지도 다시 확인한다. 이미지
+workflow가 실패하거나 필요한 manifest가 없으면 차트는 게시되지 않는다.
+
 CI의 특정 실행 결과가 해당 commit의 합격 증거다. [`validation/`](../validation/README.md)의
 문서는 재현 환경과 관찰 결과를 남기는 기록이며, 최신 commit의 CI 상태를 대신하지 않는다.
 
@@ -224,3 +243,9 @@ digest를 포함한 image reference로 설치한다. 고정값은
 거부한다. 이 smoke는 공개 배포물 연결을 확인하며 source 기반 장애·이동 회귀를 대체하지 않는다.
 외부 publication 상태가 PR merge gate를 흔들지 않도록 `artifact-smoke.yaml`의 수동 실행과
 매일 정기 실행으로 분리한다. PR CI는 같은 lock의 형식·불변성 규칙만 fast check로 검사한다.
+
+같은 workflow의 `kind-upgrade-e2e`는 공개 chart `0.1.3`으로 기존 PVC를 만든 뒤 현재
+checkout의 CRD와 chart/controller로 올린다. CRD field ownership 이전, 모든 Pool의 필수
+capacity limit 보완, StorageClass 불변 필드 호환성, 기존 data checksum, 업그레이드 후 신규
+PVC provisioning을 검증한다. 이 경로도 공개 Helm repository에 의존하므로 PR merge gate가
+아니라 수동·매일 정기 실행으로 둔다.

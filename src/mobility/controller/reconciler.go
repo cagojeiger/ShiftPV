@@ -15,6 +15,7 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
 const (
@@ -34,15 +35,22 @@ type Repository interface {
 	SetMoveStatus(context.Context, string, volumeapi.MoveStatus) error
 }
 
+type CapacityProbe interface {
+	StatFS(context.Context, string) (poolcapacity.Filesystem, error)
+	VolumeUsage(context.Context, string, string) (int64, error)
+}
+
 type Reconciler struct {
-	Client      kubernetes.Interface
-	Repository  Repository
-	Namespace   string
-	HelperImage string
-	Interval    time.Duration
-	Now         func() time.Time
-	Recorder    record.EventRecorder
-	Wake        <-chan struct{}
+	Client        kubernetes.Interface
+	Repository    Repository
+	CapacityProbe CapacityProbe
+	PoolLocks     *poolcapacity.Locker
+	Namespace     string
+	HelperImage   string
+	Interval      time.Duration
+	Now           func() time.Time
+	Recorder      record.EventRecorder
+	Wake          <-chan struct{}
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {

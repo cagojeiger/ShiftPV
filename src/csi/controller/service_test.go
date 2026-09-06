@@ -188,13 +188,12 @@ func TestCreateVolumeRejectsChangedSelectedNode(t *testing.T) {
 	}
 }
 
-func TestCreateVolumeRequiresNoCapacityEnforcement(t *testing.T) {
+func TestCreateVolumeAcceptsLegacyCapacityEnforcementParameter(t *testing.T) {
 	service := &Service{Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}}
 	req := validCreateRequest("worker-a")
-	delete(req.Parameters, CapacityEnforcementKey)
-	_, err := service.CreateVolume(context.Background(), req)
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("expected InvalidArgument, got %v", err)
+	req.Parameters[CapacityEnforcementKey] = capacityEnforcementNone
+	if _, err := service.CreateVolume(context.Background(), req); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -877,7 +876,7 @@ func validCreateRequest(node string) *csi.CreateVolumeRequest {
 			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
 			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
 		}},
-		Parameters: map[string]string{CapacityEnforcementKey: capacityEnforcementNone},
+		Parameters: map[string]string{},
 		AccessibilityRequirements: &csi.TopologyRequirement{Preferred: []*csi.Topology{{
 			Segments: map[string]string{TopologyKey: node},
 		}}},

@@ -14,7 +14,8 @@ filesystem 생성과 mount를 소유하면 OS 운영 책임을 침범한다. 반
 
 ShiftPV는 운영자가 미리 준비해 mount한 filesystem만 Pool로 등록해 사용한다. Disk,
 filesystem, 암호화와 mount lifecycle은 운영자가 책임지고, ShiftPV는 등록된 Pool 안의 자기
-데이터 영역만 관리한다. ShiftPV는 장치를 포맷하거나 filesystem을 mount·repair하지 않는다.
+데이터 영역과 전체 여유 공간만 관리한다. ShiftPV는 장치를 포맷하거나 filesystem을
+mount·repair하지 않지만 신규 할당 판단을 위해 등록 path의 filesystem 통계를 읽는다.
 
 ## Alternatives considered
 

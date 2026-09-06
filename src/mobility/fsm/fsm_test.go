@@ -11,6 +11,7 @@ func TestHappyPathIsClosed(t *testing.T) {
 		{SourceHealthy: true, PublishedOnSource: false},
 		{SourceHealthy: true, ReplacementExists: true, ReplacementHeld: true},
 		{SourceHealthy: true, ReplacementExists: true, ReplacementHeld: true, PlacementExists: true, DestinationScheduled: true},
+		{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true, CapacityApproved: true},
 		{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true, CopyComplete: true},
 		{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true, PromotionComplete: true},
 		{OwnerCommitted: true},
@@ -24,6 +25,7 @@ func TestHappyPathIsClosed(t *testing.T) {
 		ActionWait,
 		ActionWait,
 		ActionEnsurePlacement,
+		ActionEnsureCapacity,
 		ActionEnsureCopy,
 		ActionEnsurePromotion,
 		ActionCommitOwner,
@@ -162,6 +164,22 @@ func TestUnavailableDestinationCannotAdvanceTransaction(t *testing.T) {
 		if decision.Next != test.phase || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
 			t.Errorf("phase %q decision = %#v", test.phase, decision)
 		}
+	}
+}
+
+func TestSelectedUnavailableDestinationWaitsBeforeCapacityProbe(t *testing.T) {
+	decision, err := Decide(PhaseWaitingForDestination, Observation{
+		SourceHealthy:          true,
+		ReplacementExists:      true,
+		ReplacementHeld:        true,
+		DestinationScheduled:   true,
+		DestinationUnavailable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Next != PhaseWaitingForCapacity || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
+		t.Fatalf("selected unavailable-destination decision = %#v", decision)
 	}
 }
 

@@ -23,6 +23,7 @@ The current implementation provides:
 - optional cluster-default StorageClass annotation
 - deterministic volume IDs and namespace-scoped reservation ConfigMaps
 - explicit node Pool registration with per-node mount paths and dynamic owner publish guard
+- Pool filesystem capacity admission using aggregate PVC reservations and current shared-filesystem space
 - automatic healthy-node cordon cold migration with Placement Hold, authenticated rsync,
   dynamic owner CAS and restart-safe reconciliation
 - fail-closed Helm/Argo CD Application uninstall guard and explicit recovery bypass
@@ -37,7 +38,8 @@ The current implementation provides:
   absolute mount path is declared by its `ShiftPVPool`
 
 Each participating node must use a distinct local path. ShiftPV does not create,
-format, mount, inspect or repair filesystems.
+format, mount or repair filesystems. It reads filesystem capacity from the
+registered Pool path when admitting a new volume.
 
 Register every participating node explicitly with a `ShiftPVPool` CR after
 installing the chart.
@@ -68,7 +70,9 @@ independently.
 - no replication, HA, failover, backup or snapshot
 - RWO Filesystem only; no RWX or raw block
 - no volume expansion
-- requested capacity is recorded but not enforced as a write limit
+- requested capacity contributes to the owner Pool's aggregate reservation but is not a per-volume write limit
+- capacity admission does not prevent external writers or a PVC from consuming space after provisioning
+- mobility measures quiesced source bytes and admits destination capacity before copy
 - deleting a PVC leaves its `Retain` PV and data for manual recovery
 
 ## Documentation

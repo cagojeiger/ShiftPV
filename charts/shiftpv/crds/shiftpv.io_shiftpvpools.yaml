@@ -21,7 +21,7 @@ spec:
           properties:
             spec:
               type: object
-              required: [nodeName, mountPath]
+              required: [nodeName, mountPath, capacity]
               properties:
                 nodeName:
                   type: string
@@ -38,6 +38,13 @@ spec:
                       message: mountPath is immutable
                     - rule: self != '/'
                       message: mountPath must not be the filesystem root
+                capacity:
+                  type: object
+                  required: [limit]
+                  properties:
+                    limit:
+                      type: string
+                      minLength: 1
             status:
               type: object
               x-kubernetes-preserve-unknown-fields: true

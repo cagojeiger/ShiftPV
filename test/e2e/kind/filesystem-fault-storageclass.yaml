@@ -6,5 +6,3 @@ provisioner: csi.shiftpv.io
 reclaimPolicy: Delete
 allowVolumeExpansion: false
 volumeBindingMode: WaitForFirstConsumer
-parameters:
-  shiftpv.io/capacity-enforcement: none

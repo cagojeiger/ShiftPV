@@ -24,6 +24,8 @@ func (r *Reconciler) execute(ctx context.Context, move *volumeapi.Move, observed
 		return r.evictConsumer(ctx, move, observed)
 	case fsm.ActionEnsurePlacement:
 		return r.ensurePlacement(ctx, move, observed)
+	case fsm.ActionEnsureCapacity:
+		return r.ensureCapacity(ctx, move, observed)
 	case fsm.ActionDeletePlacement:
 		return r.deletePlacement(ctx, *move)
 	case fsm.ActionReleasePlacement:
@@ -153,6 +155,9 @@ func (r *Reconciler) releasePlacement(ctx context.Context, move *volumeapi.Move,
 func (r *Reconciler) ensureCopy(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	if observed.DestinationNode == "" || observed.Replacement == nil || !hasPlacementHold(observed.Replacement) {
 		return fmt.Errorf("scheduled destination and held replacement Pod are required")
+	}
+	if !move.Status.CapacityApproved || move.Status.SourceBytes <= 0 {
+		return fmt.Errorf("destination capacity is not approved")
 	}
 	previous := move.Status
 	move.Status.DestinationNode = observed.DestinationNode

@@ -210,6 +210,11 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	result.FSM.ConsumerExists = result.Consumer != nil
 	result.FSM.EvictionRequested = move.Status.EvictionRequested
 	result.FSM.PublishedOnSource = contains(state.PublishedNodes, move.Spec.SourceNode)
+	result.FSM.CapacityApproved = move.Status.CapacityApproved
+	result.FSM.CapacityBlocked = move.Status.CapacityReason != "" && !move.Status.CapacityApproved
+	if result.FSM.CapacityBlocked {
+		result.FSM.UnsafeReason = move.Status.CapacityReason
+	}
 	result.FSM.ReplacementExists = result.Replacement != nil
 	result.FSM.ReplacementHeld = result.Replacement != nil && hasPlacementHold(result.Replacement)
 

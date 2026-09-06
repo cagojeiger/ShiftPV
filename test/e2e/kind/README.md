@@ -19,7 +19,10 @@ Run from the repository root:
 ```
 
 The script builds and loads `shiftpv:dev` and installs the Helm chart with
-ShiftPV marked as the default StorageClass. It creates a PVC without
+ShiftPV marked as the default StorageClass. It first overlays one Pool with a
+bounded tmpfs, proves that external filesystem consumption blocks admission,
+then proves that an empty PVC still consumes aggregate reservation until deletion.
+It creates a PVC without
 `storageClassName`, verifies Kubernetes defaults it to `shiftpv`, provisions it
 through `csi.shiftpv.io`, and starts a Pod that writes through the mounted RWO
 filesystem volume. Before provisioning, it verifies that a direct server-side
@@ -55,6 +58,27 @@ MOBILITY_FILESYSTEM_FAULTS_ONLY=1 \
   CLUSTER_NAME=shiftpv-mobility-fs-focused \
   ./test/e2e/kind/run.sh
 ```
+
+Run only Pool capacity admission with:
+
+```bash
+POOL_CAPACITY_ONLY=1 \
+  CLUSTER_NAME=shiftpv-capacity-focused \
+  ./test/e2e/kind/run.sh
+```
+
+Run only the published `0.1.3` to source-tree chart upgrade with:
+
+```bash
+UPGRADE_ONLY=1 \
+  CLUSTER_NAME=shiftpv-upgrade-focused \
+  ./test/e2e/kind/run.sh
+```
+
+This path proves the old Pool schema and StorageClass can be upgraded by applying
+the new CRDs, adding a limit to every Pool, and then upgrading the release. It
+also verifies that a pre-upgrade volume retains its checksum and that a new PVC
+can be provisioned by the upgraded controller.
 
 The cluster and its temporary host directories are removed on exit. Set
 `KEEP_CLUSTER=1` only while diagnosing a failure.

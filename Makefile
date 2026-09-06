@@ -8,7 +8,7 @@ CONTROLLER_IMAGE ?= shiftpv-controller:$(CONTROLLER_VERSION)
 NODE_IMAGE ?= shiftpv-node:$(NODE_VERSION)
 IMAGE ?= shiftpv:dev
 COVERAGE_MIN ?= 80
-COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/lifecycle/... ./src/mobility/... ./src/node/... ./src/volume/... ./src/webhook/... ./test/...
+COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/lifecycle/... ./src/mobility/... ./src/node/... ./src/pool/... ./src/volume/... ./src/webhook/... ./test/...
 
 verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template
 
@@ -62,10 +62,12 @@ image-version-check:
 release-workflow-test:
 	./test/release/resolve-image-release.sh
 	./test/release/resolve-chart-release.sh
+	./test/release/validate-workflow-order.sh
+	./test/release/wait-for-chart-images.sh
 	./test/release/validate-artifact-lock.sh
 
 shellcheck:
-	shellcheck build/ci/resolve-image-release.sh build/ci/resolve-chart-release.sh test/release/resolve-image-release.sh test/release/resolve-chart-release.sh test/release/validate-artifact-lock.sh test/e2e/kind/run.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh test/performance/evaluate-home-mobility.sh
+	shellcheck build/ci/resolve-image-release.sh build/ci/resolve-chart-release.sh build/ci/wait-for-chart-images.sh test/release/fixtures/fake-docker.sh test/release/resolve-image-release.sh test/release/resolve-chart-release.sh test/release/validate-workflow-order.sh test/release/wait-for-chart-images.sh test/release/validate-artifact-lock.sh test/e2e/kind/run.sh test/e2e/kind/upgrade.sh test/e2e/kind/pool-capacity.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh test/performance/evaluate-home-mobility.sh
 
 actionlint:
 	@if command -v actionlint >/dev/null 2>&1; then \

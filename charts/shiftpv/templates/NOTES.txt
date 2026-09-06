@@ -4,7 +4,7 @@ StorageClass: {{ .Values.storageClass.name }}
 Driver: csi.shiftpv.io
 Mobility: {{ .Values.mobility.enabled }}
 
-Register each participating node with a ShiftPVPool.
+Register each participating node with a ShiftPVPool including spec.capacity.limit.
 {{- if .Values.mobility.enabled }}
 Opt in workload namespaces with: kubectl label namespace <name> shiftpv.io/admission=enabled
 The Controller creates, renews, and hot-reloads the admission TLS certificate.

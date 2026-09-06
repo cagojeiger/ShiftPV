@@ -135,47 +135,24 @@ helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--wait \
 	--timeout 5m
 
-# A destination can contain partial staging data when rsync reaches ENOSPC.
-# Recovery must keep the source authoritative and quarantine, never promote,
-# whatever the failed copy left behind.
+# Capacity admission must reject an undersized destination before rsync creates
+# staging data or changes volume authority.
 ENOSPC_NAMESPACE=shiftpv-mobility-enospc
 create_source_workload "${ENOSPC_NAMESPACE}" 'ShiftPV mobility ENOSPC recovery'
 docker exec "${DESTINATION_NODE}" mount -t tmpfs -o size=1m,nr_inodes=128 shiftpv-mobility-enospc "${DESTINATION_MOUNT}"
 MOUNT_STATE=tmpfs_rw
+docker exec "${DESTINATION_NODE}" sh -c "dd if=/dev/zero of='${DESTINATION_MOUNT}/capacity-fill' bs=1M count=2 >/dev/null 2>&1 || true"
 kubectl cordon "${SOURCE_NODE}"
 wait_for_move
-controller_down
+wait_for_blocked DestinationFilesystemSpace
+test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.capacityApproved}')" = false
+test -n "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceBytes}')"
 test -z "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.copyJobName}')"
-docker exec "${DESTINATION_NODE}" sh -ec '
-  staging="/srv/shiftpv-b/.shiftpv/incoming/'"${MOVE_NAME}"'"
-  mkdir -p "${staging}"
-  printf "pre-existing partial staging\n" > "${staging}/partial-before-rsync"
-  if dd if=/dev/zero of=/srv/shiftpv-b/enospc-fill bs=1M count=2 2>/dev/null; then
-    echo "tmpfs size limit was not enforced" >&2
-    exit 1
-  fi
-  test -s /srv/shiftpv-b/enospc-fill
-'
-MOUNT_STATE=enospc
-controller_up
-wait_for_blocked CopyFailed
-echo 'checking ENOSPC staging directory'
-docker exec "${DESTINATION_NODE}" test -d "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}"
-echo 'checking ENOSPC staging marker is not valid'
-STAGING_MARKER=$(docker exec "${DESTINATION_NODE}" sh -c 'if test -f "$1"; then cat "$1"; fi' sh "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}/.shiftpv-move-id")
-test "${STAGING_MARKER}" != "${MOVE_NAME}"
-echo 'checking ENOSPC partial staging payload'
-PARTIAL_ENTRY=$(docker exec "${DESTINATION_NODE}" find "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}" -mindepth 1 -print -quit)
-test -n "${PARTIAL_ENTRY}"
-echo "observed partial staging entry: ${PARTIAL_ENTRY}"
-echo 'freeing ENOSPC filler'
-docker exec "${DESTINATION_NODE}" rm -f "${DESTINATION_MOUNT}/enospc-fill"
-MOUNT_STATE=tmpfs_rw
-echo 'requesting source recovery after ENOSPC'
-request_source_recovery "${ENOSPC_NAMESPACE}"
-docker exec "${DESTINATION_NODE}" test -d "${DESTINATION_MOUNT}/.shiftpv/aborted/${MOVE_NAME}-incoming"
 docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}"
-echo "mobility ENOSPC partial-staging recovery passed: volume=${VOLUME_ID} move=${MOVE_NAME}"
+echo 'requesting source recovery after capacity rejection'
+request_source_recovery "${ENOSPC_NAMESPACE}"
+docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}"
+echo "mobility destination capacity rejection passed: volume=${VOLUME_ID} move=${MOVE_NAME}"
 delete_workload "${ENOSPC_NAMESPACE}"
 docker exec "${DESTINATION_NODE}" umount "${DESTINATION_MOUNT}"
 MOUNT_STATE=normal

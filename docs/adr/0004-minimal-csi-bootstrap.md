@@ -3,6 +3,7 @@
 - 상태: Accepted
 - 날짜: 2026-09-01
 - 후속 결정: owner와 topology는 [ADR 0005](0005-automatic-cordon-volume-mobility.md)가 확장한다.
+- 후속 결정: Pool 총량 admission은 [ADR 0011](0011-pool-filesystem-capacity-admission.md)이 확장한다.
 - 상세 계약: [CSI driver](../spec/csi-driver.md), [StorageClass](../spec/storage-class.md)
 
 ## Context

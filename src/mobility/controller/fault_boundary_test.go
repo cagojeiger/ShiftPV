@@ -121,7 +121,7 @@ func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testin
 		Name:   "move-test",
 		UID:    "move-uid",
 		Spec:   volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
-		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForDestination), ClaimNamespace: "workload", CandidateNodes: []string{"destination"}},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForCapacity), ClaimNamespace: "workload", CandidateNodes: []string{"destination"}, CapacityApproved: true, SourceBytes: 1},
 	}
 	inner := &memoryRepository{
 		pools: []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
