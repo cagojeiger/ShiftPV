@@ -155,7 +155,7 @@ polling이 진행 시각을 바꾸지 않으며, phase/reason/recovery 변화가
 남아야 한다.
 정상 cordon 이동은 `Copying`과 `Committing` 중 Controller
 Pod를 강제 교체해도 같은 Move가 `Succeeded`로 수렴해야 한다. PVC UID, PV, volume handle,
-checksum, destination final과 source retired directory도 검증한다. Controller가 생성한
+checksum, destination final 존재와 source final/임시 retired directory 부재도 검증한다. Controller가 생성한
 TLS Secret의 네 key, Service/CSIDriver owner reference, webhook `caBundle` 일치, restart 시
 certificate 유지와 `mobility.enabled=false` 전환 시 Service/Secret/webhook이 유지되면서
 webhook이 `failurePolicy=Ignore`와 항상 false인 match condition으로 비활성화되는지도

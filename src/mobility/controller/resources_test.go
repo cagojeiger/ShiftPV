@@ -50,6 +50,88 @@ func TestCopyJobRequiresAnEmptyItemizedChecksumDiff(t *testing.T) {
 	}
 }
 
+func TestCleanupSourceScriptPurgesSourceAndIsIdempotent(t *testing.T) {
+	for _, scenario := range []string{"source", "retired", "absent", "source symlink", "retired symlink", "collision"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			write := func(path, content string) {
+				t.Helper()
+				full := filepath.Join(root, path)
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			wantError := false
+			switch scenario {
+			case "source":
+				write("volumes/volume/payload", "old source")
+			case "retired":
+				write(".shiftpv/retired/move/payload", "old source")
+			case "absent":
+			case "source symlink":
+				wantError = true
+				write("outside/payload", "preserve")
+				if err := os.MkdirAll(filepath.Join(root, "volumes"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(root, "volumes/volume")); err != nil {
+					t.Fatal(err)
+				}
+			case "retired symlink":
+				wantError = true
+				write("outside/payload", "preserve")
+				if err := os.MkdirAll(filepath.Join(root, ".shiftpv/retired"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(root, ".shiftpv/retired/move")); err != nil {
+					t.Fatal(err)
+				}
+			case "collision":
+				wantError = true
+				write("volumes/volume/payload", "source")
+				write(".shiftpv/retired/move/payload", "retired")
+			}
+
+			err := runRecoveryScript(t, root, cleanupSourceScript, false)
+			if (err != nil) != wantError {
+				t.Fatalf("error=%v wantError=%v", err, wantError)
+			}
+			if wantError {
+				if scenario == "source symlink" || scenario == "retired symlink" {
+					data, err := os.ReadFile(filepath.Join(root, "outside/payload"))
+					if err != nil || string(data) != "preserve" {
+						t.Fatal("symlink target was modified")
+					}
+				}
+				if scenario == "collision" {
+					for path, want := range map[string]string{
+						"volumes/volume/payload":        "source",
+						".shiftpv/retired/move/payload": "retired",
+					} {
+						data, err := os.ReadFile(filepath.Join(root, path))
+						if err != nil || string(data) != want {
+							t.Fatalf("collision path %s was modified", path)
+						}
+					}
+				}
+				return
+			}
+			if err := runRecoveryScript(t, root, cleanupSourceScript, false); err != nil {
+				t.Fatalf("retry failed: %v", err)
+			}
+			for _, path := range []string{"volumes/volume", ".shiftpv/retired/move"} {
+				if _, err := os.Lstat(filepath.Join(root, path)); !os.IsNotExist(err) {
+					t.Fatalf("cleanup left %s", path)
+				}
+			}
+		})
+	}
+}
+
 func TestItemizedChecksumDryRunReportsDifferentContent(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync is not installed")

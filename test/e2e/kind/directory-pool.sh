@@ -269,8 +269,8 @@ if [[ "$(kubectl get "shiftpvvolume/${MOBILITY_VOLUME}" -o jsonpath='{.status.ow
 fi
 docker exec "${POOL_B_NODE}" grep -Fx \
 	'ShiftPV ordinary directory mobility' "${POOL_B_PATH}/volumes/${MOBILITY_VOLUME}/payload"
-docker exec "${POOL_A_NODE}" grep -Fx \
-	'ShiftPV ordinary directory mobility' "${POOL_A_PATH}/.shiftpv/retired/${MOVE_NAME}/payload"
+docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/volumes/${MOBILITY_VOLUME}"
+docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/.shiftpv/retired/${MOVE_NAME}"
 
 kubectl uncordon "${POOL_A_NODE}"
 kubectl -n "${MOBILITY_NAMESPACE}" delete deployment/writer --wait=true

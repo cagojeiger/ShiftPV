@@ -66,7 +66,9 @@ func TestRecoveryRetirementScript(t *testing.T) {
 				committed = true
 				write(".shiftpv/retired/move/payload", "old source")
 			case "missing committed source":
-				committed, wantError = true, true
+				// A committed move may have purged the source before the Job
+				// completion observation was persisted.
+				committed = true
 			case "wrong marker":
 				wantError = true
 				write("volumes/volume/.shiftpv-move-id", "other-move")

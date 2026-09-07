@@ -144,7 +144,8 @@ wait_for_success() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 	docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}/payload"
-	test -f "${WORKER_A_POOL}/.shiftpv/retired/${MOVE_NAME}/payload"
+	test ! -e "${WORKER_A_POOL}/volumes/${VOLUME_ID}"
+	test ! -e "${WORKER_A_POOL}/.shiftpv/retired/${MOVE_NAME}"
 }
 
 delete_workload() {
