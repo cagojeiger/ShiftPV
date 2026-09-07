@@ -80,7 +80,7 @@ preflight는 reservation이 아니다. CPU/memory fit, 추가 admission 변경, 
 
 ## Resources and authority
 
-- `ShiftPVPool`: 참여 node와 이미 마운트된 `mountPath`를 등록한다.
+- `ShiftPVPool`: 참여 node와 기존 filesystem 안의 Pool directory인 `mountPath`를 등록한다.
 - `ShiftPVVolume`: volume handle별 phase, authoritative owner, active move와 published node를
   기록한다.
 - `ShiftPVMove`: 한 번의 source-to-destination transaction과 FSM 관찰 결과를 기록한다.

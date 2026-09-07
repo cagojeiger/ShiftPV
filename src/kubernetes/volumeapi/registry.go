@@ -31,7 +31,10 @@ var (
 )
 
 const (
-	PoolConditionReady             = "Ready"
+	PoolConditionReady      = "Ready"
+	PoolConditionAccessible = "Accessible"
+	// PoolConditionMounted is retained so newer node plugins can remove the
+	// obsolete condition written by releases that required an exact mount point.
 	PoolConditionMounted           = "Mounted"
 	PoolConditionWritable          = "Writable"
 	PoolConditionCapacityReadable  = "CapacityReadable"

@@ -145,15 +145,21 @@ func (s *Service) poolReservedBytes(ctx context.Context, nodeName string) (int64
 		if !move.Status.CapacityApproved || move.Status.DestinationNode != nodeName {
 			continue
 		}
+		reservation, reservationExists := reservationByID(reservations.Items, move.Spec.VolumeID)
 		state, exists := volumes[move.Spec.VolumeID]
 		if !exists {
+			// A completed DeleteVolume removes both the volume state and its
+			// reservation, while the terminal Move remains as an audit record.
+			// Such a record owns no capacity and must not block unrelated PVCs.
+			if !reservationExists {
+				continue
+			}
 			return 0, status.Errorf(codes.FailedPrecondition, "move %q has no volume state", move.Name)
 		}
 		if !volumeapi.MoveReservesDestination(move, state, nodeName) {
 			continue
 		}
-		reservation, exists := reservationByID(reservations.Items, move.Spec.VolumeID)
-		if !exists {
+		if !reservationExists {
 			return 0, status.Errorf(codes.FailedPrecondition, "move %q has no capacity reservation", move.Name)
 		}
 		capacityBytes, parseErr := strconv.ParseInt(reservation.Data["capacity"], 10, 64)

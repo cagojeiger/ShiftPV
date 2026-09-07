@@ -17,8 +17,10 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 
 - 잘못된 requested capacity, Pool limit, topology, access mode와 StorageClass parameter
 - Pool 총예약 경계, 현재 owner 합산, 동시 reservation과 statfs 실패의 fail-closed 처리
-- Pool mount/write/statfs probe, standard Conditions, generation/freshness와 node-bound status update
+- Pool directory 접근/write/statfs probe, standard Conditions, generation/freshness와 node-bound status update
 - 이동 source bytes 측정, destination 논리/물리 admission과 승인 상태 재시작 보존
+- 삭제 완료 뒤 남은 terminal Move는 후속 provisioning/이동 capacity를 막지 않고,
+  reservation만 남은 불완전 Move는 fail-closed
 - CreateVolume idempotency와 directory 생성 실패 후 retry reservation
 - DeleteVolume 실패 시 reservation 보존
 - owner node 불일치, unsafe target, read-only/raw-block publish 거부
@@ -57,32 +59,36 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 
 합격 조건은 다음과 같다.
 
-1. 같은 Pool filesystem의 ShiftPV 외부 파일 소비를 statfs가 반영해 신규 PVC를 거부하고,
+1. worker root filesystem의 일반 directory가 mount point가 아님을 확인한 뒤에도 Pool
+   `Accessible=True/Ready=True`, PVC provisioning, Pod write와 삭제 정리가 성공한다. 없는
+   directory는 `PathMissing`으로 거부하며 자동 생성하지 않는다. 두 worker의 일반 directory
+   사이 cordon 이동도 owner 전환과 checksum 보존 뒤 성공한다.
+2. 같은 Pool filesystem의 ShiftPV 외부 파일 소비를 statfs가 반영해 신규 PVC를 거부하고,
    외부 파일 제거 뒤 같은 PVC가 수렴한다.
-2. 빈 PVC의 requested bytes도 Pool 총예약에 포함되고 삭제 뒤 한 번만 반환된다.
-3. ShiftPV가 기본 StorageClass로 선언된다.
-4. `storageClassName`이 없는 PVC가 `shiftpv`를 선택하고 Bound가 된다.
-5. PV의 CSI driver가 `csi.shiftpv.io`이고 Pod가 volume을 mount해 데이터를 쓴다.
-6. Controller Pod와 owner node의 Node Plugin Pod를 강제 교체해도 실행 중 데이터와
+3. 빈 PVC의 requested bytes도 Pool 총예약에 포함되고 삭제 뒤 한 번만 반환된다.
+4. ShiftPV가 기본 StorageClass로 선언된다.
+5. `storageClassName`이 없는 PVC가 `shiftpv`를 선택하고 Bound가 된다.
+6. PV의 CSI driver가 `csi.shiftpv.io`이고 Pod가 volume을 mount해 데이터를 쓴다.
+7. Controller Pod와 owner node의 Node Plugin Pod를 강제 교체해도 실행 중 데이터와
    이후 Pod 재생성 checksum이 유지된다.
-7. Pod 재생성 후 checksum이 유지된다.
-8. ShiftPV workload가 실행 중이면 Helm 제거가 실패하고 release와 mount가 유지된다.
-9. workload를 중지해도 retained PVC/PV/Volume이 남아 있으면 제거가 실패한다.
-10. lifecycle `ValidatingWebhookConfiguration`을 명시적으로 제거하고 `--no-hooks`로
+8. Pod 재생성 후 checksum이 유지된다.
+9. ShiftPV workload가 실행 중이면 Helm 제거가 실패하고 release와 mount가 유지된다.
+10. workload를 중지해도 retained PVC/PV/Volume이 남아 있으면 제거가 실패한다.
+11. lifecycle `ValidatingWebhookConfiguration`을 명시적으로 제거하고 `--no-hooks`로
    긴급 제거한 뒤에도 PVC, PV, reservation과 데이터가 남는다.
-11. 같은 namespace와 Pool 등록으로 재설치하면 같은 데이터를 다시 mount한다.
-12. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
+12. 같은 namespace와 Pool 등록으로 재설치하면 같은 데이터를 다시 mount한다.
+13. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
    기본값이 유지되고, 명시적으로 `shiftpv`를 선택한 PVC만 ShiftPV로 provision된다.
-13. 두 Pool이 실제 mount/write/capacity probe를 통과해 `Ready=True`가 된 뒤에만
+14. 두 Pool이 실제 directory/write/capacity probe를 통과해 `Ready=True`가 된 뒤에만
     provisioning을 시작한다.
-14. 고정 worker의 pool inode가 고갈되면 `Ready=False/NoSpace`가 되고 신규 reservation을
+15. 고정 worker의 pool inode가 고갈되면 `Ready=False/NoSpace`가 되고 신규 reservation을
     만들지 않으며, 공간 복구 뒤 같은 PVC가 자동으로 Bound된다.
-15. 같은 volume의 pool을 read-only로 바꾸면 `Ready=False/ReadOnly`가 되고 deletion이
+16. 같은 volume의 pool을 read-only로 바꾸면 `Ready=False/ReadOnly`가 되고 deletion이
     `Unavailable`로 실패할 때
     reservation과 데이터를 보존하고, read-write 복구 후 삭제가 완료된다.
-16. 이동 destination이 ENOSPC이면 `Ready=False/NoSpace`인 동안 Move, volume lock, staging을
+17. 이동 destination이 ENOSPC이면 `Ready=False/NoSpace`인 동안 Move, volume lock, staging을
     만들지 않고, 공간 복구 뒤 Move를 자동 생성해 이동을 완료한다.
-17. 검증된 copy 뒤 destination을 read-only로 바꾸면 기존 Move가
+18. 검증된 copy 뒤 destination을 read-only로 바꾸면 기존 Move가
     `Copying/DestinationUnavailable`에서 owner commit 전에 멈추고, read-write 복구 후 같은
     transaction으로 이동을 완료한다.
 
@@ -94,6 +100,14 @@ Pool capacity 경로만 빠르게 재현할 때는 다음 focused mode를 사용
 ```bash
 POOL_CAPACITY_ONLY=1 \
   CLUSTER_NAME=shiftpv-capacity-focused \
+  ./test/e2e/kind/run.sh
+```
+
+일반 directory Pool 계약만 빠르게 재현할 때는 다음 focused mode를 사용한다.
+
+```bash
+DIRECTORY_POOL_ONLY=1 \
+  CLUSTER_NAME=shiftpv-directory-focused \
   ./test/e2e/kind/run.sh
 ```
 

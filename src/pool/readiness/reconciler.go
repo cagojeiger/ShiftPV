@@ -66,6 +66,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	status := pool.Status
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)
+	meta.RemoveStatusCondition(&status.Conditions, volumeapi.PoolConditionMounted)
 	for _, condition := range conditions(result, pool.Generation, now) {
 		meta.SetStatusCondition(&status.Conditions, condition)
 	}
@@ -88,11 +89,11 @@ func (r *Reconciler) validate() error {
 }
 
 func conditions(result Result, generation int64, now time.Time) []metav1.Condition {
-	mounted := condition(volumeapi.PoolConditionMounted, result.Mounted, generation, now)
+	accessible := condition(volumeapi.PoolConditionAccessible, result.Accessible, generation, now)
 	writable := condition(volumeapi.PoolConditionWritable, result.Writable, generation, now)
 	capacity := condition(volumeapi.PoolConditionCapacityReadable, result.CapacityReadable, generation, now)
-	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool path is mounted, writable, and capacity-readable"}
-	for _, candidate := range []Check{result.Mounted, result.Writable, result.CapacityReadable} {
+	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and capacity-readable"}
+	for _, candidate := range []Check{result.Accessible, result.Writable, result.CapacityReadable} {
 		if !candidate.Known || !candidate.OK {
 			readyCheck.OK = false
 			readyCheck.Reason = candidate.Reason
@@ -100,7 +101,7 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 			break
 		}
 	}
-	return []metav1.Condition{mounted, writable, capacity, condition(volumeapi.PoolConditionReady, readyCheck, generation, now)}
+	return []metav1.Condition{accessible, writable, capacity, condition(volumeapi.PoolConditionReady, readyCheck, generation, now)}
 }
 
 func condition(conditionType string, check Check, generation int64, now time.Time) metav1.Condition {

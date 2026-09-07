@@ -6,11 +6,12 @@ chart-created StorageClass. With `mobility.enabled=true`, the same Controller
 Pod also runs the automatic cordon reconciler and HTTPS admission webhook. The
 StorageClass is not the cluster default unless explicitly enabled.
 
-Each selected node must already have a writable filesystem mounted at the path
-declared by that node's `ShiftPVPool.spec.mountPath`. Paths may differ by node.
-The chart never creates, formats, mounts, or repairs those filesystems. ShiftPV
-uses each Pool's aggregate reservation limit and current filesystem availability
-for new-volume admission, but does not enforce a per-volume write limit.
+Each selected node must already have a writable absolute directory declared by that
+node's `ShiftPVPool.spec.mountPath`. Paths may differ by node and may be ordinary
+directories on the root filesystem or directories on separate mounts. The chart never
+creates Pool directories or creates, formats, mounts, or repairs filesystems. ShiftPV uses
+each Pool's aggregate reservation limit and current containing-filesystem availability for
+new-volume admission, but does not enforce a per-volume write limit.
 
 ```bash
 helm repo add shiftpv https://cagojeiger.github.io/ShiftPV
@@ -62,14 +63,14 @@ metadata:
   name: storage-worker-a
 spec:
   nodeName: worker-a
-  mountPath: /mnt/shiftpv
+  mountPath: /var/lib/shiftpv
   capacity:
     limit: 500Gi
 ```
 
 `capacity.limit` is the total requested capacity that ShiftPV may reserve on that
 Pool. It is not the disk size and does not reserve space from other processes.
-The Node Plugin reports `Mounted`, `Writable`, `CapacityReadable`, and aggregate
+The Node Plugin reports `Accessible`, `Writable`, `CapacityReadable`, and aggregate
 `Ready` conditions on the Pool. Wait for readiness before creating PVCs:
 
 ```bash
@@ -80,14 +81,23 @@ kubectl wait --for=condition=Ready shiftpvpool/storage-worker-a --timeout=2m
 `poolReadiness.staleAfter` controls how long the Controller trusts its last success.
 Set `staleAfter` longer than `interval` with enough allowance for API delays; an
 equal or shorter value can make a healthy Pool intermittently unavailable.
-The probe creates, syncs, and removes a small temporary file inside the exact Pool
-path. A missing path, ordinary unmounted directory, read-only filesystem, permission
-failure, failed capacity syscall, outdated generation, or stale probe excludes the
-Pool from new provisioning and mobility without changing existing volume ownership.
+The probe verifies that the exact Pool path is an existing directory, then creates,
+syncs, and removes a small temporary file in it. The path itself does not need to be a
+mount point. A missing or non-directory path, read-only filesystem, permission failure,
+failed capacity syscall, outdated generation, or stale probe excludes the Pool from new
+provisioning and mobility without changing existing volume ownership.
 Pool CRs are cluster operating state; the Helm release does not create or own
 them. Because the privileged Node Plugin resolves these paths through a host-root
 mount, permission to create or change Pool CRs is security-sensitive and must be
 restricted to cluster storage operators. Root (`/`) is rejected.
+
+For a Pool intended to be a separate mount, monitor that mount at the OS layer. If
+unmounting exposes another writable directory at the same path, ShiftPV cannot distinguish
+that fallback from an intentionally configured ordinary-directory Pool.
+
+Setting `storageClass.defaultClass=true` changes the default only for newly created
+PVCs. ShiftPV does not adopt PVs provisioned by an older hostPath StorageClass; migrate
+those workloads and data separately.
 
 Automatic mobility is opt-in per workload namespace. Label only namespaces whose
 controller-owned, single-PVC workloads follow the current mobility contract.
@@ -146,7 +156,7 @@ in this order so the new controller never observes the old Pool shape:
    manager. Never delete and recreate a CRD.
 2. Add a capacity limit to every existing Pool. Choose a limit no larger than
    the storage allocation that operators intend ShiftPV to reserve on that
-   mounted filesystem.
+   containing filesystem.
 3. Upgrade the Helm release and wait for the Controller and Node Plugin.
 
 Set `TARGET_CHART_VERSION` to the chart being installed from the repository:
@@ -238,7 +248,7 @@ Key configurable values:
 | `node.kubeletRootDir` | kubelet state root, normally `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | participating node selection |
 | `helperPod.image`, `helperPod.timeout`, `helperPod.resources` | node-local directory and capacity helper; a custom image must provide `sh`, `stat`, `du`, `awk`, `mkdir`, and `rm` |
-| `poolReadiness.interval`, `poolReadiness.staleAfter` | node-local mount/write/capacity probe interval and Controller freshness limit |
+| `poolReadiness.interval`, `poolReadiness.staleAfter` | node-local directory/write/capacity probe interval and Controller freshness limit |
 | `lifecycle.uninstallMode` | uninstall owner: `helm` (default, fail fast) or `argocd` (wait and retry) |
 | `storageClass.create`, `storageClass.name`, `storageClass.defaultClass` | StorageClass publication and explicit default-class opt-in |
 | `controller.resources`, `node.resources`, `sidecars.*.resources` | workload resources |

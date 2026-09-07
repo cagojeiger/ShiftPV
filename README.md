@@ -1,7 +1,7 @@
 # ShiftPV
 
-ShiftPV is a CSI driver for directory-backed local volumes on filesystems that
-an operator has already prepared on Kubernetes nodes.
+ShiftPV is a CSI driver that replaces a basic hostPath StorageClass with managed,
+movable directory-backed local volumes on filesystems already present on Kubernetes nodes.
 
 ## Current scope
 
@@ -22,9 +22,9 @@ The current implementation provides:
 - `Retain` and `WaitForFirstConsumer` StorageClass
 - optional cluster-default StorageClass annotation
 - deterministic volume IDs and namespace-scoped reservation ConfigMaps
-- explicit node Pool registration with per-node mount paths and dynamic owner publish guard
+- explicit node Pool registration with per-node directories and dynamic owner publish guard
 - Pool filesystem capacity admission using aggregate PVC reservations and current shared-filesystem space
-- node-reported Pool mount, write and capacity readiness with stale-status rejection
+- node-reported Pool directory, write and capacity readiness with stale-status rejection
 - automatic healthy-node cordon cold migration with Placement Hold, authenticated rsync,
   dynamic owner CAS and restart-safe reconciliation
 - fail-closed Helm/Argo CD Application uninstall guard and explicit recovery bypass
@@ -35,12 +35,13 @@ The current implementation provides:
 - Kubernetes 1.35 or newer
 - Linux nodes with privileged DaemonSet and HostPath access
 - Argo CD 3.3 or newer when Application deletion must run the uninstall guard
-- a writable local filesystem prepared on every participating node; each node's
-  absolute mount path is declared by its `ShiftPVPool`
+- an existing writable absolute directory on every participating node; each directory is
+  declared by its `ShiftPVPool` and may be on the root or a separately mounted filesystem
 
-Each participating node must use a distinct local path. ShiftPV does not create,
-format, mount or repair filesystems. It reads filesystem capacity from the
-registered Pool path when admitting a new volume.
+Each participating node must use a distinct local path. The Pool path itself does not need
+to be a mount point, but it must already exist and cannot be `/`. ShiftPV does not create
+Pool directories or create, format, mount, or repair filesystems. It reads capacity from the
+filesystem containing the registered Pool path when admitting a new volume.
 
 Register every participating node explicitly with a `ShiftPVPool` CR after
 installing the chart, then wait for its `Ready=True` condition before provisioning.
@@ -63,8 +64,8 @@ normally require
 [chart deployment contract](charts/shiftpv/README.md#kubelet-state-root).
 
 The chart does not register storage paths. After installation, create one
-`ShiftPVPool` for each participating node using an already-mounted writable
-host path. The chart version and the controller/node image versions are released
+`ShiftPVPool` for each participating node using an existing writable host
+directory. The chart version and the controller/node image versions are released
 independently.
 
 ## Limitations
@@ -79,6 +80,7 @@ independently.
 - requested capacity contributes to the owner Pool's aggregate reservation but is not a per-volume write limit
 - capacity admission does not prevent external writers or a PVC from consuming space after provisioning
 - mobility measures quiesced source bytes and admits destination capacity before copy
+- PVs provisioned by another StorageClass are not adopted or converted automatically
 - deleting a PVC leaves its `Retain` PV and data for manual recovery
 
 ## Documentation

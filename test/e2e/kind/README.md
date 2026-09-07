@@ -19,7 +19,12 @@ Run from the repository root:
 ```
 
 The script builds and loads `shiftpv:dev` and installs the Helm chart with
-ShiftPV marked as the default StorageClass. It first overlays one Pool with a
+ShiftPV marked as the default StorageClass. It first registers an ordinary
+directory inside a worker's root filesystem, proves the path is not a mount point,
+and verifies missing-path rejection followed by Pool readiness, provisioning,
+Pod write-through, deletion cleanup, and a checksum-preserving cordon move to an
+ordinary directory on the other worker. The terminal Move remains as history while
+the deleted volume no longer blocks later capacity admission. It then overlays one Pool with a
 bounded tmpfs, proves that external filesystem consumption blocks admission,
 then proves that an empty PVC still consumes aggregate reservation until deletion.
 It creates a PVC without
@@ -64,6 +69,14 @@ Run only Pool capacity admission with:
 ```bash
 POOL_CAPACITY_ONLY=1 \
   CLUSTER_NAME=shiftpv-capacity-focused \
+  ./test/e2e/kind/run.sh
+```
+
+Run only the ordinary directory Pool contract with:
+
+```bash
+DIRECTORY_POOL_ONLY=1 \
+  CLUSTER_NAME=shiftpv-directory-focused \
   ./test/e2e/kind/run.sh
 ```
 

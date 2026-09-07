@@ -8,7 +8,7 @@ ADR은 현재 구현의 구조적 결정을 한 문서에 하나씩 기록한다
 | ADR | 결정 | 상태 |
 |-----|------|------|
 | [0001](0001-position-local-hostpath-only-no-replication.md) | 복제 없는 로컬 스토리지 | Accepted |
-| [0002](0002-mounted-filesystem-boundary.md) | 사전 마운트된 로컬 filesystem만 Pool로 관리 | Accepted |
+| [0002](0002-mounted-filesystem-boundary.md) | 기존 filesystem의 지정 directory를 Pool로 관리 | Accepted |
 | [0003](0003-csi-product-foundation.md) | Kubernetes CSI를 제품 기반으로 사용 | Accepted |
 | [0004](0004-minimal-csi-bootstrap.md) | 첫 제품 범위를 최소 CSI lifecycle로 제한 | Accepted |
 | [0005](0005-automatic-cordon-volume-mobility.md) | 정상 cordon 이동과 Kubernetes 배치 협력 | Accepted |
@@ -18,7 +18,7 @@ ADR은 현재 구현의 구조적 결정을 한 문서에 하나씩 기록한다
 | [0009](0009-nondisruptive-mobility-preflight.md) | 이동 전 consumer를 보존하는 사전 점검 | Accepted |
 | [0010](0010-operator-visible-mobility-diagnostics.md) | 기존 Move journal을 운영 진단에 사용 | Accepted |
 | [0011](0011-pool-filesystem-capacity-admission.md) | Pool filesystem 총량으로 신규 할당 제어 | Accepted |
-| [0012](0012-node-reported-pool-readiness.md) | Node가 실제 filesystem Pool readiness를 보고 | Accepted |
+| [0012](0012-node-reported-pool-readiness.md) | Node가 실제 Pool directory readiness를 보고 | Accepted |
 
 파일 이름은 `NNNN-kebab-title.md` 형식을 사용한다. 구체적인 필드, 상태 전이, 명령과
 테스트 결과는 ADR에 복제하지 않는다. 새 구조적 결정이나 기존 결정의 대체는 새 ADR로

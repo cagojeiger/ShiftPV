@@ -1,7 +1,8 @@
 # StorageClass Contract
 
-ShiftPV StorageClass는 참여 node의 등록된 Pool mount path에서 directory-backed volume을
-provision한다.
+ShiftPV StorageClass는 참여 node의 기존 filesystem 안에 등록한 Pool directory에서
+directory-backed volume을 provision한다. Pool directory 자체가 mount point일 필요는 없어서
+root filesystem 하위의 기존 hostPath 저장 경로도 사용할 수 있다.
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -41,6 +42,10 @@ Helm의 `storageClass.defaultClass`를 `true`로 설정하면 chart가
 기존 기본 StorageClass가 있는 cluster에서는 동시에 둘을 기본값으로 두지 않아야 한다.
 기본값인 `false`로 설치하면 chart는 기존 StorageClass의 annotation을 변경하지 않으며,
 workload는 `storageClassName: shiftpv`로 ShiftPV를 명시적으로 선택할 수 있다.
+
+ShiftPV를 기본 StorageClass로 바꾸는 것은 이후 생성되는 PVC의 기본 선택을 바꾸는 동작이다.
+다른 provisioner가 이미 만든 PV나 그 데이터를 자동으로 인수·변환하지 않는다. 기존 hostPath
+StorageClass의 PV는 workload별 데이터 이동 절차를 별도로 계획해야 한다.
 
 ## Helm lifecycle
 

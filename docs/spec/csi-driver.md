@@ -56,13 +56,13 @@ stats, snapshot, attach capability는 광고하지 않는다.
    호출한다.
 3. Controller는 request name의 SHA-256으로 안정적인 volume ID를 만든다.
 4. Controller는 selected node의 `ShiftPVPool`이 최근 `Ready=True`인지 확인한다. 상태가
-   없거나 `Mounted`, `Writable`, `CapacityReadable` 중 하나가 실패했거나 마지막 probe가
+   없거나 `Accessible`, `Writable`, `CapacityReadable` 중 하나가 실패했거나 마지막 probe가
    `poolReadiness.staleAfter`보다 오래됐으면 신규 할당을 거부한다.
 5. Controller는 selected node의 `ShiftPVPool.spec.capacity.limit`와 현재 owner 기준
    reservation 합계를 확인한다. 예약 ConfigMap의 capacity가 크기이고, 대응하는
    `ShiftPVVolume.status.ownerNode`가 있으면 최초 node 대신 현재 owner에 합산한다. Volume이
    아직 없는 create 중간 상태만 reservation의 최초 node에 합산한다.
-6. Controller는 node-bound helper Pod로 Pool mount의 `statfs`를 읽는다. requested bytes가
+6. Controller는 node-bound helper Pod로 Pool directory의 `statfs`를 읽는다. requested bytes가
    `limit - reserved` 또는 `Bavail * Frsize`보다 크면 directory를 만들기 전에
    `ResourceExhausted`로 거부한다. Pool 설정이나 측정 결과가 불명확해도 fail-closed다.
 7. Controller namespace의 `<volume-id>` ConfigMap을 idempotent reservation으로
@@ -80,11 +80,13 @@ stats, snapshot, attach capability는 광고하지 않는다.
     이동 후 권한의 source of truth가 아니다.
 11. external-provisioner가 이 topology를 PV node affinity로 변환한다.
 
-Node Plugin은 `poolReadiness.interval`마다 host root 아래의 정확한 Pool 경로가 mount point인지
-확인하고, 그 경로 안에서 임시 directory/file 생성, write, file sync와 cleanup을 수행한 뒤
-filesystem capacity syscall을 실행한다. 결과는 `ShiftPVPool.status.conditions`의 `Mounted`,
-`Writable`, `CapacityReadable`, `Ready`와 `lastProbeTime`, `observedGeneration`에 기록한다.
-같은 상태의 반복 probe는 condition transition time을 변경하지 않는다.
+Node Plugin은 `poolReadiness.interval`마다 host root 아래의 정확한 Pool 경로가 기존
+directory인지 확인하고, 그 경로 안에서 임시 directory/file 생성, write, file sync와
+cleanup을 수행한 뒤 그 directory가 속한 filesystem에 capacity syscall을 실행한다. Pool
+경로 자체가 mount point일 필요는 없다. 결과는 `ShiftPVPool.status.conditions`의
+`Accessible`, `Writable`, `CapacityReadable`, `Ready`와 `lastProbeTime`,
+`observedGeneration`에 기록한다. 같은 상태의 반복 probe는 condition transition time을
+변경하지 않는다. 이전 node image가 기록한 `Mounted` condition은 다음 reconcile에서 제거한다.
 
 Controller는 node-local path에 직접 접근하지 않는다. statfs와 directory 생성은 등록 Pool을
 mount한 일회성 helper Pod가 수행한다. reservation ConfigMap은 Helm resource가 아니며 같은
@@ -109,8 +111,9 @@ unpublish와 이동 후 publish를 확인하는 관찰값이며, owner 권한을
 
 Node Plugin은 node마다 다른 Pool path를 지원하기 위해 privileged DaemonSet 안의 `/host`에
 host root를 mount하고, 현재 node의 immutable `ShiftPVPool.spec.mountPath`를 그 아래에서
-해석한다. `/`와 상대 path, 누락 또는 중복 node 등록은 fail-closed다. 따라서 Pool CR
-쓰기 권한은 storage operator에게만 제한해야 한다.
+해석한다. 일반 directory와 별도 filesystem의 mount directory를 모두 지원하지만 `/`와 상대
+path, 누락, non-directory 또는 중복 node 등록은 fail-closed다. 없는 Pool directory를
+자동 생성하지 않는다. 따라서 Pool CR 쓰기 권한은 storage operator에게만 제한해야 한다.
 
 Pool readiness가 False 또는 stale이어도 기존 volume의 owner나 mount를 자동 변경하거나
 unmount하지 않는다. 기존 publish는 live Volume authority와 실제 source directory 검사를
@@ -139,7 +142,7 @@ CSI lifecycle 성능은 데이터 경로와 별도로 판단한다.
 - Controller, Node Plugin과 sidecar의 chart 기본 resources는 비어 있다. Kubernetes가
   보장하는 request/limit가 필요하면 운영자가 `controller.resources`, `node.resources`,
   `sidecars.*.resources`를 명시해야 한다.
-- 성능 결과에는 Kubernetes 버전, node CPU/memory, 실제 Pool mount/device/filesystem,
+- 성능 결과에는 Kubernetes 버전, node CPU/memory, 실제 Pool path/device/filesystem,
   dataset 크기와 file count, cache 조건, 동시 workload와 표본 수를 함께 기록한다.
 
 측정된 성능은 제품 보장값이 아니라 해당 환경의 증거이며
@@ -172,7 +175,9 @@ CSI lifecycle 성능은 데이터 경로와 별도로 판단한다.
 Mobility는 source unpublish 뒤 실제 volume directory bytes를 한 번 측정하고, destination Pool의
 총예약과 `statfs` 여유를 복사 전에 승인한다. 승인된 진행 중 Move는 destination의 논리·물리
 예약으로 계산되며 결과는 Move status에 남는다. 공간 부족은 copy Job과 owner commit 전에
-Move를 `Blocked`로 전환하고 source recovery를 허용한다.
+Move를 `Blocked`로 전환하고 source recovery를 허용한다. `DeleteVolume`이 Volume state와
+reservation을 모두 제거한 뒤 남는 terminal Move는 audit 기록일 뿐 capacity를 예약하거나
+후속 provisioning·이동을 막지 않는다. 둘 중 하나만 남은 불완전 상태는 fail-closed다.
 
 검증 방법은 [development testing](../development/testing.md), 실행 결과는
 [validation evidence](../validation/README.md)를 따른다.

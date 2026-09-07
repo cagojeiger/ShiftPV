@@ -42,14 +42,20 @@ func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T
 	old := metav1.NewTime(testTime.Add(-time.Hour))
 	repository := &fakeRepository{pool: volumeapi.Pool{
 		Name: "pool-a", NodeName: "node-a", Generation: 3,
-		Status: volumeapi.PoolStatus{Conditions: []metav1.Condition{{
-			Type: volumeapi.PoolConditionMounted, Status: metav1.ConditionTrue,
-			ObservedGeneration: 2, LastTransitionTime: old, Reason: "Mounted", Message: "old",
-		}}},
+		Status: volumeapi.PoolStatus{Conditions: []metav1.Condition{
+			{
+				Type: volumeapi.PoolConditionAccessible, Status: metav1.ConditionTrue,
+				ObservedGeneration: 2, LastTransitionTime: old, Reason: "DirectoryAccessible", Message: "old",
+			},
+			{
+				Type: volumeapi.PoolConditionMounted, Status: metav1.ConditionTrue,
+				ObservedGeneration: 2, LastTransitionTime: old, Reason: "Mounted", Message: "legacy",
+			},
+		}},
 	}}
-	ok := Check{OK: true, Known: true, Reason: "Mounted", Message: "old"}
+	ok := Check{OK: true, Known: true, Reason: "DirectoryAccessible", Message: "old"}
 	reconciler := &Reconciler{
-		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Mounted: ok,
+		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok,
 			Writable:         Check{OK: true, Known: true, Reason: "Writable", Message: "write"},
 			CapacityReadable: Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "capacity"}}},
 		Interval: time.Minute, Now: func() time.Time { return testTime },
@@ -64,9 +70,12 @@ func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != "PoolReady" {
 		t.Fatalf("ready = %#v", ready)
 	}
-	mounted := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionMounted)
-	if mounted == nil || !mounted.LastTransitionTime.Equal(&old) || mounted.ObservedGeneration != 3 {
-		t.Fatalf("mounted = %#v", mounted)
+	accessible := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionAccessible)
+	if accessible == nil || !accessible.LastTransitionTime.Equal(&old) || accessible.ObservedGeneration != 3 {
+		t.Fatalf("accessible = %#v", accessible)
+	}
+	if mounted := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionMounted); mounted != nil {
+		t.Fatalf("legacy mounted condition was not removed: %#v", mounted)
 	}
 }
 
@@ -74,7 +83,7 @@ func TestReconcileRecordsFailureAndAllowsMissingRegistration(t *testing.T) {
 	repository := &fakeRepository{pool: volumeapi.Pool{Name: "pool-a", NodeName: "node-a", Generation: 1}}
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{
-			Mounted:          Check{OK: true, Known: true, Reason: "Mounted", Message: "mounted"},
+			Accessible:       Check{OK: true, Known: true, Reason: "DirectoryAccessible", Message: "accessible"},
 			Writable:         Check{Known: true, Reason: "PermissionDenied", Message: "denied"},
 			CapacityReadable: Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "capacity"},
 		}}, Interval: time.Minute, Now: func() time.Time { return testTime },
