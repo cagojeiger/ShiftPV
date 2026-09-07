@@ -21,7 +21,7 @@ import (
 const reservationSelector = "app.kubernetes.io/name=shiftpv,app.kubernetes.io/component=volume-reservation"
 
 type PoolCapacityRegistry interface {
-	PoolForNode(context.Context, string) (volumeapi.Pool, error)
+	ReadyPoolForNode(context.Context, string) (volumeapi.Pool, error)
 	ListVolumes(context.Context) (map[string]volumeapi.State, error)
 	ListMoves(context.Context) ([]volumeapi.Move, error)
 }
@@ -54,9 +54,9 @@ func (s *Service) reserveWithinPool(ctx context.Context, id, requestName, nodeNa
 		return kubernetesAPIError("read volume reservation", err)
 	}
 
-	pool, err := s.CapacityPools.PoolForNode(ctx, nodeName)
+	pool, err := s.CapacityPools.ReadyPoolForNode(ctx, nodeName)
 	if err != nil {
-		if errors.Is(err, volumeapi.ErrPoolConfiguration) {
+		if errors.Is(err, volumeapi.ErrPoolConfiguration) || errors.Is(err, volumeapi.ErrPoolNotFound) || errors.Is(err, volumeapi.ErrPoolNotReady) {
 			return status.Errorf(codes.FailedPrecondition, "read selected Pool: %v", err)
 		}
 		return kubernetesAPIError("read selected Pool", err)

@@ -24,6 +24,7 @@ The current implementation provides:
 - deterministic volume IDs and namespace-scoped reservation ConfigMaps
 - explicit node Pool registration with per-node mount paths and dynamic owner publish guard
 - Pool filesystem capacity admission using aggregate PVC reservations and current shared-filesystem space
+- node-reported Pool mount, write and capacity readiness with stale-status rejection
 - automatic healthy-node cordon cold migration with Placement Hold, authenticated rsync,
   dynamic owner CAS and restart-safe reconciliation
 - fail-closed Helm/Argo CD Application uninstall guard and explicit recovery bypass
@@ -42,7 +43,7 @@ format, mount or repair filesystems. It reads filesystem capacity from the
 registered Pool path when admitting a new volume.
 
 Register every participating node explicitly with a `ShiftPVPool` CR after
-installing the chart.
+installing the chart, then wait for its `Ready=True` condition before provisioning.
 
 Automatic mobility applies only to workload namespaces explicitly labeled
 `shiftpv.io/admission=enabled`.

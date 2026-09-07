@@ -69,6 +69,21 @@ spec:
 
 `capacity.limit` is the total requested capacity that ShiftPV may reserve on that
 Pool. It is not the disk size and does not reserve space from other processes.
+The Node Plugin reports `Mounted`, `Writable`, `CapacityReadable`, and aggregate
+`Ready` conditions on the Pool. Wait for readiness before creating PVCs:
+
+```bash
+kubectl wait --for=condition=Ready shiftpvpool/storage-worker-a --timeout=2m
+```
+
+`poolReadiness.interval` controls the node-local probe and
+`poolReadiness.staleAfter` controls how long the Controller trusts its last success.
+Set `staleAfter` longer than `interval` with enough allowance for API delays; an
+equal or shorter value can make a healthy Pool intermittently unavailable.
+The probe creates, syncs, and removes a small temporary file inside the exact Pool
+path. A missing path, ordinary unmounted directory, read-only filesystem, permission
+failure, failed capacity syscall, outdated generation, or stale probe excludes the
+Pool from new provisioning and mobility without changing existing volume ownership.
 Pool CRs are cluster operating state; the Helm release does not create or own
 them. Because the privileged Node Plugin resolves these paths through a host-root
 mount, permission to create or change Pool CRs is security-sensitive and must be
@@ -223,6 +238,7 @@ Key configurable values:
 | `node.kubeletRootDir` | kubelet state root, normally `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | participating node selection |
 | `helperPod.image`, `helperPod.timeout`, `helperPod.resources` | node-local directory and capacity helper; a custom image must provide `sh`, `stat`, `du`, `awk`, `mkdir`, and `rm` |
+| `poolReadiness.interval`, `poolReadiness.staleAfter` | node-local mount/write/capacity probe interval and Controller freshness limit |
 | `lifecycle.uninstallMode` | uninstall owner: `helm` (default, fail fast) or `argocd` (wait and retry) |
 | `storageClass.create`, `storageClass.name`, `storageClass.defaultClass` | StorageClass publication and explicit default-class opt-in |
 | `controller.resources`, `node.resources`, `sidecars.*.resources` | workload resources |

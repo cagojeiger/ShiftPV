@@ -20,9 +20,11 @@ import (
 )
 
 type memoryRepository struct {
-	volumes map[string]volumeapi.State
-	pools   []volumeapi.Pool
-	moves   []volumeapi.Move
+	volumes              map[string]volumeapi.State
+	pools                []volumeapi.Pool
+	readyPools           []volumeapi.Pool
+	readyPoolsConfigured bool
+	moves                []volumeapi.Move
 }
 
 type countingRepository struct {
@@ -62,6 +64,12 @@ func (m *memoryRepository) CompareAndSetState(_ context.Context, id, phase, acti
 	return nil
 }
 func (m *memoryRepository) Pools(context.Context) ([]volumeapi.Pool, error) { return m.pools, nil }
+func (m *memoryRepository) ReadyPools(context.Context) ([]volumeapi.Pool, error) {
+	if m.readyPoolsConfigured {
+		return m.readyPools, nil
+	}
+	return m.pools, nil
+}
 func (m *memoryRepository) CreateMove(_ context.Context, _ string, spec volumeapi.MoveSpec) (volumeapi.Move, error) {
 	move := volumeapi.Move{Name: "move-generated", UID: "uid", Spec: spec}
 	m.moves = append(m.moves, move)
@@ -110,6 +118,23 @@ func TestDiscoverMovesCreatesOneMoveForHealthyCordon(t *testing.T) {
 	}
 	if len(repository.moves) != 1 {
 		t.Fatalf("duplicate moves were created: %#v", repository.moves)
+	}
+}
+
+func TestDiscoverMovesSkipsPoolThatIsNotReady(t *testing.T) {
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	source := volumeapi.Pool{Name: "source", NodeName: "source", MountPath: "/pool"}
+	destination := volumeapi.Pool{Name: "destination", NodeName: "destination", MountPath: "/pool"}
+	repository := &memoryRepository{
+		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"}}},
+		pools:   []volumeapi.Pool{source, destination}, readyPools: []volumeapi.Pool{source}, readyPoolsConfigured: true,
+	}
+	reconciler := &Reconciler{Client: fake.NewSimpleClientset(mobilityObjects(volumeID)...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	if err := reconciler.discoverMoves(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.moves) != 0 {
+		t.Fatalf("created move with no Ready destination: %#v", repository.moves)
 	}
 }
 
@@ -225,21 +250,25 @@ func TestObserveMarksSelectedNotReadyDestinationUnavailable(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	move := volumeapi.Move{
 		Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
-		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseCopying), ConsumerName: "consumer", DestinationNode: "destination"},
+		Status: volumeapi.MoveStatus{
+			Phase: string(fsm.PhaseCopying), ConsumerName: "consumer",
+			CandidateNodes: []string{"destination"}, DestinationNode: "destination",
+		},
 	}
+	source := volumeapi.Pool{Name: "source", NodeName: "source", MountPath: "/source-pool"}
+	destination := volumeapi.Pool{Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name}},
-		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
-		moves:   []volumeapi.Move{move},
+		pools:   []volumeapi.Pool{source, destination}, readyPools: []volumeapi.Pool{source}, readyPoolsConfigured: true,
+		moves: []volumeapi.Move{move},
 	}
 	objects := mobilityObjects(volumeID)
-	objects[2].(*corev1.Node).Status.Conditions[0].Status = corev1.ConditionUnknown
 	reconciler := &Reconciler{Client: fake.NewSimpleClientset(objects...), Repository: repository, Namespace: "system", HelperImage: "helper"}
 	observed, err := reconciler.observe(context.Background(), move)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !observed.FSM.DestinationUnavailable || observed.DestinationNode != "destination" {
+	if !observed.FSM.DestinationUnavailable || observed.FSM.DestinationBlocked || observed.DestinationNode != "destination" {
 		t.Fatalf("destination observation = %#v", observed)
 	}
 }

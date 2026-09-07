@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,7 +71,8 @@ func TestRegistryLifecycleAndPoolNodes(t *testing.T) {
 		PoolResource:   "ShiftPVPoolList",
 		MoveResource:   "ShiftPVMoveList",
 	}, pool("pool-b", "node-b"), pool("pool-a", "node-a"))
-	registry := &Registry{Client: client}
+	now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	registry := &Registry{Client: client, Now: func() time.Time { return now }}
 	ctx := context.Background()
 
 	if err := registry.Ensure(ctx, "shiftpv-11111111111111111111111111111111", "node-a"); err != nil {
@@ -103,6 +105,61 @@ func TestRegistryLifecycleAndPoolNodes(t *testing.T) {
 	registered, err := registry.PoolForNode(ctx, "node-b")
 	if err != nil || registered.Name != "pool-b" || registered.MountPath != "/mnt/shiftpv" || registered.CapacityLimit != "10Gi" {
 		t.Fatalf("PoolForNode = %#v, %v", registered, err)
+	}
+}
+
+func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
+	now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	ready := pool("ready", "node-ready")
+	stale := pool("stale", "node-stale")
+	_ = unstructured.SetNestedField(stale.Object, now.Add(-4*time.Minute).Format(time.RFC3339), "status", "lastProbeTime")
+	outdated := pool("outdated", "node-outdated")
+	_ = unstructured.SetNestedField(outdated.Object, int64(0), "status", "observedGeneration")
+	conditionOutdated := pool("condition-outdated", "node-condition-outdated")
+	conditions, _, _ := unstructured.NestedSlice(conditionOutdated.Object, "status", "conditions")
+	conditions[0].(map[string]any)["observedGeneration"] = int64(0)
+	_ = unstructured.SetNestedSlice(conditionOutdated.Object, conditions, "status", "conditions")
+	pending := pool("pending", "node-pending")
+	delete(pending.Object, "status")
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		PoolResource: "ShiftPVPoolList",
+	}, ready, stale, outdated, conditionOutdated, pending)
+	registry := &Registry{Client: client, Now: func() time.Time { return now }}
+
+	pools, err := registry.ReadyPools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pools) != 1 || pools[0].Name != "ready" {
+		t.Fatalf("ready pools = %#v", pools)
+	}
+	nodes, err := registry.PoolNodes(context.Background())
+	if err != nil || len(nodes) != 5 {
+		t.Fatalf("registered topology nodes = %#v err=%v", nodes, err)
+	}
+	if _, err := registry.ReadyPoolForNode(context.Background(), "node-stale"); !errors.Is(err, ErrPoolNotReady) {
+		t.Fatalf("stale pool error = %v", err)
+	}
+}
+
+func TestRegistrySetPoolStatusUsesNodeIdentity(t *testing.T) {
+	object := pool("pool-a", "node-a")
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		PoolResource: "ShiftPVPoolList",
+	}, object)
+	registry := &Registry{Client: client}
+	status := PoolStatus{ObservedGeneration: 1, LastProbeTime: metav1.NewTime(time.Now()), Conditions: []metav1.Condition{{
+		Type: PoolConditionReady, Status: metav1.ConditionFalse, Reason: "ReadOnly", Message: "read-only",
+	}}}
+	if err := registry.SetPoolStatus(context.Background(), "pool-a", "node-b", status); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("foreign node update error = %v", err)
+	}
+	if err := registry.SetPoolStatus(context.Background(), "pool-a", "node-a", status); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := registry.PoolForNode(context.Background(), "node-a")
+	if err != nil || updated.Status.Conditions[0].Reason != "ReadOnly" {
+		t.Fatalf("updated pool = %#v err=%v", updated, err)
 	}
 }
 
@@ -258,13 +315,21 @@ func TestRegistryDeleteMoveUsesUIDPreconditionAndIsIdempotent(t *testing.T) {
 }
 
 func pool(name, nodeName string) *unstructured.Unstructured {
+	probeTime := "2026-09-07T00:00:00Z"
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1",
 		"kind":       "ShiftPVPool",
-		"metadata":   map[string]any{"name": name},
+		"metadata":   map[string]any{"name": name, "generation": int64(1)},
 		"spec": map[string]any{
 			"nodeName": nodeName, "mountPath": "/mnt/shiftpv",
 			"capacity": map[string]any{"limit": "10Gi"},
+		},
+		"status": map[string]any{
+			"observedGeneration": int64(1), "lastProbeTime": probeTime,
+			"conditions": []any{map[string]any{
+				"type": PoolConditionReady, "status": "True", "observedGeneration": int64(1),
+				"lastTransitionTime": probeTime, "reason": "PoolReady", "message": "ready",
+			}},
 		},
 	}}
 }

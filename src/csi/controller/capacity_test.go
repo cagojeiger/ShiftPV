@@ -25,7 +25,7 @@ type fakePoolCapacityRegistry struct {
 	err     error
 }
 
-func (f *fakePoolCapacityRegistry) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+func (f *fakePoolCapacityRegistry) ReadyPoolForNode(context.Context, string) (volumeapi.Pool, error) {
 	return f.pool, f.err
 }
 
@@ -225,16 +225,23 @@ func TestCapacityProbeErrorPreservesContextCode(t *testing.T) {
 	}
 }
 
-func TestCreateVolumeReportsInvalidPoolAsFailedPrecondition(t *testing.T) {
-	registry := &fakePoolCapacityRegistry{err: volumeapi.ErrPoolConfiguration}
-	service := &Service{
-		Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
-		CapacityPools: registry,
-		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
-	}
-	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("code = %s, want FailedPrecondition: %v", status.Code(err), err)
+func TestCreateVolumeRejectsUnavailablePoolBeforeCapacityProbe(t *testing.T) {
+	for name, poolErr := range map[string]error{
+		"invalid":   volumeapi.ErrPoolConfiguration,
+		"missing":   volumeapi.ErrPoolNotFound,
+		"not ready": volumeapi.ErrPoolNotReady,
+	} {
+		t.Run(name, func(t *testing.T) {
+			probe := &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}}
+			service := &Service{
+				Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
+				CapacityPools: &fakePoolCapacityRegistry{err: poolErr}, CapacityProbe: probe,
+			}
+			_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
+			if status.Code(err) != codes.FailedPrecondition || probe.callCount() != 0 {
+				t.Fatalf("code=%s probeCalls=%d err=%v", status.Code(err), probe.callCount(), err)
+			}
+		})
 	}
 }
 

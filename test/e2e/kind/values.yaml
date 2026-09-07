@@ -7,6 +7,10 @@ controller:
 mobility:
   helperImage: shiftpv:dev
 
+poolReadiness:
+  interval: 2s
+  staleAfter: 10s
+
 node:
   kubeletRootDir: /var/lib/kubelet
   image:

@@ -45,6 +45,7 @@ spec:
             - --helper-memory-request={{ .Values.helperPod.resources.requests.memory }}
             - --helper-cpu-limit={{ .Values.helperPod.resources.limits.cpu }}
             - --helper-memory-limit={{ .Values.helperPod.resources.limits.memory }}
+            - --pool-readiness-stale-after={{ .Values.poolReadiness.staleAfter }}
             - --mobility-enabled={{ .Values.mobility.enabled }}
             - --webhook-service-name={{ include "shiftpv.webhookServiceName" . }}
             - --webhook-tls-secret-name={{ include "shiftpv.webhookSecretName" . }}

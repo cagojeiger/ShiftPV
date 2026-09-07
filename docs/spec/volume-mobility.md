@@ -25,13 +25,13 @@ Controller는 같은 관찰 규칙으로 eligibility preflight를 통과한 뒤 
 
 - `ShiftPVVolume.status.phase=Ready`, `activeMove` 없음
 - owner Node가 `Ready=True`이면서 `spec.unschedulable=true`
-- source와 destination에 유효한 absolute `ShiftPVPool.spec.mountPath`가 각각 등록됨
+- source와 destination에 최근 `Ready=True`인 `ShiftPVPool`이 각각 등록됨
 - bound RWO Filesystem volume
 - admission이 활성화된 namespace의 controller-owned consumer Pod 하나
 - schedulable하고 Ready인 destination Pool 하나 이상
 
 Pod의 `Pending` 또는 `PodScheduled=False/Unschedulable` 자체는 trigger가 아니다. source
-Node/Pool을 읽을 수 없거나 Node가 NotReady이면 자동 이동을 시작하지 않는다. bare Pod,
+Node/Pool을 읽을 수 없거나 Pool readiness가 실패·stale이거나 Node가 NotReady이면 자동 이동을 시작하지 않는다. bare Pod,
 여러 consumer, 한 Pod의 여러 ShiftPV PVC와 custom scheduler는 지원 입력이 아니다.
 
 ShiftPV는 Node를 cordon하지 않고 이미 설정된 `Node.spec.unschedulable`을 관찰한다. Namespace

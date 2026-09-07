@@ -126,7 +126,7 @@ func (r *Reconciler) destinationCapacity(ctx context.Context, current volumeapi.
 }
 
 func (r *Reconciler) poolForNode(ctx context.Context, nodeName string) (volumeapi.Pool, error) {
-	pools, err := r.Repository.Pools(ctx)
+	pools, err := r.Repository.ReadyPools(ctx)
 	if err != nil {
 		return volumeapi.Pool{}, err
 	}
@@ -135,5 +135,5 @@ func (r *Reconciler) poolForNode(ctx context.Context, nodeName string) (volumeap
 			return pool, nil
 		}
 	}
-	return volumeapi.Pool{}, fmt.Errorf("node %q has no registered Pool", nodeName)
+	return volumeapi.Pool{}, fmt.Errorf("node %q has no Ready Pool", nodeName)
 }

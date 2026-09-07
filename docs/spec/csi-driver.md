@@ -13,7 +13,7 @@ Controller Deployment
 └── liveness-probe
 
 Node Plugin DaemonSet (participating worker마다 1개)
-├── shiftpv-node             Identity + Node service + bind mount authorization
+├── shiftpv-node             Identity + Node service + bind mount authorization + Pool readiness
 ├── node-driver-registrar
 └── liveness-probe
 ```
@@ -55,27 +55,36 @@ stats, snapshot, attach capability는 광고하지 않는다.
 2. external-provisioner가 selected topology와 PVC/PV metadata를 포함해 `CreateVolume`을
    호출한다.
 3. Controller는 request name의 SHA-256으로 안정적인 volume ID를 만든다.
-4. Controller는 selected node의 `ShiftPVPool.spec.capacity.limit`와 현재 owner 기준
+4. Controller는 selected node의 `ShiftPVPool`이 최근 `Ready=True`인지 확인한다. 상태가
+   없거나 `Mounted`, `Writable`, `CapacityReadable` 중 하나가 실패했거나 마지막 probe가
+   `poolReadiness.staleAfter`보다 오래됐으면 신규 할당을 거부한다.
+5. Controller는 selected node의 `ShiftPVPool.spec.capacity.limit`와 현재 owner 기준
    reservation 합계를 확인한다. 예약 ConfigMap의 capacity가 크기이고, 대응하는
    `ShiftPVVolume.status.ownerNode`가 있으면 최초 node 대신 현재 owner에 합산한다. Volume이
    아직 없는 create 중간 상태만 reservation의 최초 node에 합산한다.
-5. Controller는 node-bound helper Pod로 Pool mount의 `statfs`를 읽는다. requested bytes가
+6. Controller는 node-bound helper Pod로 Pool mount의 `statfs`를 읽는다. requested bytes가
    `limit - reserved` 또는 `Bavail * Frsize`보다 크면 directory를 만들기 전에
    `ResourceExhausted`로 거부한다. Pool 설정이나 측정 결과가 불명확해도 fail-closed다.
-6. Controller namespace의 `<volume-id>` ConfigMap을 idempotent reservation으로
+7. Controller namespace의 `<volume-id>` ConfigMap을 idempotent reservation으로
    생성한다. request name, node, capacity가 기존 값과 다르면 `AlreadyExists`다. 동일한 기존
    reservation은 용량을 다시 차감하지 않고 중단된 create를 계속한다.
-7. Controller는 selected node의 `ShiftPVPool.spec.mountPath`를 조회하고 helper Pod를 띄워
+8. Controller는 selected node의 `ShiftPVPool.spec.mountPath`를 조회하고 helper Pod를 띄워
    `<mountPath>/volumes/<volume-id>`를 `mkdir -p`한다. hostPath type은 `Directory`라
    등록 path가 없으면 자동 생성하지 않고 실패한다.
-8. Controller는 `ShiftPVVolume`을 만들고 selected node를 최초 authoritative owner로
+9. Controller는 `ShiftPVVolume`을 만들고 selected node를 최초 authoritative owner로
    기록한다. selected node에 해당하는 `ShiftPVPool` 등록이 없으면 provisioning을
    거부한다.
-9. mobility opt-in namespace면 성공 응답에 생성 시점의 registered Pool node 전체를,
-   아니면 selected owner node 하나만 accessible topology로 담는다. PVC namespace metadata가
-   없을 때도 안전하게 owner-only를 선택한다. volume context의 node는 최초 배치 기록일 뿐
-   이동 후 권한의 source of truth가 아니다.
-10. external-provisioner가 이 topology를 PV node affinity로 변환한다.
+10. mobility opt-in namespace면 성공 응답에 생성 시점의 registered Pool node 전체를,
+    아니면 selected owner node 하나만 accessible topology로 담는다. PVC namespace metadata가
+    없을 때도 안전하게 owner-only를 선택한다. volume context의 node는 최초 배치 기록일 뿐
+    이동 후 권한의 source of truth가 아니다.
+11. external-provisioner가 이 topology를 PV node affinity로 변환한다.
+
+Node Plugin은 `poolReadiness.interval`마다 host root 아래의 정확한 Pool 경로가 mount point인지
+확인하고, 그 경로 안에서 임시 directory/file 생성, write, file sync와 cleanup을 수행한 뒤
+filesystem capacity syscall을 실행한다. 결과는 `ShiftPVPool.status.conditions`의 `Mounted`,
+`Writable`, `CapacityReadable`, `Ready`와 `lastProbeTime`, `observedGeneration`에 기록한다.
+같은 상태의 반복 probe는 condition transition time을 변경하지 않는다.
 
 Controller는 node-local path에 직접 접근하지 않는다. statfs와 directory 생성은 등록 Pool을
 mount한 일회성 helper Pod가 수행한다. reservation ConfigMap은 Helm resource가 아니며 같은
@@ -102,6 +111,10 @@ Node Plugin은 node마다 다른 Pool path를 지원하기 위해 privileged Dae
 host root를 mount하고, 현재 node의 immutable `ShiftPVPool.spec.mountPath`를 그 아래에서
 해석한다. `/`와 상대 path, 누락 또는 중복 node 등록은 fail-closed다. 따라서 Pool CR
 쓰기 권한은 storage operator에게만 제한해야 한다.
+
+Pool readiness가 False 또는 stale이어도 기존 volume의 owner나 mount를 자동 변경하거나
+unmount하지 않는다. 기존 publish는 live Volume authority와 실제 source directory 검사를
+계속 사용한다. readiness는 새 provisioning과 새 이동 destination 선택만 차단한다.
 
 `/host` mount는 `HostToContainer` propagation을 사용한다. Node Plugin이 재시작될 때
 기존 kubelet volume mount가 `/host`의 private mount namespace에 남으면 실제 target을
