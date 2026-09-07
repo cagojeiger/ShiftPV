@@ -106,8 +106,10 @@ mount한다. 상태 조회 실패, `Moving`, `Blocked`, owner 불일치는 즉�
 동시에 들어오는 `NodePublishVolume`도 요청마다 현재 `ShiftPVVolume`을 한 번 읽고 독립적으로
 승인 또는 즉시 거부한다. CSI 요청별 polling goroutine이나 Kubernetes watch는 만들지 않는다.
 
-successful publish/unpublish는 `publishedNodes`를 갱신한다. 이 값은 이동 전 실제
-unpublish와 이동 후 publish를 확인하는 관찰값이며, owner 권한을 대신하지 않는다.
+successful publish/unpublish는 `publishedNodes`를 갱신한다. 같은 node의 Pod 교체 중에는
+여러 kubelet target이 잠시 겹칠 수 있으므로 volume별 publish/unpublish를 직렬화하고 실제
+mount reference가 하나도 남지 않은 뒤에만 node를 제거한다. 이 값은 이동 전 실제 unpublish와
+이동 후 publish를 확인하는 관찰값이며, owner 권한을 대신하지 않는다.
 
 Node Plugin은 node마다 다른 Pool path를 지원하기 위해 privileged DaemonSet 안의 `/host`에
 host root를 mount하고, 현재 node의 immutable `ShiftPVPool.spec.mountPath`를 그 아래에서

@@ -244,6 +244,8 @@ if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_RECREATED}" ]]; then
   echo "checksum mismatch after Pod recreation" >&2
   exit 1
 fi
+kubectl wait --for=jsonpath="{.status.publishedNodes[0]}=${OWNER_NODE}" \
+  "shiftpvvolume/${VOLUME_ID}" --timeout=2m
 
 # A failed pre-delete hook must leave the release and the running workload intact.
 if helm uninstall shiftpv --namespace shiftpv-system --timeout 2m; then

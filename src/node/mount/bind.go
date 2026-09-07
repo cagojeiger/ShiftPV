@@ -12,6 +12,7 @@ type Interface interface {
 	Mount(source, target, fstype string, options []string) error
 	Unmount(target string) error
 	IsMountPoint(file string) (bool, error)
+	GetMountRefs(pathname string) ([]string, error)
 }
 
 type Binder struct {
@@ -70,6 +71,19 @@ func (b *Binder) Unpublish(target string) error {
 		return fmt.Errorf("remove target directory: %w", err)
 	}
 	return nil
+}
+
+func (b *Binder) HasPublishedTarget(source, targetRoot string) (bool, error) {
+	refs, err := b.Mounter.GetMountRefs(source)
+	if err != nil {
+		return false, fmt.Errorf("inspect source mount references: %w", err)
+	}
+	for _, ref := range refs {
+		if ValidateTarget(targetRoot, ref) == nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func ValidateTarget(root, target string) error {
