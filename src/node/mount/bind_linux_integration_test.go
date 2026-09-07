@@ -84,6 +84,45 @@ func TestLinuxMountIntegrationPublishAndUnpublish(t *testing.T) {
 	}
 }
 
+func TestLinuxMountIntegrationKeepsRemainingPublishReference(t *testing.T) {
+	requireLinuxMountIntegration(t)
+
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	targetRoot := filepath.Join(root, "pods")
+	targetA := filepath.Join(targetRoot, "pod-a", "mount")
+	targetB := filepath.Join(targetRoot, "pod-b", "mount")
+	if err := os.Mkdir(source, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	binder := NewBinder()
+	t.Cleanup(func() {
+		_ = binder.Unpublish(targetA)
+		_ = binder.Unpublish(targetB)
+	})
+	if err := binder.Publish(source, targetA); err != nil {
+		t.Fatalf("publish first target: %v", err)
+	}
+	if err := binder.Publish(source, targetB); err != nil {
+		t.Fatalf("publish second target: %v", err)
+	}
+	if err := binder.Unpublish(targetA); err != nil {
+		t.Fatalf("unpublish first target: %v", err)
+	}
+	published, err := binder.HasPublishedTarget(source, targetRoot)
+	if err != nil || !published {
+		t.Fatalf("second target was not observed: published=%v err=%v", published, err)
+	}
+	if err := binder.Unpublish(targetB); err != nil {
+		t.Fatalf("unpublish second target: %v", err)
+	}
+	published, err = binder.HasPublishedTarget(source, targetRoot)
+	if err != nil || published {
+		t.Fatalf("publication remained after final unpublish: published=%v err=%v", published, err)
+	}
+}
+
 func TestLinuxMountIntegrationPermissionFailure(t *testing.T) {
 	if os.Getenv(permissionHelperEnv) == "1" {
 		runPermissionFailureHelper(t)

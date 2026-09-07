@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/utils/keymutex"
 
 	controllercsi "github.com/cagojeiger/ShiftPV/src/csi/controller"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
@@ -19,6 +21,7 @@ import (
 type Binder interface {
 	Publish(source, target string) error
 	Unpublish(target string) error
+	HasPublishedTarget(source, targetRoot string) (bool, error)
 }
 
 type VolumeRegistry interface {
@@ -38,6 +41,9 @@ type Service struct {
 	TargetRoot string
 	Binder     Binder
 	Volumes    VolumeRegistry
+
+	publicationLocksOnce sync.Once
+	publicationLocks     keymutex.KeyMutex
 }
 
 func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
@@ -56,6 +62,8 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	if err := shiftmount.ValidateTarget(s.TargetRoot, req.GetTargetPath()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	unlock := s.lockPublication(req.GetVolumeId())
+	defer unlock()
 	ownerNode := req.GetVolumeContext()[controllercsi.NodeContextKey]
 	if s.Volumes != nil {
 		state, err := s.Volumes.Get(ctx, req.GetVolumeId())
@@ -105,11 +113,25 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	if err := shiftmount.ValidateTarget(s.TargetRoot, req.GetTargetPath()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	unlock := s.lockPublication(req.GetVolumeId())
+	defer unlock()
 	if err := s.Binder.Unpublish(req.GetTargetPath()); err != nil {
 		return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
 	}
 	if s.Volumes != nil {
-		if err := s.Volumes.SetPublished(ctx, req.GetVolumeId(), s.NodeName, false); err != nil {
+		poolRoot, err := s.poolRoot(ctx)
+		if err != nil {
+			return nil, status.Errorf(codes.Unavailable, "resolve node pool after unpublish: %v", err)
+		}
+		source, err := volume.Path(poolRoot, req.GetVolumeId())
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		stillPublished, err := s.Binder.HasPublishedTarget(source, s.TargetRoot)
+		if err != nil {
+			return nil, status.Errorf(codes.Unavailable, "inspect remaining published targets: %v", err)
+		}
+		if err := s.Volumes.SetPublished(ctx, req.GetVolumeId(), s.NodeName, stillPublished); err != nil {
 			return nil, status.Errorf(codes.Unavailable, "record unpublished volume: %v", err)
 		}
 	}
@@ -137,6 +159,14 @@ func (s *Service) validate() error {
 		return fmt.Errorf("node service is not configured")
 	}
 	return nil
+}
+
+func (s *Service) lockPublication(volumeID string) func() {
+	s.publicationLocksOnce.Do(func() {
+		s.publicationLocks = keymutex.NewHashed(32)
+	})
+	s.publicationLocks.LockKey(volumeID)
+	return func() { _ = s.publicationLocks.UnlockKey(volumeID) }
 }
 
 func (s *Service) poolRoot(ctx context.Context) (string, error) {

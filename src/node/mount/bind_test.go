@@ -14,6 +14,8 @@ type fakeMounter struct {
 	mountErr   error
 	unmountErr error
 	inspectErr error
+	mountRefs  []string
+	refsErr    error
 }
 
 func TestNewBinderHasMounter(t *testing.T) {
@@ -41,6 +43,9 @@ func (f *fakeMounter) Unmount(string) error {
 }
 
 func (f *fakeMounter) IsMountPoint(string) (bool, error) { return f.mounted, f.inspectErr }
+func (f *fakeMounter) GetMountRefs(string) ([]string, error) {
+	return append([]string(nil), f.mountRefs...), f.refsErr
+}
 
 func TestPublishMountsDirectory(t *testing.T) {
 	root := t.TempDir()
@@ -149,6 +154,31 @@ func TestUnpublishPreservesTargetOnUnmountFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(target); err != nil {
 		t.Fatalf("target removed after unmount failure: %v", err)
+	}
+}
+
+func TestHasPublishedTargetFiltersKubeletMountReferences(t *testing.T) {
+	targetRoot := "/var/lib/kubelet/pods"
+	binder := &Binder{Mounter: &fakeMounter{mountRefs: []string{
+		"/host/var/lib/shiftpv/volumes/volume-a",
+		"/var/lib/kubelet/pods/pod-a/volumes/kubernetes.io~csi/pvc-a/mount",
+	}}}
+	published, err := binder.HasPublishedTarget("/host/var/lib/shiftpv/volumes/volume-a", targetRoot)
+	if err != nil || !published {
+		t.Fatalf("expected kubelet publication: published=%v err=%v", published, err)
+	}
+
+	binder.Mounter = &fakeMounter{mountRefs: []string{"/host/var/lib/shiftpv/volumes/volume-a"}}
+	published, err = binder.HasPublishedTarget("/host/var/lib/shiftpv/volumes/volume-a", targetRoot)
+	if err != nil || published {
+		t.Fatalf("unexpected publication outside target root: published=%v err=%v", published, err)
+	}
+}
+
+func TestHasPublishedTargetReportsInspectionFailure(t *testing.T) {
+	binder := &Binder{Mounter: &fakeMounter{refsErr: errors.New("mountinfo unavailable")}}
+	if _, err := binder.HasPublishedTarget("/source", "/var/lib/kubelet/pods"); err == nil {
+		t.Fatal("expected mount reference inspection failure")
 	}
 }
 

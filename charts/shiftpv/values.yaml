@@ -24,7 +24,7 @@ node:
   logLevel: 2
   image:
     repository: ghcr.io/cagojeiger/shiftpv-node
-    tag: 0.1.3
+    tag: 0.1.4
     pullPolicy: IfNotPresent
   nodeSelector: {}
   tolerations: []

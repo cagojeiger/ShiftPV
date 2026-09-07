@@ -50,6 +50,8 @@ type fakeBinder struct {
 	unpublished     string
 	publishErr      error
 	unpublishErr    error
+	remaining       bool
+	remainingErr    error
 }
 
 func (f *fakeBinder) Publish(source, target string) error {
@@ -60,6 +62,9 @@ func (f *fakeBinder) Publish(source, target string) error {
 func (f *fakeBinder) Unpublish(target string) error {
 	f.unpublished = target
 	return f.unpublishErr
+}
+func (f *fakeBinder) HasPublishedTarget(string, string) (bool, error) {
+	return f.remaining, f.remainingErr
 }
 
 func TestNodePublishUsesCanonicalOwnerPath(t *testing.T) {
@@ -308,6 +313,37 @@ func TestNodeUnpublishRecordsDynamicPublicationState(t *testing.T) {
 	registry.setErr = errors.New("API timeout")
 	if _, err := service.NodeUnpublishVolume(context.Background(), request); status.Code(err) != codes.Unavailable {
 		t.Fatalf("expected Unavailable when unpublish state cannot be recorded, got %v", err)
+	}
+}
+
+func TestNodeUnpublishKeepsNodePublishedWhileAnotherTargetRemains(t *testing.T) {
+	binder := &fakeBinder{remaining: true}
+	registry := &fakeVolumeRegistry{}
+	service := configuredService(binder)
+	service.Volumes = registry
+	request := &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "shiftpv-0123456789abcdef0123456789abcdef",
+		TargetPath: "/var/lib/kubelet/pods/old-uid/volumes/csi/mount",
+	}
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if registry.publishedNode != "worker-a" || !registry.published {
+		t.Fatalf("remaining target was cleared from publication state: %#v", registry)
+	}
+}
+
+func TestNodeUnpublishFailsClosedWhenRemainingTargetsCannotBeInspected(t *testing.T) {
+	binder := &fakeBinder{remainingErr: errors.New("mountinfo unavailable")}
+	registry := &fakeVolumeRegistry{}
+	service := configuredService(binder)
+	service.Volumes = registry
+	_, err := service.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "shiftpv-0123456789abcdef0123456789abcdef",
+		TargetPath: "/var/lib/kubelet/pods/old-uid/volumes/csi/mount",
+	})
+	if status.Code(err) != codes.Unavailable || registry.publishedNode != "" {
+		t.Fatalf("expected fail-closed inspection error without state change, got err=%v registry=%#v", err, registry)
 	}
 }
 
