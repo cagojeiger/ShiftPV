@@ -190,16 +190,36 @@ mv "${staging}" "${final}"
 	}, nil, nil)
 }
 
-func (r *Reconciler) ensureCleanupJob(ctx context.Context, move volumeapi.Move, names resourceNames) error {
-	script := `set -eu
+const cleanupSourceScript = `set -eu
 source="/pool/volumes/${VOLUME_ID}"
-retired="/pool/.shiftpv/retired/${MOVE_NAME}"
-if test -d "${retired}"; then exit 0; fi
-test -d "${source}"
-mkdir -p /pool/.shiftpv/retired
-mv "${source}" "${retired}"
+retired_root="/pool/.shiftpv/retired"
+retired="${retired_root}/${MOVE_NAME}"
+
+for path in /pool /pool/volumes /pool/.shiftpv "${retired_root}" "${source}" "${retired}"; do
+  test ! -L "${path}"
+done
+mkdir -p "${retired_root}"
+
+if test -e "${source}"; then
+  test -d "${source}"
+  test ! -e "${retired}"
+  test "$(stat -c %d "${source}")" = "$(stat -c %d "${retired_root}")"
+  mv -T "${source}" "${retired}"
+elif test -e "${retired}"; then
+  test -d "${retired}"
+fi
+
+if test -e "${retired}"; then
+  rm -rf --one-file-system -- "${retired}"
+fi
+test ! -e "${source}"
+test ! -L "${source}"
+test ! -e "${retired}"
+test ! -L "${retired}"
 `
-	return r.ensureJob(ctx, names.CleanupJob, move.Spec.SourceNode, names, script, []corev1.EnvVar{
+
+func (r *Reconciler) ensureCleanupJob(ctx context.Context, move volumeapi.Move, names resourceNames) error {
+	return r.ensureJob(ctx, names.CleanupJob, move.Spec.SourceNode, names, cleanupSourceScript, []corev1.EnvVar{
 		{Name: "MOVE_NAME", Value: move.Name}, {Name: "VOLUME_ID", Value: move.Spec.VolumeID},
 	}, nil, nil)
 }

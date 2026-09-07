@@ -276,7 +276,8 @@ else
 	SOURCE_POOL="${WORKER_A_POOL}"
 fi
 test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
-test -f "${SOURCE_POOL}/.shiftpv/retired/${MOVE_NAME}/payload"
+test ! -e "${SOURCE_POOL}/volumes/${VOLUME_ID}"
+test ! -e "${SOURCE_POOL}/.shiftpv/retired/${MOVE_NAME}"
 test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
 
 recover_after_commit_failure

@@ -190,7 +190,7 @@ fi
 // Rename, never delete or overwrite. A completed rename is an idempotent retry;
 // finding both the original and quarantine paths is ambiguous and must fail.
 const recoveryRetireScript = `set -eu
-for path in /pool/volumes /pool/.shiftpv /pool/.shiftpv/incoming /pool/.shiftpv/aborted; do
+for path in /pool/volumes /pool/.shiftpv /pool/.shiftpv/incoming /pool/.shiftpv/aborted /pool/.shiftpv/retired; do
   test ! -L "${path}"
 done
 mkdir -p /pool/.shiftpv/aborted
@@ -210,11 +210,8 @@ retire() {
 }
 final="/pool/volumes/${VOLUME_ID}"
 test ! -L "${final}"
-if test "${COMMITTED}" = true && test ! -e "${final}" && test ! -e "/pool/.shiftpv/aborted/${MOVE_NAME}-final"; then
-  # Original cleanup might already have retired the old source before failing.
-  # Otherwise a missing source and missing quarantine are not explained.
-  test ! -L /pool/.shiftpv/retired
-  test ! -L "/pool/.shiftpv/retired/${MOVE_NAME}"
+test ! -L "/pool/.shiftpv/retired/${MOVE_NAME}"
+if test -e "/pool/.shiftpv/retired/${MOVE_NAME}"; then
   test -d "/pool/.shiftpv/retired/${MOVE_NAME}"
 fi
 if test -e "${final}" && test "${COMMITTED}" = false; then

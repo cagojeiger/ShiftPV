@@ -11,7 +11,7 @@ ShiftPV가 소유하는 책임은 다음과 같다.
 - 이동 중 CSI publish 차단
 - 기존 consumer eviction과 실제 unpublish 확인
 - replacement Pod의 Placement Hold, 내부 placement reservation, destination pin과 Release
-- authenticated rsync copy, destination-local promotion, owner commit, source retire
+- authenticated rsync copy, destination-local promotion, owner commit, source purge
 - 각 관찰과 action 결과를 `ShiftPVMove.status`에 저장하고 재조정
 
 kube-scheduler가 nodeSelector, affinity, taint/toleration과 resource fit을 평가한다.
@@ -157,9 +157,9 @@ Blocked   -- reconcile --> Blocked
 | `Promoting` | promotion Job complete | owner CAS commit, `Committing` |
 | `Committing` | destination owner와 `Ready` read-back | reservation UID 조건부 삭제, `ReleasingDestination` |
 | `ReleasingDestination` | reservation 삭제 관찰, held replacement identity/pin 일치 | Placement Hold 제거와 `placement=owner` 기록, `WaitingForDestinationPublish` |
-| `WaitingForDestinationPublish` / `CleaningSource` | authoritative destination이 NotReady 또는 Pool 미등록 | 현재 phase와 destination authority 유지, source retire 보류 |
+| `WaitingForDestinationPublish` / `CleaningSource` | authoritative destination이 NotReady 또는 Pool 미등록 | 현재 phase와 destination authority 유지, source purge 보류 |
 | `WaitingForDestinationPublish` | destination이 `publishedNodes`에 존재 | cleanup Job 생성, `CleaningSource` |
-| `CleaningSource` | source retire Job complete | transfer resource 정리, `Succeeded` |
+| `CleaningSource` | cleanup Job complete, source final/retired 모두 없음 | transfer resource 정리, `Succeeded` |
 
 각 non-terminal phase에는 허용된 self-transition 또는 다음 transition만 있다. source
 unhealthy, scheduling constraint 충돌, destination capacity 부족, copy/promotion/cleanup Job 실패는 `Blocked`로 끝난다.
@@ -201,9 +201,9 @@ Quiescing -> Verifying -> Retiring -> Resuming -> Completing -> Recovered
   promotion marker도 일치해야 한다. 파일 내용의 무결성/백업 복원을 대신하는 검사는 아니다.
 - non-owner final/staging은 `.shiftpv/aborted/<move>-final` 및 `<move>-incoming`으로
   같은 filesystem에서 rename한다. symlink, 다른 marker, 기존 quarantine 충돌은 거부하고
-  데이터를 덮어쓰거나 삭제하지 않는다. 기존 정상 retired 경로도 보존한다.
-  commit 전에는 생성되지 않은 destination final/staging의 부재가 정상이다. commit 후
-  source final과 aborted-final이 모두 없으면 정상 cleanup의 retired directory를 확인해야 한다.
+  데이터를 덮어쓰거나 삭제하지 않는다. 이전 버전 또는 중단된 cleanup의 retired 경로도
+  호환해서 보존한다. commit 전에는 생성되지 않은 destination final/staging의 부재가 정상이다.
+  commit 후 source final과 retired가 모두 없는 상태는 cleanup purge 완료로 인정한다.
 - 모든 확인 후 Ready CAS가 마운트를 열되 owner는 변경하지 않는다. activeMove는 유지한다.
 - held/misplaced controller Pod만 UID 조건부 Eviction API로 교체한다. PDB를 무시하지 않으며
   workload template/replica를 수정하지 않는다. admission이 새 Pod를 현재 owner에 pin한다.
@@ -293,7 +293,7 @@ volume metadata 정리를 막을 수 있으므로 사용하지 않는다.
 ```text
 source:      <pool>/volumes/<volume-id>/
 destination:<pool>/.shiftpv/incoming/<move-name>/
-retired:    <pool>/.shiftpv/retired/<move-name>/
+retired:    <pool>/.shiftpv/retired/<move-name>/  # cleanup 중에만 존재
 ```
 
 Controller image를 helper image로 사용한다. source와 destination helper의 hostPath는 각
@@ -316,7 +316,9 @@ owner commit은 expected `phase=Moving`, source owner와 `activeMove=<move>`를 
 status CAS다. phase와 owner를 destination/Ready로 바꿔도 `activeMove`는 유지한다.
 commit read-back 뒤 reservation 삭제와 workload Hold 해제를 순서대로 끝낸다. 이후 kubelet의
 첫 정상 CSI publish가 destination publication을 기록해야 source cleanup을 실행한다.
-cleanup은 source를 즉시 삭제하지 않고 recoverable retired path로 rename한다.
+cleanup은 source를 같은 filesystem의 retired path로 원자적으로 격리한 뒤 즉시 삭제한다.
+재시작 시 남은 retired path 삭제를 반복하며 source final과 retired가 모두 없어야 Job이
+성공한다. 삭제 실패는 `Blocked/CleanupFailed`로 닫고 자동 성공 처리하지 않는다.
 cleanup과 transfer resource 정리가 끝나야 `activeMove`를 비우고 Move를 Succeeded로 만든다.
 CSI `DeleteVolume`은 phase가 Ready가 아니거나 active move가 있으면 거부한다.
 
@@ -329,9 +331,9 @@ copy/promotion/cleanup Job은 `activeDeadlineSeconds=300`, `backoffLimit=2`, 완
 2. verified staging을 promotion하기 전 owner를 바꾸지 않는다.
 3. owner CAS가 성공하기 전 destination CSI publish를 열지 않는다.
 4. owner commit 뒤 placement reservation 삭제를 관찰하기 전 workload Hold를 해제하지 않는다.
-5. destination publish가 확인되기 전 source를 retire하지 않는다.
+5. destination publish가 확인되기 전 source를 purge하지 않는다.
 6. 선택된 destination이 Ready이고 Pool에 등록된 상태를 다시 확인하기 전 commit 또는
-   source retire를 진행하지 않는다.
+   source purge를 진행하지 않는다.
 7. API/CR 상태가 불명확하면 publish와 promotion을 허용하지 않는다.
 8. Controller restart는 CR status와 helper resource 관찰로 같은 action에 수렴한다.
 
