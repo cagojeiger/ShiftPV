@@ -44,6 +44,7 @@ spec:
             - --node-name=$(NODE_NAME)
             - --host-root=/host
             - --target-root={{ .Values.node.kubeletRootDir }}/pods
+            - --pool-readiness-interval={{ .Values.poolReadiness.interval }}
             - --v={{ .Values.node.logLevel }}
           env:
             - name: NODE_NAME

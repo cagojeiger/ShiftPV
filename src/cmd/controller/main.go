@@ -50,6 +50,7 @@ func main() {
 		helperMemoryRequest     = flag.String("helper-memory-request", "16Mi", "helper Pod memory request")
 		helperCPULimit          = flag.String("helper-cpu-limit", "100m", "helper Pod CPU limit")
 		helperMemoryLimit       = flag.String("helper-memory-limit", "64Mi", "helper Pod memory limit")
+		poolReadinessStaleAfter = flag.Duration("pool-readiness-stale-after", 3*time.Minute, "maximum age of a successful node Pool readiness probe")
 		mobilityEnabled         = flag.Bool("mobility-enabled", true, "run the automatic cordon mobility reconciler and admission webhook")
 		mobilityInterval        = flag.Duration("mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
 		mobilityImage           = flag.String("mobility-helper-image", "shiftpv-rsync-helper:dev", "rsync mobility helper image")
@@ -63,6 +64,9 @@ func main() {
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
+	if *poolReadinessStaleAfter <= 0 {
+		klog.Fatalf("pool readiness stale duration must be positive")
+	}
 
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -87,7 +91,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("create lifecycle admission dynamic Kubernetes client: %v", err)
 	}
-	volumeRegistry := &volumeapi.Registry{Client: dynamicClient}
+	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	permitStore := &uninstallcheck.PermitStore{Client: client, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}

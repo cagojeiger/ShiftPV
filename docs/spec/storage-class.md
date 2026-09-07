@@ -32,7 +32,8 @@ external-provisioner가 내부적으로 추가하는 PVC/PV metadata parameter�
 requested capacity는 PV capacity와 reservation idempotency뿐 아니라 owner Pool의 총예약
 입장 판단에 쓰인다. Controller는 `ShiftPVPool.spec.capacity.limit`에서 현재 총예약을 뺀 값과
 Pool filesystem의 현재 available bytes를 각각 확인한다. 둘 중 하나보다 요청량이 크면 신규
-provisioning을 거부한다. 이 검사는 개별 directory write를 제한하는 quota가 아니다.
+provisioning을 거부한다. 선택된 Pool의 node-reported `Ready` 상태가 없거나 실패·stale이어도
+reservation을 만들기 전에 거부한다. 이 검사는 개별 directory write를 제한하는 quota가 아니다.
 
 Helm의 `storageClass.defaultClass`를 `true`로 설정하면 chart가
 `storageclass.kubernetes.io/is-default-class: "true"` annotation을 추가한다. 그러면

@@ -60,6 +60,39 @@ wait_for_unavailable_event() {
   exit 1
 }
 
+wait_for_pool_reason() {
+  local expected_status=$1
+  local expected_reason=$2
+  local attempt status reason
+  for ((attempt = 0; attempt < 120; attempt++)); do
+    status=$(kubectl get shiftpvpool worker-b -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    reason=$(kubectl get shiftpvpool worker-b -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    if [[ "${status}" == "${expected_status}" && "${reason}" == "${expected_reason}" ]]; then
+      return
+    fi
+    sleep 1
+  done
+  echo "Pool did not reach Ready=${expected_status} reason=${expected_reason}" >&2
+  kubectl get shiftpvpool worker-b -o yaml >&2 || true
+  exit 1
+}
+
+wait_for_not_ready_event() {
+  local name=$1
+  local attempt messages
+  for ((attempt = 0; attempt < 120; attempt++)); do
+    messages=$(kubectl get events \
+      --field-selector "involvedObject.kind=PersistentVolumeClaim,involvedObject.name=${name}" \
+      -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null || true)
+    if grep -Fq 'Pool is not ready' <<<"${messages}"; then
+      return
+    fi
+    sleep 1
+  done
+  echo "PVC/${name} did not report a not-ready Pool" >&2
+  exit 1
+}
+
 # Overlay the fault worker pool with a byte-sufficient tmpfs and exhaust only
 # its inodes. Pool byte admission passes, then mkdir must still hit ENOSPC.
 docker exec "${FAULT_NODE}" mount \
@@ -80,28 +113,31 @@ docker exec "${FAULT_NODE}" sh -ec '
     exit 1
   fi
 '
+wait_for_pool_reason False NoSpace
 
 kubectl apply -f "${TEST_DIR}/filesystem-fault-storageclass.yaml"
 kubectl apply -f "${TEST_DIR}/filesystem-fault-pvc.yaml"
 PVC_UID=$(kubectl get pvc shiftpv-filesystem-fault -o jsonpath='{.metadata.uid}')
 kubectl apply -f "${TEST_DIR}/filesystem-fault-pod.yaml"
-wait_for_reservation "pvc-${PVC_UID}"
-wait_for_unavailable_event PersistentVolumeClaim shiftpv-filesystem-fault
+wait_for_not_ready_event shiftpv-filesystem-fault
 
 PVC_PHASE=$(kubectl get pvc shiftpv-filesystem-fault -o jsonpath='{.status.phase}')
 if [[ "${PVC_PHASE}" != "Pending" ]]; then
   echo "ENOSPC PVC unexpectedly left Pending: ${PVC_PHASE}" >&2
   exit 1
 fi
-if docker exec "${FAULT_NODE}" test -d "${FAULT_POOL_PATH}/volumes/${RESERVATION_NAME}"; then
-  echo "ENOSPC provisioning left a volume directory" >&2
-  exit 1
+if kubectl -n shiftpv-system get configmap \
+  -l app.kubernetes.io/component=volume-reservation \
+  -o custom-columns=REQUEST:.data.requestName --no-headers | grep -Fxq "pvc-${PVC_UID}"; then
+	echo "not-ready Pool provisioning created a reservation" >&2
+	exit 1
 fi
 
-# Free the fault files without replacing the mounted filesystem. The retained
-# reservation makes the next CreateVolume call idempotent on the same tmpfs.
+# Free the fault files without replacing the mounted filesystem. The Pool must
+# return to Ready and the same pending PVC may then create its first reservation.
 docker exec "${FAULT_NODE}" sh -ec 'rm -f /srv/shiftpv-b/fill-*'
 MOUNT_STATE=tmpfs_rw
+wait_for_pool_reason True PoolReady
 FAULT_NODE_POD=$(kubectl -n shiftpv-system get pod \
   -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=node \
   --field-selector "spec.nodeName=${FAULT_NODE}" \
@@ -109,6 +145,7 @@ FAULT_NODE_POD=$(kubectl -n shiftpv-system get pod \
 kubectl -n shiftpv-system delete "pod/${FAULT_NODE_POD}" \
   --grace-period=0 --force --wait=true
 kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=5m
+wait_for_reservation "pvc-${PVC_UID}"
 kubectl wait --for=condition=Ready pod/shiftpv-filesystem-fault --timeout=5m
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-filesystem-fault --timeout=2m
 
@@ -129,8 +166,9 @@ docker exec "${FAULT_NODE}" mount -o remount,ro "${FAULT_POOL_PATH}"
 MOUNT_STATE=tmpfs_readonly
 if docker exec "${FAULT_NODE}" touch "${FAULT_POOL_PATH}/.shiftpv-readonly-probe" 2>/dev/null; then
   echo "pool remount did not become read-only" >&2
-  exit 1
+	exit 1
 fi
+wait_for_pool_reason False ReadOnly
 
 kubectl delete pvc shiftpv-filesystem-fault --wait=false
 kubectl wait --for=delete pvc/shiftpv-filesystem-fault --timeout=2m
@@ -141,6 +179,7 @@ docker exec "${FAULT_NODE}" test -f "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}/pay
 
 docker exec "${FAULT_NODE}" mount -o remount,rw "${FAULT_POOL_PATH}"
 MOUNT_STATE=tmpfs_rw
+wait_for_pool_reason True PoolReady
 kubectl wait --for=delete "pv/${FAULT_PV}" --timeout=5m
 kubectl -n shiftpv-system wait --for=delete "configmap/${VOLUME_ID}" --timeout=2m
 docker exec "${FAULT_NODE}" test ! -e "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}"

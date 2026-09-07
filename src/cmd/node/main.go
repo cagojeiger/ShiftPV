@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
@@ -15,19 +19,24 @@ import (
 	csiserver "github.com/cagojeiger/ShiftPV/src/csi/server"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	shiftmount "github.com/cagojeiger/ShiftPV/src/node/mount"
+	poolreadiness "github.com/cagojeiger/ShiftPV/src/pool/readiness"
 )
 
 var version = "dev"
 
 func main() {
 	var (
-		endpoint   = flag.String("endpoint", "unix:///csi/csi.sock", "CSI Unix socket endpoint")
-		nodeName   = flag.String("node-name", os.Getenv("NODE_NAME"), "Kubernetes node name")
-		hostRoot   = flag.String("host-root", "/host", "host filesystem root mounted into the node plugin")
-		targetRoot = flag.String("target-root", "/var/lib/kubelet/pods", "allowed kubelet publish target root")
+		endpoint              = flag.String("endpoint", "unix:///csi/csi.sock", "CSI Unix socket endpoint")
+		nodeName              = flag.String("node-name", os.Getenv("NODE_NAME"), "Kubernetes node name")
+		hostRoot              = flag.String("host-root", "/host", "host filesystem root mounted into the node plugin")
+		targetRoot            = flag.String("target-root", "/var/lib/kubelet/pods", "allowed kubelet publish target root")
+		poolReadinessInterval = flag.Duration("pool-readiness-interval", time.Minute, "interval between local Pool mount and write probes")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
+	if *poolReadinessInterval <= 0 {
+		klog.Fatalf("pool readiness interval must be positive")
+	}
 
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -38,6 +47,8 @@ func main() {
 		klog.Fatalf("create dynamic Kubernetes client: %v", err)
 	}
 	registry := &volumeapi.Registry{Client: dynamicClient}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	nodeService := &nodecsi.Service{
 		NodeName:   *nodeName,
@@ -48,12 +59,25 @@ func main() {
 		Pools:      registry,
 	}
 	identityService := &identity.Service{Version: version}
+	readinessReconciler := &poolreadiness.Reconciler{
+		NodeName: *nodeName, Pools: registry, Inspector: poolreadiness.NewProbe(*hostRoot), Interval: *poolReadinessInterval,
+	}
 
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
-	if err := csiserver.Serve(*endpoint, func(server *grpc.Server) {
-		csi.RegisterIdentityServer(server, identityService)
-		csi.RegisterNodeServer(server, nodeService)
-	}); err != nil {
-		klog.Fatalf("serve CSI node plugin: %v", err)
+	errCh := make(chan error, 2)
+	go func() { errCh <- readinessReconciler.Run(ctx) }()
+	go func() {
+		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {
+			csi.RegisterIdentityServer(server, identityService)
+			csi.RegisterNodeServer(server, nodeService)
+		})
+	}()
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		if err != nil {
+			klog.Errorf("ShiftPV node component stopped: %v", err)
+		}
+		stop()
 	}
 }

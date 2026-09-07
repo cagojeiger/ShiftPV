@@ -17,6 +17,7 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 
 - 잘못된 requested capacity, Pool limit, topology, access mode와 StorageClass parameter
 - Pool 총예약 경계, 현재 owner 합산, 동시 reservation과 statfs 실패의 fail-closed 처리
+- Pool mount/write/statfs probe, standard Conditions, generation/freshness와 node-bound status update
 - 이동 source bytes 측정, destination 논리/물리 admission과 승인 상태 재시작 보존
 - CreateVolume idempotency와 directory 생성 실패 후 retry reservation
 - DeleteVolume 실패 시 reservation 보존
@@ -72,15 +73,18 @@ Markdown 내부 링크를 검사한다. 제품 package statement coverage는 80%
 11. 같은 namespace와 Pool 등록으로 재설치하면 같은 데이터를 다시 mount한다.
 12. 기존 기본 StorageClass가 있을 때 ShiftPV를 기본값 `false`로 설치하면 기존
    기본값이 유지되고, 명시적으로 `shiftpv`를 선택한 PVC만 ShiftPV로 provision된다.
-13. 고정 worker의 pool을 inode가 고갈된 tmpfs로 가려 provisioning이
-   `Unavailable`로 실패하고 reservation을 보존한 뒤, 복구 시 같은 volume으로 bind된다.
-14. 같은 volume의 pool을 read-only로 바꿔 deletion이 `Unavailable`로 실패할 때
+13. 두 Pool이 실제 mount/write/capacity probe를 통과해 `Ready=True`가 된 뒤에만
+    provisioning을 시작한다.
+14. 고정 worker의 pool inode가 고갈되면 `Ready=False/NoSpace`가 되고 신규 reservation을
+    만들지 않으며, 공간 복구 뒤 같은 PVC가 자동으로 Bound된다.
+15. 같은 volume의 pool을 read-only로 바꾸면 `Ready=False/ReadOnly`가 되고 deletion이
+    `Unavailable`로 실패할 때
     reservation과 데이터를 보존하고, read-write 복구 후 삭제가 완료된다.
-15. 이동 copy 중 실제 ENOSPC가 불완전한 staging을 남겨도 `Blocked/CopyFailed`와 source
-    authority를 유지하고, 용량 복구 후 `ResumeOwner`가 staging을 격리한다.
-16. 검증된 copy 뒤 destination을 read-only로 바꾸면 promotion이
-    `Blocked/PromotionFailed`로 owner commit 전에 멈추고, read-write 복구 후 같은 source로
-    재개한다.
+16. 이동 destination이 ENOSPC이면 `Ready=False/NoSpace`인 동안 Move, volume lock, staging을
+    만들지 않고, 공간 복구 뒤 Move를 자동 생성해 이동을 완료한다.
+17. 검증된 copy 뒤 destination을 read-only로 바꾸면 기존 Move가
+    `Copying/DestinationUnavailable`에서 owner commit 전에 멈추고, read-write 복구 후 같은
+    transaction으로 이동을 완료한다.
 
 테스트는 성공과 실패 모두 cluster와 임시 host directory를 정리한다.
 `KEEP_CLUSTER=1`은 로컬 실패 진단에만 사용한다.

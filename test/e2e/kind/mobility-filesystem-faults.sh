@@ -87,37 +87,64 @@ wait_for_move() {
 	return 1
 }
 
-wait_for_blocked() {
-	local reason=$1
-	kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.phase}'=Blocked --timeout=300s
-	local actual_reason volume_phase owner active_move
-	actual_reason=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.reason}')
-	volume_phase=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')
-	owner=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')
-	active_move=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')
-	if [[ "${actual_reason}" != "${reason}" || "${volume_phase}" != Blocked || "${owner}" != "${SOURCE_NODE}" || "${active_move}" != "${MOVE_NAME}" || ! -f "${WORKER_A_POOL}/volumes/${VOLUME_ID}/payload" || -e "${WORKER_B_POOL}/volumes/${VOLUME_ID}" ]]; then
-		echo "blocked-state mismatch: expected_reason=${reason} actual_reason=${actual_reason} volume_phase=${volume_phase} owner=${owner} active_move=${active_move}" >&2
-		kubectl get "shiftpvmove/${MOVE_NAME}" "shiftpvvolume/${VOLUME_ID}" -o yaml >&2 || true
-		return 1
-	fi
+wait_for_deferred_discovery() {
+	local deadline=$((SECONDS + 120))
+	while ((SECONDS < deadline)); do
+		if kubectl -n shiftpv-system logs deployment/shiftpv-controller -c shiftpv-controller --since=2m 2>/dev/null |
+			grep -Fq "deferred ShiftPV mobility for volume ${VOLUME_ID}: NoCompatibleDestination"; then
+			return
+		fi
+		sleep 1
+	done
+	echo "mobility discovery was not observably deferred for ${VOLUME_ID}" >&2
+	kubectl -n shiftpv-system logs deployment/shiftpv-controller -c shiftpv-controller --since=2m >&2 || true
+	return 1
 }
 
-request_source_recovery() {
+wait_for_pool_condition() {
+	local pool=$1 status=$2 reason=$3 deadline=$((SECONDS + 120))
+	local actual_status="" actual_reason=""
+	while ((SECONDS < deadline)); do
+		actual_status=$(kubectl get "shiftpvpool/${pool}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+		actual_reason=$(kubectl get "shiftpvpool/${pool}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+		[[ "${actual_status}" == "${status}" && "${actual_reason}" == "${reason}" ]] && return
+		sleep 1
+	done
+	echo "Pool condition timeout: pool=${pool} expected=${status}/${reason} actual=${actual_status}/${actual_reason}" >&2
+	kubectl get "shiftpvpool/${pool}" -o yaml >&2 || true
+	return 1
+}
+
+wait_for_move_state() {
+	local phase=$1 reason=$2 deadline=$((SECONDS + 300))
+	local actual_phase="" actual_reason=""
+	while ((SECONDS < deadline)); do
+		actual_phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		actual_reason=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.reason}' 2>/dev/null || true)
+		[[ "${actual_phase}" == "${phase}" && "${actual_reason}" == "${reason}" ]] && return
+		sleep 1
+	done
+	echo "Move state timeout: move=${MOVE_NAME} expected=${phase}/${reason} actual=${actual_phase}/${actual_reason}" >&2
+	kubectl get "shiftpvmove/${MOVE_NAME}" "shiftpvvolume/${VOLUME_ID}" -o yaml >&2 || true
+	return 1
+}
+
+wait_for_success() {
 	local namespace=$1
-	kubectl uncordon "${SOURCE_NODE}"
-	kubectl patch "shiftpvmove/${MOVE_NAME}" --type merge -p '{"spec":{"recovery":"ResumeOwner"}}'
-	kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.recoveryPhase}'=Recovered --timeout=300s
+	kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 	kubectl -n "${namespace}" rollout status deployment/writer --timeout=180s
 	local pod checksum
 	pod=$(kubectl -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
-	test "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${SOURCE_NODE}"
+	test "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
 	checksum=$(kubectl -n "${namespace}" exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')
 	test "${checksum}" = "${SOURCE_CHECKSUM}"
 	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
+	docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}/payload"
+	test -f "${WORKER_A_POOL}/.shiftpv/retired/${MOVE_NAME}/payload"
 }
 
 delete_workload() {
@@ -135,31 +162,31 @@ helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--wait \
 	--timeout 5m
 
-# Capacity admission must reject an undersized destination before rsync creates
-# staging data or changes volume authority.
+# A full destination must be removed from candidate selection before rsync
+# creates staging data or changes volume authority. Once the same registered
+# mount becomes writable again, readiness and mobility must resume without an
+# operator recovery request.
 ENOSPC_NAMESPACE=shiftpv-mobility-enospc
 create_source_workload "${ENOSPC_NAMESPACE}" 'ShiftPV mobility ENOSPC recovery'
 docker exec "${DESTINATION_NODE}" mount -t tmpfs -o size=1m,nr_inodes=128 shiftpv-mobility-enospc "${DESTINATION_MOUNT}"
 MOUNT_STATE=tmpfs_rw
 docker exec "${DESTINATION_NODE}" sh -c "dd if=/dev/zero of='${DESTINATION_MOUNT}/capacity-fill' bs=1M count=2 >/dev/null 2>&1 || true"
+wait_for_pool_condition worker-b False NoSpace
 kubectl cordon "${SOURCE_NODE}"
-wait_for_move
-wait_for_blocked DestinationFilesystemSpace
-test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.capacityApproved}')" = false
-test -n "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceBytes}')"
-test -z "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.copyJobName}')"
-docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}"
-echo 'requesting source recovery after capacity rejection'
-request_source_recovery "${ENOSPC_NAMESPACE}"
-docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}"
-echo "mobility destination capacity rejection passed: volume=${VOLUME_ID} move=${MOVE_NAME}"
-delete_workload "${ENOSPC_NAMESPACE}"
+wait_for_deferred_discovery
+test -z "$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${VOLUME_ID}')].metadata.name}" 2>/dev/null || true)"
+docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incoming"
 docker exec "${DESTINATION_NODE}" umount "${DESTINATION_MOUNT}"
 MOUNT_STATE=normal
+wait_for_pool_condition worker-b True PoolReady
+wait_for_move
+wait_for_success "${ENOSPC_NAMESPACE}"
+echo "mobility resumed after destination ENOSPC recovery: volume=${VOLUME_ID} move=${MOVE_NAME}"
+delete_workload "${ENOSPC_NAMESPACE}"
 
 # Pause the controller after a verified copy, remount the same destination
-# filesystem read-only, and prove promotion fails before owner commit. Once the
-# mount is writable again, source recovery quarantines the verified staging.
+# filesystem read-only, and prove promotion pauses before owner commit. Once the
+# mount is writable again, the existing transaction must finish automatically.
 READONLY_NAMESPACE=shiftpv-mobility-readonly
 create_source_workload "${READONLY_NAMESPACE}" 'ShiftPV mobility read-only recovery'
 docker exec "${DESTINATION_NODE}" mount -t tmpfs -o size=8m,nr_inodes=1024 shiftpv-mobility-readonly "${DESTINATION_MOUNT}"
@@ -190,16 +217,18 @@ if docker exec "${DESTINATION_NODE}" touch "${DESTINATION_MOUNT}/readonly-probe"
 	echo 'destination remount did not become read-only' >&2
 	exit 1
 fi
+wait_for_pool_condition worker-b False ReadOnly
 controller_up
-wait_for_blocked PromotionFailed
+wait_for_move_state Copying DestinationUnavailable
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
 docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}/.shiftpv-move-id"
 docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}"
 docker exec "${DESTINATION_NODE}" mount -o remount,rw "${DESTINATION_MOUNT}"
 MOUNT_STATE=tmpfs_rw
-request_source_recovery "${READONLY_NAMESPACE}"
-docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/aborted/${MOVE_NAME}-incoming/.shiftpv-move-id"
+wait_for_pool_condition worker-b True PoolReady
+wait_for_success "${READONLY_NAMESPACE}"
 docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}"
-echo "mobility read-only promotion recovery passed: volume=${VOLUME_ID} move=${MOVE_NAME}"
+echo "mobility resumed after destination read-only recovery: volume=${VOLUME_ID} move=${MOVE_NAME}"
 delete_workload "${READONLY_NAMESPACE}"
 docker exec "${DESTINATION_NODE}" umount "${DESTINATION_MOUNT}"
 MOUNT_STATE=normal

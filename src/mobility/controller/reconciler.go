@@ -29,6 +29,7 @@ type Repository interface {
 	Get(context.Context, string) (volumeapi.State, error)
 	CompareAndSetState(context.Context, string, string, string, string, volumeapi.State) error
 	Pools(context.Context) ([]volumeapi.Pool, error)
+	ReadyPools(context.Context) ([]volumeapi.Pool, error)
 	CreateMove(context.Context, string, volumeapi.MoveSpec) (volumeapi.Move, error)
 	DeleteMove(context.Context, string, string) error
 	ListMoves(context.Context) ([]volumeapi.Move, error)

@@ -93,6 +93,7 @@ install_shiftpv() {
     -l app.kubernetes.io/instance=shiftpv \
 		--timeout=5m
 	kubectl apply -f "${WORK_DIR}/pools.yaml"
+	kubectl wait --for=condition=Ready shiftpvpool --all --timeout=2m
 }
 
 run_mobility_filesystem_faults() {

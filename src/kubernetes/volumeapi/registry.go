@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -23,6 +26,16 @@ var (
 
 	ErrStateConflict     = errors.New("ShiftPV state precondition failed")
 	ErrPoolConfiguration = errors.New("ShiftPV Pool configuration is invalid")
+	ErrPoolNotFound      = errors.New("ShiftPV Pool is not registered")
+	ErrPoolNotReady      = errors.New("ShiftPV Pool is not ready")
+)
+
+const (
+	PoolConditionReady             = "Ready"
+	PoolConditionMounted           = "Mounted"
+	PoolConditionWritable          = "Writable"
+	PoolConditionCapacityReadable  = "CapacityReadable"
+	DefaultPoolReadinessStaleAfter = 3 * time.Minute
 )
 
 const (
@@ -43,6 +56,14 @@ type Pool struct {
 	NodeName      string
 	MountPath     string
 	CapacityLimit string
+	Generation    int64
+	Status        PoolStatus
+}
+
+type PoolStatus struct {
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	LastProbeTime      metav1.Time        `json:"lastProbeTime,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
 type MoveSpec struct {
@@ -95,7 +116,9 @@ func MoveReservesDestination(move Move, state State, nodeName string) bool {
 }
 
 type Registry struct {
-	Client dynamic.Interface
+	Client                  dynamic.Interface
+	PoolReadinessStaleAfter time.Duration
+	Now                     func() time.Time
 }
 
 func (r *Registry) Ensure(ctx context.Context, volumeID, ownerNode string) error {
@@ -220,18 +243,18 @@ func (r *Registry) Pools(ctx context.Context) ([]Pool, error) {
 	result := make([]Pool, 0, len(list.Items))
 	nodes := make(map[string]struct{}, len(list.Items))
 	for index := range list.Items {
-		nodeName, _, _ := unstructured.NestedString(list.Items[index].Object, "spec", "nodeName")
-		mountPath, _, _ := unstructured.NestedString(list.Items[index].Object, "spec", "mountPath")
-		capacityLimit, _, _ := unstructured.NestedString(list.Items[index].Object, "spec", "capacity", "limit")
-		mountPath = filepath.Clean(mountPath)
-		if nodeName == "" || !filepath.IsAbs(mountPath) || mountPath == "/" {
+		pool, poolErr := poolFrom(&list.Items[index])
+		if poolErr != nil {
+			return nil, poolErr
+		}
+		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" {
 			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName or mountPath", ErrPoolConfiguration, list.Items[index].GetName())
 		}
-		if _, duplicate := nodes[nodeName]; duplicate {
-			return nil, fmt.Errorf("%w: multiple ShiftPVPools are registered for node %q", ErrPoolConfiguration, nodeName)
+		if _, duplicate := nodes[pool.NodeName]; duplicate {
+			return nil, fmt.Errorf("%w: multiple ShiftPVPools are registered for node %q", ErrPoolConfiguration, pool.NodeName)
 		}
-		nodes[nodeName] = struct{}{}
-		result = append(result, Pool{Name: list.Items[index].GetName(), NodeName: nodeName, MountPath: mountPath, CapacityLimit: capacityLimit})
+		nodes[pool.NodeName] = struct{}{}
+		result = append(result, pool)
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].NodeName < result[right].NodeName })
 	if len(result) == 0 {
@@ -240,7 +263,32 @@ func (r *Registry) Pools(ctx context.Context) ([]Pool, error) {
 	return result, nil
 }
 
+func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
+	pools, err := r.Pools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	staleAfter := r.PoolReadinessStaleAfter
+	if staleAfter <= 0 {
+		staleAfter = DefaultPoolReadinessStaleAfter
+	}
+	ready := make([]Pool, 0, len(pools))
+	for _, pool := range pools {
+		if ok, _ := pool.ReadyAt(now, staleAfter); ok {
+			ready = append(ready, pool)
+		}
+	}
+	return ready, nil
+}
+
 func (r *Registry) PoolNodes(ctx context.Context) ([]string, error) {
+	// Accessible topology is the durable mobility universe encoded into the PV.
+	// Keep every registered Pool here even if one is temporarily not Ready;
+	// current readiness is enforced when selecting a provisioning or move target.
 	pools, err := r.Pools(ctx)
 	if err != nil {
 		return nil, err
@@ -276,9 +324,94 @@ func (r *Registry) PoolForNode(ctx context.Context, nodeName string) (Pool, erro
 		result = pool
 	}
 	if result.NodeName == "" {
-		return Pool{}, fmt.Errorf("%w: no ShiftPVPool is registered for node %q", ErrPoolConfiguration, nodeName)
+		return Pool{}, fmt.Errorf("%w: no ShiftPVPool is registered for node %q", ErrPoolNotFound, nodeName)
 	}
 	return result, nil
+}
+
+func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool, error) {
+	pool, err := r.PoolForNode(ctx, nodeName)
+	if err != nil {
+		return Pool{}, err
+	}
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	staleAfter := r.PoolReadinessStaleAfter
+	if staleAfter <= 0 {
+		staleAfter = DefaultPoolReadinessStaleAfter
+	}
+	if ready, reason := pool.ReadyAt(now, staleAfter); !ready {
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, pool.Name, nodeName, reason)
+	}
+	return pool, nil
+}
+
+func (r *Registry) SetPoolStatus(ctx context.Context, name, nodeName string, status PoolStatus) error {
+	if err := r.validate(); err != nil {
+		return err
+	}
+	if name == "" || nodeName == "" {
+		return fmt.Errorf("ShiftPVPool name and node name are required")
+	}
+	resource := r.Client.Resource(PoolResource)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		object, err := resource.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("read ShiftPVPool status: %w", err)
+		}
+		registeredNode, _, _ := unstructured.NestedString(object.Object, "spec", "nodeName")
+		if registeredNode != nodeName {
+			return fmt.Errorf("%w: ShiftPVPool %q belongs to node %q, not %q", ErrStateConflict, name, registeredNode, nodeName)
+		}
+		data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&status)
+		if err != nil {
+			return fmt.Errorf("encode ShiftPVPool status: %w", err)
+		}
+		if err := unstructured.SetNestedMap(object.Object, data, "status"); err != nil {
+			return fmt.Errorf("set ShiftPVPool status: %w", err)
+		}
+		if _, err := resource.UpdateStatus(ctx, object, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update ShiftPVPool status: %w", err)
+		}
+		return nil
+	})
+}
+
+func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	condition := meta.FindStatusCondition(p.Status.Conditions, PoolConditionReady)
+	if condition == nil || condition.Status != metav1.ConditionTrue {
+		if condition != nil && condition.Reason != "" {
+			return false, condition.Reason
+		}
+		return false, "ProbePending"
+	}
+	if p.Status.ObservedGeneration != p.Generation || condition.ObservedGeneration != p.Generation {
+		return false, "ProbeOutdated"
+	}
+	if p.Status.LastProbeTime.IsZero() || staleAfter <= 0 || now.Sub(p.Status.LastProbeTime.Time) > staleAfter || now.Before(p.Status.LastProbeTime.Time) {
+		return false, "ProbeStale"
+	}
+	return true, condition.Reason
+}
+
+func poolFrom(object *unstructured.Unstructured) (Pool, error) {
+	status := PoolStatus{}
+	if data, found, err := unstructured.NestedMap(object.Object, "status"); err != nil {
+		return Pool{}, fmt.Errorf("decode ShiftPVPool %q status: %w", object.GetName(), err)
+	} else if found {
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(data, &status); err != nil {
+			return Pool{}, fmt.Errorf("decode ShiftPVPool %q status: %w", object.GetName(), err)
+		}
+	}
+	nodeName, _, _ := unstructured.NestedString(object.Object, "spec", "nodeName")
+	mountPath, _, _ := unstructured.NestedString(object.Object, "spec", "mountPath")
+	capacityLimit, _, _ := unstructured.NestedString(object.Object, "spec", "capacity", "limit")
+	return Pool{
+		Name: object.GetName(), NodeName: nodeName, MountPath: filepath.Clean(mountPath),
+		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), Status: status,
+	}, nil
 }
 
 func (r *Registry) CreateMove(ctx context.Context, generateName string, spec MoveSpec) (Move, error) {

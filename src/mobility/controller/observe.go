@@ -52,12 +52,20 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		}
 		poolNodes[pool.NodeName] = pool
 	}
+	readyPools, err := r.Repository.ReadyPools(ctx)
+	if err != nil {
+		return result, err
+	}
+	readyPoolNodes := make(map[string]struct{}, len(readyPools))
+	for _, pool := range readyPools {
+		readyPoolNodes[pool.NodeName] = struct{}{}
+	}
 	sourceNode, err := r.Client.CoreV1().Nodes().Get(ctx, move.Spec.SourceNode, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return result, fmt.Errorf("read source Node: %w", err)
 	}
-	_, sourceRegistered := poolNodes[move.Spec.SourceNode]
-	sourceHealthy := err == nil && nodeReady(sourceNode) && sourceRegistered
+	_, sourceReady := readyPoolNodes[move.Spec.SourceNode]
+	sourceHealthy := err == nil && nodeReady(sourceNode) && sourceReady
 	result.FSM.SourceHealthy = sourceHealthy
 	result.SourceCordoned = sourceNode != nil && sourceNode.Spec.Unschedulable
 	if !sourceHealthy {
@@ -78,6 +86,9 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		if nodeName == move.Spec.SourceNode {
 			continue
 		}
+		if _, ready := readyPoolNodes[nodeName]; !ready {
+			continue
+		}
 		node, nodeErr := r.Client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 		if nodeErr != nil {
 			if apierrors.IsNotFound(nodeErr) {
@@ -90,6 +101,11 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		}
 	}
 	if len(move.Status.CandidateNodes) != 0 {
+		// CandidateNodes is the immutable eligibility snapshot taken before
+		// eviction. Keep it stable so a transient Pool outage after placement
+		// pauses the transaction instead of being misclassified as a changed
+		// scheduling constraint. The selected destination is checked against
+		// current readiness below before any disk or authority action proceeds.
 		result.CandidateNodes = append([]string(nil), move.Status.CandidateNodes...)
 	}
 
@@ -268,12 +284,12 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		return result, fmt.Errorf("read placement reservation Pod: %w", placementErr)
 	}
 	if result.DestinationNode != "" {
-		_, registered := poolNodes[result.DestinationNode]
+		_, ready := readyPoolNodes[result.DestinationNode]
 		destinationNode, destinationErr := r.Client.CoreV1().Nodes().Get(ctx, result.DestinationNode, metav1.GetOptions{})
 		if destinationErr != nil && !apierrors.IsNotFound(destinationErr) {
 			return result, fmt.Errorf("read selected destination Node %q: %w", result.DestinationNode, destinationErr)
 		}
-		result.FSM.DestinationUnavailable = destinationErr != nil || !registered || !nodeReady(destinationNode)
+		result.FSM.DestinationUnavailable = destinationErr != nil || !ready || !nodeReady(destinationNode)
 	}
 	result.FSM.CopyComplete, result.FSM.CopyFailed, err = r.jobState(ctx, result.Names.CopyJob)
 	if err != nil {
