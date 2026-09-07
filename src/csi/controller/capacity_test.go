@@ -152,6 +152,48 @@ func TestCreateVolumeDoesNotCountRecoveredMoveAtDestination(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeIgnoresMoveAfterVolumeAndReservationDeletion(t *testing.T) {
+	registry := &fakePoolCapacityRegistry{
+		pool:    volumeapi.Pool{Name: "pool-b", NodeName: "worker-b", MountPath: "/pool", CapacityLimit: "64Mi"},
+		volumes: map[string]volumeapi.State{},
+		moves: []volumeapi.Move{{
+			Name: "move-deleted", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-deleted", SourceNode: "worker-a"},
+			Status: volumeapi.MoveStatus{
+				Phase: "Succeeded", DestinationNode: "worker-b", CapacityApproved: true, SourceBytes: 1,
+			},
+		}},
+	}
+	service := &Service{
+		Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
+		CapacityPools: registry,
+		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
+	}
+	if _, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b")); err != nil {
+		t.Fatalf("deleted volume's Move blocked unrelated provisioning: %v", err)
+	}
+}
+
+func TestCreateVolumeRejectsMoveWithReservationButNoVolume(t *testing.T) {
+	volumeID := "shiftpv-orphaned-reservation"
+	registry := &fakePoolCapacityRegistry{
+		pool:    volumeapi.Pool{Name: "pool-b", NodeName: "worker-b", MountPath: "/pool", CapacityLimit: "64Mi"},
+		volumes: map[string]volumeapi.State{},
+		moves: []volumeapi.Move{{
+			Name: "move-incomplete", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "worker-a"},
+			Status: volumeapi.MoveStatus{DestinationNode: "worker-b", CapacityApproved: true, SourceBytes: 1},
+		}},
+	}
+	service := &Service{
+		Client:    fake.NewClientset(capacityReservation(volumeID, "worker-a", 8<<20)),
+		Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, CapacityPools: registry,
+		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
+	}
+	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b"))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("incomplete move was not rejected: %v", err)
+	}
+}
+
 func TestCreateVolumeSerializesPoolReservationAdmission(t *testing.T) {
 	probe := &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}}
 	service := capacityService(fake.NewClientset(), "64Mi", nil, probe)

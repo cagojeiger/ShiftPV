@@ -9,8 +9,6 @@ import (
 	"strings"
 	"syscall"
 
-	mountutils "k8s.io/mount-utils"
-
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 )
 
@@ -22,7 +20,7 @@ type Check struct {
 }
 
 type Result struct {
-	Mounted          Check
+	Accessible       Check
 	Writable         Check
 	CapacityReadable Check
 }
@@ -32,18 +30,17 @@ type Inspector interface {
 }
 
 type Probe struct {
-	HostRoot     string
-	isMountPoint func(string) (bool, error)
-	write        func(string) error
-	statFS       func(string) error
+	HostRoot string
+	inspect  func(string) error
+	write    func(string) error
+	statFS   func(string) error
 }
 
 func NewProbe(hostRoot string) *Probe {
-	mounter := mountutils.New("")
 	return &Probe{
-		HostRoot:     hostRoot,
-		isMountPoint: mounter.IsMountPoint,
-		write:        writeProbe,
+		HostRoot: hostRoot,
+		inspect:  inspectDirectory,
+		write:    writeProbe,
 		statFS: func(path string) error {
 			return syscall.Statfs(path, &syscall.Statfs_t{})
 		},
@@ -54,22 +51,14 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 	path, err := hostPath(p.HostRoot, pool.MountPath)
 	if err != nil {
 		failed := failure(err)
-		return Result{Mounted: failed, Writable: skipped(), CapacityReadable: skipped()}
+		return Result{Accessible: failed, Writable: skipped(), CapacityReadable: skipped()}
 	}
-	mounted, err := p.isMountPoint(path)
-	if err != nil {
+	if err := p.inspect(path); err != nil {
 		failed := failure(err)
-		return Result{Mounted: failed, Writable: skipped(), CapacityReadable: skipped()}
-	}
-	if !mounted {
-		return Result{
-			Mounted:          Check{Known: true, Reason: "NotMounted", Message: fmt.Sprintf("%s is not a mount point", pool.MountPath)},
-			Writable:         skipped(),
-			CapacityReadable: skipped(),
-		}
+		return Result{Accessible: failed, Writable: skipped(), CapacityReadable: skipped()}
 	}
 	result := Result{
-		Mounted: Check{OK: true, Known: true, Reason: "Mounted", Message: fmt.Sprintf("%s is a mount point", pool.MountPath)},
+		Accessible: Check{OK: true, Known: true, Reason: "DirectoryAccessible", Message: fmt.Sprintf("%s is an accessible directory", pool.MountPath)},
 	}
 	if err := p.write(path); err != nil {
 		result.Writable = failure(err)
@@ -82,6 +71,17 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 		result.CapacityReadable = Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "filesystem capacity is readable"}
 	}
 	return result
+}
+
+func inspectDirectory(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory: %w", path, syscall.ENOTDIR)
+	}
+	return nil
 }
 
 func hostPath(hostRoot, mountPath string) (string, error) {
@@ -128,6 +128,8 @@ func failure(err error) Check {
 		reason = "PathMissing"
 	case errors.Is(err, fs.ErrPermission):
 		reason = "PermissionDenied"
+	case errors.Is(err, syscall.ENOTDIR):
+		reason = "NotDirectory"
 	case errors.Is(err, syscall.EROFS):
 		reason = "ReadOnly"
 	case errors.Is(err, syscall.ENOSPC):
@@ -137,5 +139,5 @@ func failure(err error) Check {
 }
 
 func skipped() Check {
-	return Check{Reason: "ProbeSkipped", Message: "check skipped because the mount prerequisite failed"}
+	return Check{Reason: "ProbeSkipped", Message: "check skipped because the directory prerequisite failed"}
 }

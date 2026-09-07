@@ -23,6 +23,7 @@
 | [g0-safety-2026-09-06.md](g0-safety-2026-09-06.md) | checksum copy 검증, DeleteVolume 부분 삭제 재시도, reservation 복구 회귀와 전체 Kind 재검증 |
 | [home-public-chart-capacity-2026-09-06.md](home-public-chart-capacity-2026-09-06.md) | 공개 chart 0.1.4의 MicroK8s kubelet root 교정과 Pool 총예약 capacity admission |
 | [pool-readiness-2026-09-07.md](pool-readiness-2026-09-07.md) | node-reported mount/write/capacity 상태와 ENOSPC/read-only 자동 복구 |
+| [general-directory-pools-2026-09-07.md](general-directory-pools-2026-09-07.md) | root filesystem 일반 directory Pool의 provisioning, cordon 이동과 전체 회귀 |
 
 검증 문서는 당시의 환경과 결과를 보존하는 snapshot이다. 현재 branch의 통과 여부는
 같은 테스트를 다시 실행하거나 해당 commit의 CI check로 판단한다.

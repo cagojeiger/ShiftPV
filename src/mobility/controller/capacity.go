@@ -105,15 +105,20 @@ func (r *Reconciler) destinationCapacity(ctx context.Context, current volumeapi.
 		if move.Name == current.Name || !move.Status.CapacityApproved || move.Status.DestinationNode != destination {
 			continue
 		}
+		bytes, reservationExists := capacities[move.Spec.VolumeID]
 		state, exists := volumes[move.Spec.VolumeID]
 		if !exists {
+			// DeleteVolume removes both live capacity records but retains a
+			// terminal Move as history. It no longer reserves destination space.
+			if !reservationExists {
+				continue
+			}
 			return 0, 0, 0, 0, fmt.Errorf("approved move %q has no volume state", move.Name)
 		}
 		if !volumeapi.MoveReservesDestination(move, state, destination) {
 			continue
 		}
-		bytes, exists := capacities[move.Spec.VolumeID]
-		if !exists || logicalReserved > math.MaxInt64-bytes || physicalPending > math.MaxInt64-move.Status.SourceBytes {
+		if !reservationExists || logicalReserved > math.MaxInt64-bytes || physicalPending > math.MaxInt64-move.Status.SourceBytes {
 			return 0, 0, 0, 0, fmt.Errorf("approved move %q has invalid capacity state", move.Name)
 		}
 		logicalReserved += bytes

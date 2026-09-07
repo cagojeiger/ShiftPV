@@ -112,7 +112,19 @@ run_pool_capacity() {
 	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/pool-capacity.sh"
 }
 
+run_directory_pool() {
+	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
+		"${ROOT_DIR}/test/e2e/kind/directory-pool.sh"
+}
+
 install_shiftpv true
+
+run_directory_pool
+
+if [[ "${DIRECTORY_POOL_ONLY:-0}" == "1" ]]; then
+	echo "ShiftPV focused ordinary directory Pool E2E passed"
+	exit 0
+fi
 
 run_pool_capacity
 
