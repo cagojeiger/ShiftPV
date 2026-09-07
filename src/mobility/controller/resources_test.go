@@ -76,6 +76,13 @@ func TestItemizedChecksumDryRunReportsDifferentContent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(destination, "payload"), []byte("original-data\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	sourceInfo, err := os.Stat(filepath.Join(source, "payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(destination, "payload"), sourceInfo.ModTime(), sourceInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
 	if diff := runItemizedChecksumDryRun(t, source, destination); strings.TrimSpace(diff) != "" {
 		t.Fatalf("identical content produced a diff: %q", diff)
 	}
