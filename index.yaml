@@ -3,7 +3,18 @@ entries:
   shiftpv:
   - apiVersion: v2
     appVersion: 0.1.7
-    created: "2026-09-07T07:49:54.4391878Z"
+    created: "2026-09-07T11:28:42.950824341Z"
+    description: CSI driver for movable local volumes in existing filesystem directories
+    digest: 89a3760a1de2f75ad1513dad51ee6a80db064321fa31d994c38ff1ac9502e1b7
+    kubeVersion: '>=1.35.0-0'
+    name: shiftpv
+    type: application
+    urls:
+    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.8.tgz
+    version: 0.1.8
+  - apiVersion: v2
+    appVersion: 0.1.7
+    created: "2026-09-07T11:28:42.950288684Z"
     description: CSI driver for movable local volumes in existing filesystem directories
     digest: aab848eabe33fc21ba206a9f696704fc1e66123558830af485dbf9e5224e29af
     kubeVersion: '>=1.35.0-0'
@@ -14,7 +25,7 @@ entries:
     version: 0.1.7
   - apiVersion: v2
     appVersion: 0.1.6
-    created: "2026-09-07T07:49:54.438551024Z"
+    created: "2026-09-07T11:28:42.949797044Z"
     description: CSI driver for directory-backed local volumes on mounted filesystems
     digest: a7c5e73bfbc9147ba0eac70f841a912de79497e2dce304f54098b5b546c1a9be
     kubeVersion: '>=1.35.0-0'
@@ -25,7 +36,7 @@ entries:
     version: 0.1.6
   - apiVersion: v2
     appVersion: 0.1.5
-    created: "2026-09-07T07:49:54.437934174Z"
+    created: "2026-09-07T11:28:42.949315539Z"
     description: CSI driver for directory-backed local volumes on mounted filesystems
     digest: ce8985254926b8a967fd7aa03932ba7b7aecd6de1d544093aab075ba70b3c807
     kubeVersion: '>=1.35.0-0'
@@ -36,7 +47,7 @@ entries:
     version: 0.1.5
   - apiVersion: v2
     appVersion: 0.1.5
-    created: "2026-09-07T07:49:54.437317415Z"
+    created: "2026-09-07T11:28:42.948782496Z"
     description: CSI driver for directory-backed local volumes on mounted filesystems
     digest: 715399d54c3910415a626d8619395587565ca30e006851c027661c5d589b0a63
     kubeVersion: '>=1.35.0-0'
@@ -47,7 +58,7 @@ entries:
     version: 0.1.4
   - apiVersion: v2
     appVersion: 0.1.4
-    created: "2026-09-07T07:49:54.43672458Z"
+    created: "2026-09-07T11:28:42.947762269Z"
     description: CSI driver for directory-backed local volumes on mounted filesystems
     digest: 9f5c4670b105c177f7698b72457ad3a47d83cc5d214419ef4758324979b95093
     kubeVersion: '>=1.35.0-0'
@@ -58,7 +69,7 @@ entries:
     version: 0.1.3
   - apiVersion: v2
     appVersion: 0.1.3
-    created: "2026-09-07T07:49:54.436179334Z"
+    created: "2026-09-07T11:28:42.947308556Z"
     description: CSI driver for directory-backed local volumes on mounted filesystems
     digest: acc34e186d228a4e79d2c56da737f540a76c11c8970f3abaeb2718ca46e73444
     kubeVersion: '>=1.35.0-0'
@@ -69,7 +80,7 @@ entries:
     version: 0.1.2
   - apiVersion: v2
     appVersion: 0.1.2
-    created: "2026-09-07T07:49:54.435553658Z"
+    created: "2026-09-07T11:28:42.946816375Z"
     description: CSI driver for directory-backed local volumes on mounted filesystems
     digest: 048c3933c5e4f609dee4fff1051241d47c6e91d6eb07bf73be502a5d57dda8ee
     kubeVersion: '>=1.35.0-0'
@@ -80,7 +91,7 @@ entries:
     version: 0.1.1
   - apiVersion: v2
     appVersion: 0.1.0
-    created: "2026-09-07T07:49:54.434321245Z"
+    created: "2026-09-07T11:28:42.946288229Z"
     description: CSI driver for directory-backed local volumes on mounted filesystems
     digest: 257a8ad8998aecfae7907ff363c856db6df379e6266285a3e99b69d02c3aea50
     kubeVersion: '>=1.35.0-0'
@@ -89,4 +100,4 @@ entries:
     urls:
     - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-07T07:49:54.433473756Z"
+generated: "2026-09-07T11:28:42.945686403Z"
