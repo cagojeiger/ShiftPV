@@ -39,7 +39,7 @@ make verify
 | Shell | build/test script ShellCheck |
 | Helm | lint와 deterministic template |
 | Release | image/chart resolver 순서와 artifact lock |
-| Docs | local Markdown link와 ADR 목차 일관성 |
+| Docs | local Markdown link와 ADR 번호·인덱스·목차 일관성 |
 
 Coverage artifact는 `.tmp/coverage.out`과 `.tmp/coverage.txt`에 생성된다.
 
