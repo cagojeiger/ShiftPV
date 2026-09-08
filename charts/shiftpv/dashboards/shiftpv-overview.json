@@ -1,0 +1,1516 @@
+{
+  "id": null,
+  "uid": "shiftpv-overview",
+  "title": "ShiftPV · Storage Overview",
+  "description": "Operational overview, Pool comparison and scoped diagnostics. Unknown is distinct from healthy or zero. Read-only observations; no quota or application I/O claims.",
+  "tags": [
+    "shiftpv",
+    "storage",
+    "kubernetes"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "regex": "",
+        "refresh": 1,
+        "multi": false,
+        "includeAll": false,
+        "options": []
+      },
+      {
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(shiftpv_metrics_snapshot_success{shiftpv=\"true\"}, cluster)",
+        "query": {
+          "query": "label_values(shiftpv_metrics_snapshot_success{shiftpv=\"true\"}, cluster)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": []
+      },
+      {
+        "name": "namespace",
+        "label": "Driver namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\"}, namespace)",
+        "query": {
+          "query": "label_values(shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\"}, namespace)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": []
+      },
+      {
+        "name": "pool",
+        "label": "Pool · comparison section",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(shiftpv_pool_ready{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}, pool)",
+        "query": {
+          "query": "label_values(shiftpv_pool_ready{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}, pool)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": []
+      },
+      {
+        "name": "freshness",
+        "label": "Observation window",
+        "type": "custom",
+        "query": "1 min : 60,3 min : 180,5 min : 300,10 min : 600",
+        "current": {
+          "text": "3 min",
+          "value": "180"
+        },
+        "options": [
+          {
+            "text": "1 min",
+            "value": "60",
+            "selected": false
+          },
+          {
+            "text": "3 min",
+            "value": "180",
+            "selected": true
+          },
+          {
+            "text": "5 min",
+            "value": "300",
+            "selected": false
+          },
+          {
+            "text": "10 min",
+            "value": "600",
+            "selected": false
+          }
+        ],
+        "multi": false,
+        "includeAll": false,
+        "description": "Dashboard-only freshness window. Set above the configured Pool probe interval; this does not alter storage admission."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Installation overview · all Pools",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Collection",
+      "description": "Latest status of discovered ShiftPV targets. Healthy means all returned targets are up, not that an expected target inventory is complete. Pool filter does not apply.",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Attention",
+                  "color": "orange"
+                },
+                "1": {
+                  "text": "Healthy",
+                  "color": "green"
+                },
+                "-1": {
+                  "text": "Unknown",
+                  "color": "gray"
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "Unknown",
+                  "color": "gray"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "min(up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"})",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Observations",
+      "description": "Latest success and age of returned snapshots, using the selected observation window. Healthy covers returned sources only, not a complete expected inventory. Check Collection and observation details. Pool filter does not apply.",
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Attention",
+                  "color": "orange"
+                },
+                "1": {
+                  "text": "Healthy",
+                  "color": "green"
+                },
+                "-1": {
+                  "text": "Unknown",
+                  "color": "gray"
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "Unknown",
+                  "color": "gray"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "min((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} * (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} > bool 0) * ((time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}) < bool ${freshness})) * on (cluster, namespace, job, instance) group_left () up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"})",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active moves",
+      "description": "Current linked Moves except Succeeded, including Blocked. Unknown if any returned metadata observer in the selected scope is unavailable or stale. Pool filter does not apply.",
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum((shiftpv_moves{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",phase!=\"Succeeded\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))) and on () (min((shiftpv_metrics_snapshot_success{shiftpv=\"true\",source=\"metadata\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} * (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",source=\"metadata\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} > bool 0) * ((time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",source=\"metadata\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}) < bool ${freshness})) * on (cluster, namespace, job, instance) group_left () up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}) == 1)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Blocked volumes",
+      "description": "Current Blocked Volume CRs, not all deferred candidates. Unknown if any returned metadata observer in the selected scope is unavailable or stale. Pool filter does not apply.",
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum((shiftpv_volumes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",phase=\"Blocked\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))) and on () (min((shiftpv_metrics_snapshot_success{shiftpv=\"true\",source=\"metadata\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} * (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",source=\"metadata\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} > bool 0) * ((time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",source=\"metadata\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}) < bool ${freshness})) * on (cluster, namespace, job, instance) group_left () up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}) == 1)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 110,
+      "type": "row",
+      "title": "Pool comparison · ${pool:text}",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Pool capacity & reservations",
+      "description": "Current observations only. Unknown means unavailable, failed or older than the selected window. FS available includes other writers; Reserved and Limit are logical reservations, not actual file usage. No Volume CR may be a creation in progress; it is not an automatic deletion instruction.",
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 24,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Ready"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Attention",
+                        "color": "orange"
+                      },
+                      "1": {
+                        "text": "Healthy",
+                        "color": "green"
+                      },
+                      "-1": {
+                        "text": "Unknown",
+                        "color": "gray"
+                      }
+                    }
+                  },
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "Unknown",
+                        "color": "gray"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Accounting"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Attention",
+                        "color": "orange"
+                      },
+                      "1": {
+                        "text": "Healthy",
+                        "color": "green"
+                      },
+                      "-1": {
+                        "text": "Unknown",
+                        "color": "gray"
+                      }
+                    }
+                  },
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "Unknown",
+                        "color": "gray"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "FS available"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Reserved"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Limit"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 65
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "No Volume CR"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cluster"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Node"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Pool"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace(max by (cluster, namespace, pool, node) (((shiftpv_pool_ready{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))) or (shiftpv_pool_ready{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} * 0 - 1)), \"column\", \"Ready\", \"pool\", \".*\")",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace(max by (cluster, namespace, pool, node) (((shiftpv_pool_accounting_valid{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))) or (shiftpv_pool_accounting_valid{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} * 0 - 1)), \"column\", \"Accounting\", \"pool\", \".*\")",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace(max by (cluster, namespace, pool, node) ((shiftpv_pool_filesystem_available_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"filesystem\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"filesystem\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))), \"column\", \"FS available\", \"pool\", \".*\")",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace(max by (cluster, namespace, pool, node) ((shiftpv_pool_reserved_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} and (shiftpv_pool_accounting_valid{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} == 1)) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))), \"column\", \"Reserved\", \"pool\", \".*\")",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace(max by (cluster, namespace, pool, node) ((shiftpv_pool_capacity_limit_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))), \"column\", \"Limit\", \"pool\", \".*\")",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace(max by (cluster, namespace, pool, node) ((shiftpv_pool_unregistered_reserved_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} and (shiftpv_pool_accounting_valid{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} == 1)) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))), \"column\", \"No Volume CR\", \"pool\", \".*\")",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Node",
+            "desc": false
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "valueLabel": "column"
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "namespace": true
+            },
+            "indexByName": {
+              "cluster": 0,
+              "node": 1,
+              "pool": 2,
+              "Ready": 3,
+              "Accounting": 4,
+              "FS available": 5,
+              "Reserved": 6,
+              "Limit": 7,
+              "No Volume CR": 8
+            },
+            "renameByName": {
+              "cluster": "Cluster",
+              "node": "Node",
+              "pool": "Pool"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Filesystem available · %",
+      "description": "Space in the filesystem containing each Pool directory, shared with other writers. Gaps indicate unavailable/failed/stale observations. Series are not summed.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "(100 * shiftpv_pool_filesystem_available_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} / shiftpv_pool_filesystem_size_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"filesystem\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"filesystem\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))",
+          "legendFormat": "{{cluster}} / {{node}} / {{pool}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc",
+          "hideZeros": true
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Reservation limit used · %",
+      "description": "Logical reservations / configured limit. This is not filesystem utilization or a per-PVC write quota. Gaps indicate invalid accounting or stale metadata.",
+      "gridPos": {
+        "x": 8,
+        "y": 13,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "((100 * shiftpv_pool_reserved_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} / shiftpv_pool_capacity_limit_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"}) and (shiftpv_pool_accounting_valid{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} == 1)) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))",
+          "legendFormat": "{{cluster}} / {{node}} / {{pool}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc",
+          "hideZeros": true
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Filesystem available inodes",
+      "description": "Current filesystem free inodes, observed by the existing probe. Gaps indicate unavailable/failed/stale observations.",
+      "gridPos": {
+        "x": 16,
+        "y": 13,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "(shiftpv_pool_filesystem_available_inodes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"filesystem\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"filesystem\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))",
+          "legendFormat": "{{cluster}} / {{node}} / {{pool}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc",
+          "hideZeros": true
+        }
+      }
+    },
+    {
+      "id": 120,
+      "type": "row",
+      "title": "Mobility · installation-wide, independent of Pool filter",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Current volume states",
+      "description": "Only non-zero phase counts from fresh metadata. An empty table can mean no volumes or unavailable observations; the overview distinguishes observation health.",
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (cluster, phase) ((shiftpv_volumes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))) > 0",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Count",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "phase": "Phase",
+              "Value": "Count",
+              "cluster": "Cluster"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Current movement deferrals",
+      "description": "Only non-zero deferral counts from fresh discovery. An empty table can mean no deferrals or unavailable discovery; inspect observation status. Reasons are diagnosis hints, not individual Volume identities.",
+      "gridPos": {
+        "x": 12,
+        "y": 21,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (cluster, reason) ((shiftpv_mobility_deferred_volumes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"discovery\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"discovery\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))) > 0",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Count",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "reason": "Reason",
+              "Value": "Count",
+              "cluster": "Cluster"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 130,
+      "type": "row",
+      "title": "CSI diagnostics · installation-wide, independent of Pool filter",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Completed RPCs · /s",
+      "description": "Lifecycle calls only; retries included. No series before first calls. This is not application I/O throughput.",
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (cluster, method, code) (rate(shiftpv_csi_requests_total{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{cluster}} / {{method}} / {{code}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc",
+          "hideZeros": true
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Non-OK RPCs · /s",
+      "description": "Non-OK includes expected rejections and retries. No series can mean no recorded non-OK calls or unavailable collection; inspect overview.",
+      "gridPos": {
+        "x": 8,
+        "y": 28,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (cluster, method, code) (rate(shiftpv_csi_requests_total{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",code!=\"OK\"}[$__rate_interval]))",
+          "legendFormat": "{{cluster}} / {{method}} / {{code}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc",
+          "hideZeros": true
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "RPC processing time · p95",
+      "description": "Server RPC duration, not transfer duration, disk latency or end-to-end Pod startup. No calls means no percentile.",
+      "gridPos": {
+        "x": 16,
+        "y": 28,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (cluster, le, method) (rate(shiftpv_csi_request_duration_seconds_bucket{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{cluster}} / {{method}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc",
+          "hideZeros": true
+        }
+      }
+    },
+    {
+      "id": 140,
+      "type": "row",
+      "title": "Observation details · installation-wide",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Snapshot result & age",
+      "description": "State: Healthy only when the latest observation succeeded, its timestamp is positive, it is within the selected window and its scrape target is up. Missing values stay Unknown. No successful observation means no age value.",
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 24,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "State"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Attention",
+                        "color": "orange"
+                      },
+                      "1": {
+                        "text": "Healthy",
+                        "color": "green"
+                      },
+                      "-1": {
+                        "text": "Unknown",
+                        "color": "gray"
+                      }
+                    }
+                  },
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "Unknown",
+                        "color": "gray"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} * (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} > bool 0) * ((time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}) < bool ${freshness})) * on (cluster, namespace, job, instance) group_left () up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}, \"column\", \"State\", \"source\", \".*\")",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace(time() - (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} > 0), \"column\", \"Age\", \"source\", \".*\")",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "valueLabel": "column"
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "namespace": true,
+              "instance": true,
+              "job": true,
+              "service": true,
+              "endpoint": true,
+              "container": true,
+              "shiftpv": true
+            },
+            "indexByName": {
+              "cluster": 0,
+              "pod": 1,
+              "source": 2,
+              "State": 3,
+              "Age": 4
+            },
+            "renameByName": {
+              "pod": "Pod",
+              "source": "Source",
+              "cluster": "Cluster"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "title": "Metrics guide",
+      "type": "link",
+      "url": "https://github.com/cagojeiger/ShiftPV/blob/main/docs/spec/metrics.md",
+      "targetBlank": true
+    }
+  ]
+}

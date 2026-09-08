@@ -1,0 +1,13 @@
+{{- if .Values.metrics.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "shiftpv.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels := merge (include "shiftpv.labels" . | fromYaml) .Values.metrics.dashboard.labels }}
+    {{- toYaml $labels | nindent 4 }}
+data:
+  shiftpv-overview.json: |
+    {{- .Files.Get "dashboards/shiftpv-overview.json" | nindent 4 }}
+{{- end }}

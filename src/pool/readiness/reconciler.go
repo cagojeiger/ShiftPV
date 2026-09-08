@@ -24,6 +24,7 @@ type Reconciler struct {
 	Inspector Inspector
 	Interval  time.Duration
 	Now       func() time.Time
+	Observe   func(volumeapi.Pool, Result, error)
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -47,11 +48,15 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	}
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context) error {
+func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	if err := r.validate(); err != nil {
 		return err
 	}
 	pool, err := r.Pools.PoolForNode(ctx, r.NodeName)
+	var result Result
+	if r.Observe != nil {
+		defer func() { r.Observe(pool, result, reconcileErr) }()
+	}
 	if errors.Is(err, volumeapi.ErrPoolNotFound) {
 		return nil
 	}
@@ -62,7 +67,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	if r.Now != nil {
 		now = r.Now().UTC()
 	}
-	result := r.Inspector.Inspect(pool)
+	result = r.Inspector.Inspect(pool)
 	status := pool.Status
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)

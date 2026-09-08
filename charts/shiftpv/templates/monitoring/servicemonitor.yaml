@@ -1,0 +1,35 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "metrics.serviceMonitor.enabled requires metrics.enabled" }}
+{{- end }}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
+{{- fail "metrics.serviceMonitor.enabled requires the Prometheus Operator ServiceMonitor CRD" }}
+{{- end }}
+{{- if gt (int (trimSuffix "s" .Values.metrics.serviceMonitor.scrapeTimeout)) (int (trimSuffix "s" .Values.metrics.serviceMonitor.interval)) }}
+{{- fail "metrics.serviceMonitor.scrapeTimeout must not exceed interval" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "shiftpv.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels := merge (include "shiftpv.labels" . | fromYaml) .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml $labels | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "shiftpv.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      shiftpv.io/metrics: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      relabelings:
+        - targetLabel: shiftpv
+          replacement: "true"
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}

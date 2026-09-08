@@ -17,7 +17,7 @@ func Serve(endpoint string, register Register) error {
 	return ServeContext(context.Background(), endpoint, register)
 }
 
-func ServeContext(ctx context.Context, endpoint string, register Register) error {
+func ServeContext(ctx context.Context, endpoint string, register Register, options ...grpc.ServerOption) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return fmt.Errorf("parse CSI endpoint: %w", err)
@@ -38,7 +38,7 @@ func ServeContext(ctx context.Context, endpoint string, register Register) error
 	}
 	defer listener.Close()
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(options...)
 	register(grpcServer)
 	done := make(chan struct{})
 	go func() {

@@ -106,3 +106,32 @@ func TestReconcilerValidatesConfiguration(t *testing.T) {
 		t.Fatal("invalid configuration accepted")
 	}
 }
+
+func TestReconcilerObserverReceivesExistingProbeAndErrors(t *testing.T) {
+	repository := &fakeRepository{pool: volumeapi.Pool{Name: "pool", NodeName: "node"}}
+	result := Result{CapacityReadable: Check{OK: true, Known: true}}
+	calls := 0
+	var observedErr error
+	reconciler := &Reconciler{
+		NodeName: "node", Pools: repository, Inspector: fakeInspector{result}, Interval: time.Minute,
+		Observe: func(pool volumeapi.Pool, got Result, err error) {
+			calls++
+			observedErr = err
+			if err == nil && pool.Name != "" && got != result {
+				t.Fatalf("observer did not reuse probe: %+v", got)
+			}
+		},
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil || calls != 1 || repository.statusSets != 1 {
+		t.Fatalf("normal observation: calls=%d sets=%d err=%v", calls, repository.statusSets, err)
+	}
+	repository.pool = volumeapi.Pool{}
+	repository.err = volumeapi.ErrPoolNotFound
+	if err := reconciler.Reconcile(context.Background()); err != nil || calls != 2 || observedErr != nil {
+		t.Fatalf("deleted Pool observation: %v", err)
+	}
+	repository.err = context.DeadlineExceeded
+	if err := reconciler.Reconcile(context.Background()); !errors.Is(err, context.DeadlineExceeded) || calls != 3 || !errors.Is(observedErr, err) {
+		t.Fatalf("API error observation: %v", err)
+	}
+}

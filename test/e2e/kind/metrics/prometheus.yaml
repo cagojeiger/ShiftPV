@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: metrics-test
+  namespace: shiftpv-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: metrics-test
+  namespace: shiftpv-system
+rules:
+  - apiGroups: [""]
+    resources: [endpoints, pods, services]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: metrics-test
+  namespace: shiftpv-system
+subjects:
+  - kind: ServiceAccount
+    name: metrics-test
+    namespace: shiftpv-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: metrics-test
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metrics-test
+  namespace: shiftpv-system
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 2s
+      scrape_timeout: 1s
+    scrape_configs:
+      - job_name: shiftpv
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [shiftpv-system]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_shiftpv_io_metrics]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: metrics
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - target_label: shiftpv
+            replacement: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-test
+  namespace: shiftpv-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics-test
+  template:
+    metadata:
+      labels:
+        app: metrics-test
+    spec:
+      serviceAccountName: metrics-test
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
+          args: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.path=/prometheus, --storage.tsdb.retention.time=1h]
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: metrics-test
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-test
+  namespace: shiftpv-system
+spec:
+  selector:
+    app: metrics-test
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http

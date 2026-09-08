@@ -1,0 +1,3 @@
+{{- if and .Values.metrics.enabled (eq (int .Values.metrics.port) (int .Values.mobility.webhookPort)) }}
+{{- fail "metrics.port must differ from mobility.webhookPort" }}
+{{- end }}

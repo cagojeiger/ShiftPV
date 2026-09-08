@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
-	"strconv"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -18,7 +16,7 @@ import (
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
-const reservationSelector = "app.kubernetes.io/name=shiftpv,app.kubernetes.io/component=volume-reservation"
+const reservationSelector = poolcapacity.ReservationSelector
 
 type PoolCapacityRegistry interface {
 	ReadyPoolForNode(context.Context, string) (volumeapi.Pool, error)
@@ -105,79 +103,11 @@ func (s *Service) poolReservedBytes(ctx context.Context, nodeName string) (int64
 		return 0, kubernetesAPIError("list capacity-approved moves", err)
 	}
 
-	seen := make(map[string]struct{}, len(reservations.Items))
-	var total int64
-	for index := range reservations.Items {
-		reservation := &reservations.Items[index]
-		volumeID := reservation.Data["volumeID"]
-		if volumeID == "" || volumeID != reservation.Name {
-			return 0, status.Errorf(codes.FailedPrecondition, "reservation %q has invalid volume identity", reservation.Name)
-		}
-		seen[volumeID] = struct{}{}
-		ownerNode := reservation.Data["nodeName"]
-		if state, exists := volumes[volumeID]; exists {
-			ownerNode = state.OwnerNode
-		}
-		if ownerNode == "" {
-			return 0, status.Errorf(codes.FailedPrecondition, "reservation %q has no current owner", reservation.Name)
-		}
-		if ownerNode != nodeName {
-			continue
-		}
-		capacityBytes, parseErr := strconv.ParseInt(reservation.Data["capacity"], 10, 64)
-		if parseErr != nil || capacityBytes <= 0 {
-			return 0, status.Errorf(codes.FailedPrecondition, "reservation %q has invalid capacity", reservation.Name)
-		}
-		if total > math.MaxInt64-capacityBytes {
-			return 0, status.Error(codes.FailedPrecondition, "Pool reservation total overflows int64")
-		}
-		total += capacityBytes
-	}
-	for volumeID, state := range volumes {
-		if state.OwnerNode != nodeName {
-			continue
-		}
-		if _, exists := seen[volumeID]; !exists {
-			return 0, status.Errorf(codes.FailedPrecondition, "volume %q has no capacity reservation", volumeID)
-		}
-	}
-	for _, move := range moves {
-		if !move.Status.CapacityApproved || move.Status.DestinationNode != nodeName {
-			continue
-		}
-		reservation, reservationExists := reservationByID(reservations.Items, move.Spec.VolumeID)
-		state, exists := volumes[move.Spec.VolumeID]
-		if !exists {
-			// A completed DeleteVolume removes both the volume state and its
-			// reservation, while the terminal Move remains as an audit record.
-			// Such a record owns no capacity and must not block unrelated PVCs.
-			if !reservationExists {
-				continue
-			}
-			return 0, status.Errorf(codes.FailedPrecondition, "move %q has no volume state", move.Name)
-		}
-		if !volumeapi.MoveReservesDestination(move, state, nodeName) {
-			continue
-		}
-		if !reservationExists {
-			return 0, status.Errorf(codes.FailedPrecondition, "move %q has no capacity reservation", move.Name)
-		}
-		capacityBytes, parseErr := strconv.ParseInt(reservation.Data["capacity"], 10, 64)
-		if parseErr != nil || capacityBytes <= 0 || total > math.MaxInt64-capacityBytes {
-			return 0, status.Errorf(codes.FailedPrecondition, "move %q has invalid capacity reservation", move.Name)
-		}
-		total += capacityBytes
+	total, err := poolcapacity.ReservedBytes(reservations.Items, volumes, moves, nodeName)
+	if err != nil {
+		return 0, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	return total, nil
-}
-
-func reservationByID(items []corev1.ConfigMap, volumeID string) (*corev1.ConfigMap, bool) {
-	for index := range items {
-		if items[index].Name == volumeID {
-			return &items[index], true
-		}
-	}
-	return nil, false
 }
 
 func poolLimitBytes(pool volumeapi.Pool) (int64, error) {

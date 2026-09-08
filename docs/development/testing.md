@@ -43,6 +43,13 @@ make verify
 
 Coverage artifact는 `.tmp/coverage.out`과 `.tmp/coverage.txt`에 생성된다.
 
+Dashboard의 현재값·관측 유효기간·결측 처리는 `bash test/helm/dashboard/run.sh`로 검증한다.
+CI의 `verify` job은 `make verify` 다음 단계에서 이 명령을 실행한다. 전용 Prometheus에 합성 정상·실패·지연·첫 관측 전 데이터를
+생성하고 실제 dashboard PromQL 결과를 검사한다. 테스트 container는 종료 시 제거한다.
+
+메트릭스 비용은 `go test ./src/metrics -run TestCachedScrapeLatency -v -bench BenchmarkCachedScrape -benchmem`으로
+측정한다. 2 Pool / 100 Volume fixture의 cached HTTP p99 기준은 100ms이며 실제 workload I/O 성능과 구분한다.
+
 Unit test는 다음 고비용 경계를 포함한다.
 
 | Domain | 주요 경계 |
@@ -52,6 +59,7 @@ Unit test는 다음 고비용 경계를 포함한다.
 | Mobility | 전체 phase closure, CAS, API response loss, diagnostics, recovery, source purge |
 | Lifecycle | dependency 검사, quiesce, read-only admission, provisioning drain |
 | Certificate | 최초 발급, 갱신, CA 전환, Secret 복구, hot reload |
+| Metrics | cached scrape 무 I/O, API 오류·freshness, 예약 회계, bounded label, HTTP 장애 분리 |
 | Chart | kubelet root, component 경계, StorageClass, webhook mode |
 
 ## kind E2E
@@ -69,6 +77,7 @@ kind control-plane
 | Scenario | 검증 |
 |---|---|
 | Directory Pool | 기존 non-mount directory에서 provision, write, Retain 보존·명시적 폐기, move·cleanup |
+| Metrics | 격리 Prometheus target 3개, 실제 copy 관측, CSI 호출, cleanup 후 예약·active Move 0 |
 | Capacity | 외부 사용량과 reservation으로 신규 claim 제어, 해제 용량 단일 반환 |
 | StorageClass | default와 명시 선택의 결정적 공존 |
 | Restart | Controller/Node 교체 뒤 mounted data와 republish checksum 보존 |

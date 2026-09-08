@@ -2,6 +2,6 @@ apiVersion: v2
 name: shiftpv
 description: CSI driver for movable local volumes in existing filesystem directories
 type: application
-version: 0.1.10
-appVersion: "0.1.8"
+version: 0.1.11
+appVersion: "0.1.9"
 kubeVersion: ">=1.35.0-0"

@@ -34,6 +34,7 @@ ShiftPV/
 │   ├── lifecycle/
 │   │   ├── admission/
 │   │   └── uninstall/
+│   ├── metrics/
 │   ├── mobility/
 │   │   ├── admission/
 │   │   ├── controller/
@@ -47,6 +48,7 @@ ShiftPV/
 └── test/
     ├── docs/
     ├── e2e/kind/
+    ├── helm/
     ├── integration/linux-mount/
     └── release/
 ```
@@ -59,7 +61,8 @@ ShiftPV/
 | `src/csi/*` | CSI service, capability, request/response와 status code |
 | `src/kubernetes/helperpod` | node-local filesystem 작업용 helper Pod adapter |
 | `src/kubernetes/volumeapi` | Pool, Volume, Move resource와 status persistence |
-| `src/pool/capacity` | statfs byte 변환과 공유 Pool admission lock |
+| `src/pool/capacity` | statfs byte 변환, 예약 집계와 공유 Pool admission lock |
+| `src/metrics` | 읽기 전용 snapshot, CSI 관측과 HTTP endpoint |
 | `src/pool/readiness` | node-local Pool probe와 readiness condition 갱신 |
 | `src/lifecycle/*` | 안전한 uninstall과 component deletion admission |
 | `src/mobility/admission` | bound ShiftPV workload의 owner pin 또는 Placement Hold |

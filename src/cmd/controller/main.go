@@ -32,6 +32,7 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	lifecycleadmission "github.com/cagojeiger/ShiftPV/src/lifecycle/admission"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
+	"github.com/cagojeiger/ShiftPV/src/metrics"
 	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
 	mobilitycontroller "github.com/cagojeiger/ShiftPV/src/mobility/controller"
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
@@ -61,6 +62,8 @@ func main() {
 		validationConfiguration = flag.String("validation-webhook-configuration-name", "shiftpv-lifecycle", "managed lifecycle ValidatingWebhookConfiguration name")
 		storageClassName        = flag.String("storage-class-name", "shiftpv", "StorageClass protected from unsafe driver deletion")
 		uninstallPermitName     = flag.String("uninstall-permit-name", "shiftpv-uninstall-permit", "trusted uninstall permit ConfigMap name")
+		metricsAddress          = flag.String("metrics-listen-address", "", "metrics HTTP address; empty disables observation")
+		metricsInterval         = flag.Duration("metrics-snapshot-interval", 30*time.Second, "read-only metrics metadata interval")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -94,6 +97,17 @@ func main() {
 	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	var exporter *metrics.Exporter
+	if *metricsAddress != "" && *metricsInterval > 0 {
+		exporter = metrics.New("metadata")
+		exporter.Start(ctx, *metricsAddress)
+		observer, metricsErr := exporter.NewController(config, *namespace, *metricsInterval, *poolReadinessStaleAfter)
+		if metricsErr != nil {
+			klog.Errorf("metrics inventory disabled: %v", metricsErr)
+		} else {
+			go observer.Run(ctx)
+		}
+	}
 	permitStore := &uninstallcheck.PermitStore{Client: client, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}
 	quiesceGate := &uninstallcheck.QuiesceGate{Store: permitStore, Interval: 200 * time.Millisecond}
 	if err := wait.PollUntilContextTimeout(ctx, time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
@@ -129,7 +143,7 @@ func main() {
 		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {
 			csi.RegisterIdentityServer(server, identityService)
 			csi.RegisterControllerServer(server, controllerService)
-		})
+		}, exporter.ServerOptions()...)
 	}()
 
 	var webhookServer *http.Server
@@ -169,6 +183,10 @@ func main() {
 		eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
 		wake := mobilitycontroller.WatchEvents(ctx, client, dynamicClient, *namespace)
 		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, Interval: *mobilityInterval, Recorder: eventRecorder, Wake: wake}
+		if exporter != nil {
+			exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
+			reconciler.ObserveDiscovery = exporter.ObserveDiscovery
+		}
 		go func() { errCh <- reconciler.Run(ctx) }()
 	}
 	mux := http.NewServeMux()

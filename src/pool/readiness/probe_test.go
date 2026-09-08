@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
 func TestProbeInspect(t *testing.T) {
@@ -40,7 +41,7 @@ func TestProbeInspect(t *testing.T) {
 					return test.inspectErr
 				},
 				write:  func(string) error { return test.writeErr },
-				statFS: func(string) error { return test.statErr },
+				statFS: func(string) (poolcapacity.Filesystem, error) { return poolcapacity.Filesystem{}, test.statErr },
 			}
 			result := probe.Inspect(volumeapi.Pool{MountPath: "/pool"})
 			conditions := conditions(result, 1, testTime)

@@ -46,6 +46,10 @@ spec:
             - --helper-cpu-limit={{ .Values.helperPod.resources.limits.cpu }}
             - --helper-memory-limit={{ .Values.helperPod.resources.limits.memory }}
             - --pool-readiness-stale-after={{ .Values.poolReadiness.staleAfter }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-listen-address=:{{ .Values.metrics.port }}
+            - --metrics-snapshot-interval={{ .Values.metrics.snapshotInterval }}
+            {{- end }}
             - --mobility-enabled={{ .Values.mobility.enabled }}
             - --webhook-service-name={{ include "shiftpv.webhookServiceName" . }}
             - --webhook-tls-secret-name={{ include "shiftpv.webhookSecretName" . }}
@@ -74,6 +78,10 @@ spec:
             - name: socket
               mountPath: /run/csi
           ports:
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
             - name: webhook
               containerPort: {{ .Values.mobility.webhookPort }}
           readinessProbe:

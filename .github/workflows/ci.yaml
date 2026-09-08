@@ -47,6 +47,9 @@ jobs:
       - name: Run fast checks and coverage gate
         run: make verify
 
+      - name: Validate dashboard queries against Prometheus
+        run: bash test/helm/dashboard/run.sh
+
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
         with:

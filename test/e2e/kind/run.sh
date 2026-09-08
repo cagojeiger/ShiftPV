@@ -6,7 +6,7 @@ CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 
-for command in docker kind kubectl helm sed; do
+for command in docker kind kubectl helm sed jq; do
   command -v "${command}" >/dev/null || {
     echo "required command not found: ${command}" >&2
     exit 1
@@ -119,7 +119,12 @@ run_directory_pool() {
 
 install_shiftpv true
 
+kubectl apply -f "${ROOT_DIR}/test/e2e/kind/metrics/prometheus.yaml"
+kubectl -n shiftpv-system rollout status deployment/metrics-test --timeout=3m
+
 run_directory_pool
+
+bash "${ROOT_DIR}/test/e2e/kind/metrics/check.sh"
 
 if [[ "${DIRECTORY_POOL_ONLY:-0}" == "1" ]]; then
 	echo "ShiftPV focused ordinary directory Pool E2E passed"
