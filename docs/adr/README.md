@@ -18,7 +18,7 @@ flowchart LR
 | 제품 | [0001](0001-service-boundary.md) | 기존 filesystem의 로컬 directory를 관리 | Accepted |
 | 제품 | [0002](0002-mounted-filesystem-boundary.md) | Pool directory와 host filesystem 책임 분리 | Accepted |
 | CSI | [0003](0003-csi-product-foundation.md) | Kubernetes CSI를 제품 인터페이스로 사용 | Accepted |
-| CSI | [0004](0004-minimal-csi-bootstrap.md) | 최소 CSI lifecycle로 시작 | Accepted |
+| CSI | [0004](0004-minimal-csi-bootstrap.md) | 최소 CSI lifecycle 제공 | Accepted |
 | Pool | [0005](0005-pool-filesystem-capacity-admission.md) | Pool filesystem 총량으로 신규 할당 제어 | Accepted |
 | Pool | [0006](0006-node-reported-pool-readiness.md) | Node가 실제 Pool readiness 보고 | Accepted |
 | 이동 | [0007](0007-automatic-cordon-volume-mobility.md) | 정상 cordon 이동과 Kubernetes 배치 협력 | Accepted |

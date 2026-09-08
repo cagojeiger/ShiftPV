@@ -68,7 +68,7 @@ kind control-plane
 
 | Scenario | 검증 |
 |---|---|
-| Directory Pool | 기존 non-mount directory에서 provision, write, move, cleanup |
+| Directory Pool | 기존 non-mount directory에서 provision, write, Retain 보존·명시적 폐기, move·cleanup |
 | Capacity | 외부 사용량과 reservation으로 신규 claim 제어, 해제 용량 단일 반환 |
 | StorageClass | default와 명시 선택의 결정적 공존 |
 | Restart | Controller/Node 교체 뒤 mounted data와 republish checksum 보존 |

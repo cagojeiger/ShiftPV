@@ -52,13 +52,17 @@ flowchart TD
 | 용량 신호 | 의미 |
 |---|---|
 | `ShiftPVPool.spec.capacity.limit` | ShiftPV가 Pool에 예약할 최대 PVC capacity |
-| Active reservations | 현재 owner에게 배정된 requested bytes 합계 |
-| `statfs` availability | Pool이 속한 filesystem의 현재 free bytes |
+| Active reservations | 현재 owner의 requested bytes + 승인된 incoming Move의 requested bytes |
+| `statfs` availability | Pool이 속한 filesystem의 현재 available bytes |
 | PVC capacity | reservation과 PV capacity의 기준값 |
 
 신규 할당은 논리 잔여량과 물리 잔여량을 모두 충족한다. ShiftPV 밖의 writer도 `statfs`에
 반영된다. 개별 volume 사용량은 filesystem 책임이며 Pool limit는 write quota가 아니라 admission
 경계다.
+
+Incoming 예약은 `capacityApproved=true`, destination 일치, Volume의 `activeMove` 일치,
+owner commit 전인 Move에 적용한다. Commit 뒤에는 destination owner 예약으로 한 번만 계산한다.
+Volume과 reservation이 삭제된 완료 Move는 용량을 점유하지 않는다.
 
 ## Default-class selection
 

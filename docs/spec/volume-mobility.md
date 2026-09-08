@@ -51,8 +51,8 @@ Preflight는 discovery, lock 직전, 최초 eviction 직전에 같은 read-only 
 | Controller | live owner UID와 template 일치 | 삭제 중이거나 교체된 owner |
 | Node placement | selector, required affinity, PV affinity에 맞는 candidate | 일치하는 candidate 없음 |
 | Taints | source와 candidate가 현재 taint를 tolerate | NoSchedule/NoExecute 불일치 |
-| PDB | matching PDB 하나, 최신 generation, 양수 allowance | denied 또는 여러 PDB로 판단 불명확 |
-| Scheduling 의미 | reservation Pod로 표현 가능 | inter-Pod affinity, topology spread, resource claim, inline/ephemeral CSI |
+| PDB | matching PDB 없음 또는 하나이며 최신 generation·양수 allowance | denied, stale 또는 여러 matching PDB |
+| Scheduling 의미 | reservation Pod로 표현 가능 | 기존 scheduling gate, inter-Pod affinity, topology spread, resource claim, inline/ephemeral CSI |
 
 | 세부 규칙 | 판정 |
 |---|---|
@@ -62,8 +62,8 @@ Preflight는 discovery, lock 직전, 최초 eviction 직전에 같은 read-only 
 | Soft node affinity와 CPU/memory fit | kube-scheduler가 최종 판단 |
 | Eviction | Pod UID precondition을 붙이고 Eviction API/PDB에 위임 |
 
-보류 판정은 기존 Pod와 Ready volume을 유지하고 Node, Pool, Pod, owner, PDB event에서 재평가한다.
-Preflight는 destination 예약이나 성공 보장이 아니다.
+Lock 전 보류는 기존 Pod와 Ready volume을 유지한다. Owner와 PDB 변경은 다음 watched event 또는
+safety tick에서 다시 읽는다. Preflight는 destination 예약이나 성공 보장이 아니다.
 
 Discovery와 Node 갱신은 서로 다른 API 관찰이다. 이전 cordon snapshot으로 늦게 생성된 Pending Move는
 현재 source가 healthy, schedulable, Ready, unlocked이면 Move UID precondition으로 정리한다. Lock 뒤
@@ -98,8 +98,21 @@ flowchart LR
 ```
 
 Node, managed Pod, helper Pod/Job, Pool, Volume, Move 변경은 하나의 coalescing event stream을 깨운다.
-30초 safety tick은 watch 누락과 재연결 복구 시간을 제한한다. CSI 요청은 watch와 polling goroutine을
-소유하지 않는다. Controller 재시작은 CR과 결정적 helper 이름을 다시 관찰해 같은 action으로 수렴한다.
+기본 30초 safety tick(`mobility.interval`)은 watch 누락과 재연결 복구를 보완한다. CSI 요청은 watch와
+polling goroutine을 소유하지 않는다. Controller 재시작은 CR과 결정적 helper 이름을 다시 관찰해 같은
+action으로 수렴한다.
+
+## Move capacity admission
+
+| 검사 | 통과 조건 |
+|---|---|
+| 논리 용량 | requested bytes ≤ Pool limit − 현재 owner 예약 − 다른 승인 incoming 예약 |
+| 물리 용량 | source `du -sb` bytes ≤ destination `statfs` available − 다른 승인 incoming source bytes |
+| 동시성 | provisioning과 같은 destination Pool lock에서 검사·승인 저장 |
+
+Source의 apparent bytes를 helper에서 측정하고 `sourceBytes`, `capacityApproved`를 Move에 저장한다.
+측정 이후 외부 writer가 여유 공간을 소진하면 copy 오류로 처리한다. Admission은 여유 공간의 독점 예약이나
+개별 PVC write quota가 아니다.
 
 ## State machine
 
@@ -162,7 +175,7 @@ schema 변경은 active Move가 없는 upgrade window에서 CRD와 Controller를
 
 ## Explicit owner recovery
 
-`ResumeOwner`는 Blocked Move에 기록된 current owner를 다시 연다.
+`ResumeOwner`는 Volume의 `activeMove`와 일치하는 Blocked Move의 current owner를 다시 연다.
 
 ```bash
 kubectl patch shiftpvmove <move-name> --type=merge \
@@ -187,6 +200,13 @@ stateDiagram-v2
 | `Resuming` | owner를 유지한 Ready CAS와 owner-bound workload 재생성 |
 | `Completing` | owner publish 확인, recovery resource와 `activeMove` 정리 |
 | `Recovered` | 같은 owner에서 정상 publication 수렴 |
+
+| 복구 완료 판정 | 값 |
+|---|---|
+| Move `status.phase`, `reason` | 원래 `Blocked`와 실패 reason 유지 |
+| Move `status.recoveryPhase` | `Recovered` |
+| Volume `status.phase`, `activeMove` | `Ready`, 빈 값 |
+| Volume owner/publication | 기존 owner 유지, 그 node에 publish |
 
 | Recovery invariant | 증거 |
 |---|---|

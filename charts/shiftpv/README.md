@@ -151,6 +151,10 @@ condition으로 placement admission을 inert 상태로 둔다.
 
 ## Upgrade
 
+Upgrade window는 모든 `activeMove`가 비어 있고 recovery journal이 완료된 상태에서 시작한다.
+Helm은 설치된 CRD를 보존하므로 새 Controller보다 schema를 먼저 적용한다. `--force-conflicts`는
+최초 Helm field ownership을 명시적으로 인수한다.
+
 ```mermaid
 flowchart LR
     CRD[target CRD 적용] --> POOL[Pool schema 완성]
@@ -164,33 +168,26 @@ helm repo update shiftpv
 helm show crds shiftpv/shiftpv --version "${TARGET_CHART_VERSION}" | \
   kubectl apply --server-side --field-manager=shiftpv-crds \
     --force-conflicts -f -
-
-helm upgrade shiftpv shiftpv/shiftpv \
-  --version "${TARGET_CHART_VERSION}" \
-  --namespace shiftpv-system --values shiftpv-values.yaml \
-  --wait
 ```
 
-Local checkout은 같은 순서를 현재 chart에 적용한다.
-
-```bash
-helm show crds ./charts/shiftpv | \
-  kubectl apply --server-side --field-manager=shiftpv-crds \
-    --force-conflicts -f -
-helm upgrade shiftpv ./charts/shiftpv \
-  --namespace shiftpv-system --values shiftpv-values.yaml --wait
-```
-
-Helm은 설치된 CRD를 보존하므로 새 Controller보다 schema를 먼저 적용한다. Chart 0.1.3 이하에서
-upgrade할 때는 Helm 단계 전에 모든 Pool에 `spec.capacity.limit`도 추가한다.
+Chart 0.1.3 이하에서 upgrade할 때는 CRD 적용 뒤 모든 Pool에 `spec.capacity.limit`를 추가한다.
 
 ```bash
 kubectl patch shiftpvpool <pool-name> --type=merge \
   -p '{"spec":{"capacity":{"limit":"500Gi"}}}'
 ```
 
-Upgrade window는 모든 `activeMove`가 비어 있고 recovery journal이 완료된 상태에서 시작한다. CRD는
-삭제·재생성하지 않으며 `--force-conflicts`로 최초 Helm field ownership을 명시적으로 인수한다.
+Pool schema가 완성되면 runtime을 갱신한다.
+
+```bash
+helm upgrade shiftpv shiftpv/shiftpv \
+  --version "${TARGET_CHART_VERSION}" \
+  --namespace shiftpv-system --values shiftpv-values.yaml \
+  --wait
+```
+
+Local checkout도 같은 순서로 `shiftpv/shiftpv --version "${TARGET_CHART_VERSION}"` 대신
+`./charts/shiftpv`를 사용한다.
 
 ## Operate
 
@@ -213,6 +210,57 @@ truth이며 timestamp는 관측과 알림을 위한 값이다.
 | Move 진행과 운영 행동 | `ShiftPVMove.status` |
 | 알림 | Kubernetes Events |
 | Blocked owner 복구 | [ResumeOwner 절차](../../docs/spec/volume-mobility.md#explicit-owner-recovery) |
+
+복구 완료는 Move의 `recoveryPhase=Recovered`와 Volume의 `Ready`, 빈 `activeMove`로 판정한다.
+Move의 원래 `phase=Blocked`와 실패 reason은 유지된다.
+
+### Retire a retained volume
+
+`Retain`은 PVC 삭제 뒤에도 PV, owner data와 reservation을 보존한다. 폐기는 선택한 PV의
+reclaim policy를 `Delete`로 바꿔 CSI에 위임한다. [Kubernetes reclaim policy](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#reclaiming)를 따른다.
+
+| 순서 | 운영자 확인 |
+|---|---|
+| 1. 폐기 대상 확정 | PV driver가 `csi.shiftpv.io`, claimRef UID와 대상 PVC UID 일치; 이미 Released면 이전 claimRef 확인 |
+| 2. Move 수렴 | Volume `Ready`, 빈 `activeMove`; Blocked는 PVC가 존재할 때 ResumeOwner 완료 |
+| 3. I/O 중지 | GitOps 원본에서 workload 중지, Pod 종료와 빈 `publishedNodes` 확인 |
+| 4. 경로 확인 | 현재 `ownerNode`의 Ready Pool과 `mountPath/volumes/<volume-id>` 확인, 필요한 data 백업 |
+| 5. 폐기 | 아래 명령으로 PV policy 변경, Bound PVC 삭제 |
+| 6. 완료 확인 | PV, owner directory, reservation ConfigMap, Volume CR 부재 |
+
+확정한 PV 이름과 ShiftPV release namespace를 사용한다.
+
+```bash
+PV_NAME=pvc-confirmed-name
+DRIVER_NAMESPACE=shiftpv-system
+kubectl get pv "${PV_NAME}" -o yaml
+VOLUME_ID=$(kubectl get pv "${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
+kubectl get shiftpvvolume "${VOLUME_ID}" -o yaml
+kubectl -n "${DRIVER_NAMESPACE}" get configmap "${VOLUME_ID}" -o yaml
+```
+
+위 확인이 끝나면 실행한다. Released PV는 policy 변경 시 데이터 폐기가 시작된다.
+
+```bash
+kubectl patch pv "${PV_NAME}" --type=merge \
+  -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
+```
+
+PVC가 아직 Bound이면 확인한 namespace와 이름으로 삭제한다. 이미 Released이면 이 단계를 생략한다.
+
+```bash
+kubectl -n <workload-namespace> delete pvc <confirmed-pvc-name> --wait=true
+```
+
+```bash
+kubectl wait --for=delete "pv/${PV_NAME}" --timeout=5m
+kubectl -n "${DRIVER_NAMESPACE}" wait --for=delete "configmap/${VOLUME_ID}" --timeout=5m
+kubectl wait --for=delete "shiftpvvolume/${VOLUME_ID}" --timeout=5m
+```
+
+CSI는 owner directory → reservation → Volume CR 순서로 정리한다. Pool과 release는 완료까지 유지하고,
+PV finalizer는 Kubernetes/provisioner가 정리한다. Timeout이면 PV Event와 Controller/helper log의 원인을
+해소해 재시도를 기다린다. Recovery의 `.shiftpv/aborted/` quarantine은 별도 운영자 검토·폐기 대상이다.
 
 ## Uninstall and recovery
 
@@ -255,12 +303,13 @@ DELETE 또는 dry-run DELETE 자체가 제거 permit을 만들지 않는다.
 정상 제거:
 
 ```text
-workload 중지
-  → Move 수렴
-  → retained PVC/PV/data 처리
-  → ShiftPVVolume metadata 제거
+Move 수렴 또는 owner 복구
+  → GitOps/workload 중지
+  → retained volume 폐기와 data/state 부재 확인
   → helm uninstall 또는 전용 Argo CD Application 삭제
 ```
+
+Data 폐기는 [Retained volume 절차](#retire-a-retained-volume)를 따른다.
 
 차단된 Helm 시도는 다음 log에서 확인한다.
 

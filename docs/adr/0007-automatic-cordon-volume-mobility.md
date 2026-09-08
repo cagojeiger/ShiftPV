@@ -2,7 +2,7 @@
 
 - 상태: Accepted
 - 날짜: 2026-09-02
-- 후속 결정: 이동 전 중단 방지는 [ADR 0008](0008-nondisruptive-mobility-preflight.md)이 보완한다.
+- 관련 결정: [이동 전 사전 점검](0008-nondisruptive-mobility-preflight.md)
 - 상세 계약: [volume mobility](../spec/volume-mobility.md)
 
 ## Context

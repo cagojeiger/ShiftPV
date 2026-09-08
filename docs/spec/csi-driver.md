@@ -152,8 +152,9 @@ mount한다. Node Plugin 재시작 전후 host와 plugin mount namespace가 일�
 Volume별 Create/Delete와 Pool별 capacity admission은 직렬화한다. 서로 다른 Pool은 독립적으로
 진행한다. Chart는 Controller replica를 하나로 고정한다.
 
-StorageClass의 `Retain` 정책에 따라 일반 PVC 삭제는 복구 가능한 Released PV를 남긴다. 운영자가
-retained data를 정리한 뒤 명시적 retirement 경로가 CSI deletion을 호출한다.
+StorageClass의 `Retain` 정책에 따라 일반 PVC 삭제는 Released PV, owner data와 reservation을 유지한다.
+폐기할 PV의 reclaim policy를 `Delete`로 바꾸고 PVC가 해제되면 external-provisioner가 `DeleteVolume`을 호출한다.
+대상 확인과 완료 조건은 [Retained volume 폐기 절차](../../charts/shiftpv/README.md#retire-a-retained-volume)를 따른다.
 
 ## Performance boundary
 
