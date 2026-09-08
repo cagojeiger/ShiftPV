@@ -1,366 +1,346 @@
 # Volume Mobility Contract
 
-ShiftPV mobility는 source가 정상인 계획 정비에서 동일한 PVC, PV와 CSI volume handle을
-유지한 채 authoritative directory를 다른 registered Pool로 옮기는 cold migration이다.
+ShiftPV는 정상인 cordon owner의 authoritative directory를 다른 Pool로 옮긴다. PVC, PV와 CSI
+volume handle은 유지하고 workload I/O를 멈춘 cold migration으로 실행한다.
 
 ## Responsibility
 
-ShiftPV가 소유하는 책임은 다음과 같다.
+```mermaid
+flowchart LR
+    K[Kubernetes<br/>workload + scheduler] --> P[Placement Hold]
+    P --> M[ShiftPV Move FSM]
+    M --> R[authenticated rsync]
+    R --> O[owner commit]
+    O --> K
+    O --> D[source purge]
+```
 
-- cordon된 owner node에서 이동 transaction 생성
-- 이동 중 CSI publish 차단
-- 기존 consumer eviction과 실제 unpublish 확인
-- replacement Pod의 Placement Hold, 내부 placement reservation, destination pin과 Release
-- authenticated rsync copy, destination-local promotion, owner commit, source purge
-- 각 관찰과 action 결과를 `ShiftPVMove.status`에 저장하고 재조정
-
-kube-scheduler가 nodeSelector, affinity, taint/toleration과 resource fit을 평가한다.
-Deployment/StatefulSet 같은 workload controller가 replacement Pod를 만든다. ShiftPV는
-workload template, replica 수, PV node affinity를 수정하지 않는다.
+| 관심사 | 소유자 |
+|---|---|
+| replacement Pod 생성 | Deployment/StatefulSet controller |
+| node constraint와 resource fit | kube-scheduler |
+| disruption 허용 | Eviction API와 PDB |
+| Hold, copy, owner commit, source purge | ShiftPV |
+| workload template과 replica 수 | workload owner |
 
 ## Trigger and supported input
 
-Controller는 같은 관찰 규칙으로 eligibility preflight를 통과한 뒤 `ShiftPVMove`를 하나
-생성한다.
+| 필수 관찰 | 계약 |
+|---|---|
+| Volume | Bound RWO Filesystem, `Ready`, 빈 `activeMove` |
+| Source | 현재 owner Node와 Pool이 healthy이고 Node가 cordon 상태 |
+| Consumer | controller-owned Pod 하나와 ShiftPV PVC 하나 |
+| Namespace | `shiftpv.io/admission=enabled` |
+| Destination | schedulable하고 Ready인 Pool 하나 이상 |
 
-- `ShiftPVVolume.status.phase=Ready`, `activeMove` 없음
-- owner Node가 `Ready=True`이면서 `spec.unschedulable=true`
-- source와 destination에 최근 `Ready=True`인 `ShiftPVPool`이 각각 등록됨
-- bound RWO Filesystem volume
-- admission이 활성화된 namespace의 controller-owned consumer Pod 하나
-- schedulable하고 Ready인 destination Pool 하나 이상
+Controller는 운영자가 설정한 `Node.spec.unschedulable`을 관찰한다. Pod의 Pending 또는
+Unschedulable status는 배치 결과이며 이동 trigger가 아니다. Source Node/Pool을 확인할 수 없는
+동안 기록된 owner를 유지한다.
 
-Pod의 `Pending` 또는 `PodScheduled=False/Unschedulable` 자체는 trigger가 아니다. source
-Node/Pool을 읽을 수 없거나 Pool readiness가 실패·stale이거나 Node가 NotReady이면 자동 이동을 시작하지 않는다. bare Pod,
-여러 consumer, 한 Pod의 여러 ShiftPV PVC와 custom scheduler는 지원 입력이 아니다.
-
-ShiftPV는 Node를 cordon하지 않고 이미 설정된 `Node.spec.unschedulable`을 관찰한다. Namespace
-opt-in은 ShiftPV 대상만 제한하며 cordon에 반응하는 다른 workload나 controller를 격리하지
-않는다.
+지원 workload는 ReplicaSet/Deployment와 StatefulSet이다. Bare Pod, custom scheduler, 여러
+consumer, 한 Pod의 여러 ShiftPV PVC, 추가 co-placement volume은 자동 입력 범위 밖이다. Namespace
+opt-in은 ShiftPV workload를 선택하며 cordon에 반응하는 다른 controller의 동작은 그대로 유지한다.
 
 ## Non-disruptive preflight
 
-discovery, lock 직전, 최초 eviction 및 거부 후 재시도 직전에 같은 read-only 점검을 한다.
-ReplicaSet(Deployment 포함)/StatefulSet의 실제 owner UID와 template을 확인한다. 지원하지
-않는 controller, 삭제 중인 consumer/owner, 여러 consumer/PVC, custom scheduler는 보류한다.
-추가 PVC는 다른 driver여도 공동 배치 보장이 없으므로 보류한다.
-Retain PV와 Volume CR이 남아 있어도 `PV.claimRef.uid == PVC.uid`와
-`PVC.spec.volumeName == PV.name`이 일치하지 않거나 binding이 삭제 중이면 이동 대상에서
-제외한다. namespace/PVC 이름 재사용은 동일한 볼륨 사용이라는 증거가 아니다.
+Preflight는 discovery, lock 직전, 최초 eviction 직전에 같은 read-only 규칙으로 실행된다.
 
-- live Pod와 template의 nodeSelector/required node affinity를 모두 검사한다. template에
-  없는 owner hostname pin은 `shiftpv.io/placement=owner`일 때만 live 검사에서 제외한다.
-- candidate의 현재 label, Ready/cordon 상태, NoSchedule/NoExecute taint와 양쪽 toleration,
-  기존 PV의 required node affinity를 검사한다. Kubernetes `component-helpers`의 node
-  affinity matcher를 사용한다. Equal/Exists toleration만 사용하며 alpha 비교 operator는 제외한다.
-- inter-Pod affinity/anti-affinity, topology spread, resource claim, generic ephemeral/inline
-  CSI volume과 별도 scheduling gate는 내부 reservation으로 원래 의미를 보존할 수 없어
-  보수적으로 보류한다. node affinity의 hard/soft preference는 scheduler에 맡긴다.
-- matching PDB가 있으면 최신 observedGeneration과 양수 disruptionsAllowed가 필요하다.
-  여러 matching PDB도 보류한다. unhealthyPodEvictionPolicy의 예외를 예측하지 않는 보수적
-  검사이며, 실제 eviction은 UID precondition을 붙여 Eviction API/PDB가 최종 결정한다.
+| 검사 | 통과 조건 | 보류 조건 |
+|---|---|---|
+| Binding | PVC UID ↔ PV claimRef UID ↔ volume handle 일치 | 삭제·재사용·변경 중인 binding |
+| Controller | live owner UID와 template 일치 | 삭제 중이거나 교체된 owner |
+| Node placement | selector, required affinity, PV affinity에 맞는 candidate | 일치하는 candidate 없음 |
+| Taints | source와 candidate가 현재 taint를 tolerate | NoSchedule/NoExecute 불일치 |
+| PDB | matching PDB 없음 또는 하나이며 최신 generation·양수 allowance | denied, stale 또는 여러 matching PDB |
+| Scheduling 의미 | reservation Pod로 표현 가능 | 기존 scheduling gate, inter-Pod affinity, topology spread, resource claim, inline/ephemeral CSI |
 
-lock 전 불합격이면 Move를 생성하지 않고 Ready volume/기존 Pod를 유지한다. discovery와
-Node 갱신은 원자적이지 않으므로 cordon 관찰 직후 source가 uncordon되면 아직 lock하지 않은
-Pending Move가 늦게 생성될 수 있다. 이 경우 current source가 healthy/schedulable이고 Volume이
-같은 source owner의 Ready/빈 activeMove임을 다시 확인한 뒤 Move UID precondition으로 해당
-transaction만 삭제한다. 그 밖의 이미 생성된 Pending Move는 reason과 함께 재평가한다. lock
-후 eviction 전에 조건이 바뀌면 Moving에서 기존 Pod를 종료하지 않고 기다린다. 이때 기존
-mount는 유지되지만 새 CSI publish는 닫혀 있다. 요청 결과가 불명확한 eviction을 자동
-취소했다고 가정해 unlock하지 않는다.
+| 세부 규칙 | 판정 |
+|---|---|
+| Admission이 주입한 owner hostname pin | `shiftpv.io/placement=owner`이면 사용자 제약에서 제외 |
+| Node affinity | Kubernetes `component-helpers` matcher로 평가 |
+| Toleration | stable `Equal`/`Exists` 의미로 평가 |
+| Soft node affinity와 CPU/memory fit | kube-scheduler가 최종 판단 |
+| Eviction | Pod UID precondition을 붙이고 Eviction API/PDB에 위임 |
 
-`NoCompatibleDestination`, `DisruptionBudgetDenied` 등의 이유는 기존 Move.status.reason,
-discovery에서 건너뛴 경우 controller verbosity 2 로그로 확인한다. 후보가 추가되거나
-PDB가 허용하면 다음 reconcile에서 다시 시도한다. terminal Blocked를 새로 만들지 않는다.
+Lock 전 보류는 기존 Pod와 Ready volume을 유지한다. Owner와 PDB 변경은 다음 watched event 또는
+safety tick에서 다시 읽는다. Preflight는 destination 예약이나 성공 보장이 아니다.
 
-preflight는 reservation이 아니다. CPU/memory fit, 추가 admission 변경, 동시 rollout,
-조회 이후 PDB/node/template 변경은 이후 배치를 막을 수 있다. 이런 경우에도 scheduler를
-우회하지 않는다. replacement 지연에는 기존 waiting/Blocked 복구 규칙을 적용한다.
-설정 검사와 실제 배치의 구분은 [Kubernetes node 배치 규칙](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/)을 따른다.
+Discovery와 Node 갱신은 서로 다른 API 관찰이다. 이전 cordon snapshot으로 늦게 생성된 Pending Move는
+현재 source가 healthy, schedulable, Ready, unlocked이면 Move UID precondition으로 정리한다. Lock 뒤
+조건 변화는 기존 mount를 유지한 채 같은 phase에서 기다리며 새 CSI publish는 authority guard가 닫는다.
 
 ## Resources and authority
 
-- `ShiftPVPool`: 참여 node와 기존 filesystem 안의 Pool directory인 `mountPath`를 등록한다.
-- `ShiftPVVolume`: volume handle별 phase, authoritative owner, active move와 published node를
-  기록한다.
-- `ShiftPVMove`: 한 번의 source-to-destination transaction과 FSM 관찰 결과를 기록한다.
+```text
+ShiftPVPool    참여 node + 기존 Pool directory
+ShiftPVVolume authoritative owner + phase + published nodes + active Move
+ShiftPVMove   source-to-destination transaction + 영속 journal
+```
 
-한 volume에는 active move가 하나다. `activeMove`는 lock부터 source cleanup 성공까지
-유지된다. commit 전 source, commit 후 destination이
-authoritative하다. creation-time CSI volume context의 node 값은 최초 배치 기록일 뿐 현재
-authority가 아니다.
+| Move 시점 | Authoritative node |
+|---|---|
+| Owner commit 전 | Source |
+| Owner commit 후 | Destination |
+
+한 volume은 active Move 하나를 갖는다. `activeMove`는 첫 lock부터 source cleanup 성공까지 유지한다.
+CSI volume context의 node는 최초 배치 기록이며 현재 publication은
+`ShiftPVVolume.status.ownerNode`가 결정한다.
 
 ## Reconcile loop
 
-Controller는 관련 Node, managed workload Pod, mobility helper Pod/Job,
-`ShiftPVPool`/`ShiftPVVolume`/`ShiftPVMove` 변경을 하나의 coalescing event stream으로 받아
-즉시 다음 루프를 실행한다. 동시에 기본 30초 safety interval을 유지해 watch 재연결 사이의
-누락이나 일시적 API 오류도 유한 시간 안에 다시 관찰한다. CSI 요청은 이 watch를 소유하지
-않으며, idle 상태에서 2초마다 전체 상태를 조회하지 않는다.
-
-```text
-Kubernetes API + ShiftPV CR + Job 상태 관찰
-                    |
-                    v
-             순수 FSM Decide
-                    |
-                    v
-       하나의 idempotent action 실행
-                    |
-                    v
-       CR status/CAS owner 상태 저장
-                    |
-                    +---------------------> 다음 event 또는 safety tick
+```mermaid
+flowchart LR
+    OBS[API + CR + helper 관찰] --> DECIDE[순수 FSM 결정]
+    DECIDE --> ACTION[멱등 action 하나]
+    ACTION --> SAVE[status 또는 owner CAS 저장]
+    SAVE --> EVENT[event 또는 30s safety tick]
+    EVENT --> OBS
 ```
 
-관찰, 결정, action과 영속 상태가 제품 Controller 안에 있으므로 host-side runner가
-진행 상태를 주입하지 않는다. Controller가 재시작되면 CR과 이름이 결정적인 helper
-resource를 다시 관찰하고 같은 action을 안전하게 반복한다.
+Node, managed Pod, helper Pod/Job, Pool, Volume, Move 변경은 하나의 coalescing event stream을 깨운다.
+기본 30초 safety tick(`mobility.interval`)은 watch 누락과 재연결 복구를 보완한다. CSI 요청은 watch와
+polling goroutine을 소유하지 않는다. Controller 재시작은 CR과 결정적 helper 이름을 다시 관찰해 같은
+action으로 수렴한다.
+
+## Move capacity admission
+
+| 검사 | 통과 조건 |
+|---|---|
+| 논리 용량 | requested bytes ≤ Pool limit − 현재 owner 예약 − 다른 승인 incoming 예약 |
+| 물리 용량 | source `du -sb` bytes ≤ destination `statfs` available − 다른 승인 incoming source bytes |
+| 동시성 | provisioning과 같은 destination Pool lock에서 검사·승인 저장 |
+
+Source의 apparent bytes를 helper에서 측정하고 `sourceBytes`, `capacityApproved`를 Move에 저장한다.
+측정 이후 외부 writer가 여유 공간을 소진하면 copy 오류로 처리한다. Admission은 여유 공간의 독점 예약이나
+개별 PVC write quota가 아니다.
 
 ## State machine
 
-```text
-Pending
-  -> Locking
-  -> Evicting
-  -> WaitingForUnpublish
-  -> WaitingForReplacement
-  -> WaitingForDestination
-  -> WaitingForCapacity
-  -> Copying
-  -> Promoting
-  -> Committing
-  -> ReleasingDestination
-  -> WaitingForDestinationPublish
-  -> CleaningSource
-  -> Succeeded
-
-Pending .. CleaningSource -- safety/action failure --> Blocked
-Succeeded -- reconcile --> Succeeded
-Blocked   -- reconcile --> Blocked
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Locking
+    Locking --> Evicting
+    Evicting --> WaitingForUnpublish
+    WaitingForUnpublish --> WaitingForReplacement
+    WaitingForReplacement --> WaitingForDestination
+    WaitingForDestination --> WaitingForCapacity
+    WaitingForCapacity --> Copying
+    Copying --> Promoting
+    Promoting --> Committing
+    Committing --> ReleasingDestination
+    ReleasingDestination --> WaitingForDestinationPublish
+    WaitingForDestinationPublish --> CleaningSource
+    CleaningSource --> Succeeded
+    Pending --> Blocked: terminal safety failure
+    Locking --> Blocked: terminal safety failure
+    Evicting --> Blocked: terminal safety failure
+    WaitingForUnpublish --> Blocked: terminal safety failure
+    WaitingForReplacement --> Blocked: terminal safety failure
+    WaitingForDestination --> Blocked: terminal safety failure
+    WaitingForCapacity --> Blocked: capacity failure
+    Copying --> Blocked: transfer failure
+    Promoting --> Blocked: promotion failure
+    Committing --> Blocked: authority failure
+    ReleasingDestination --> Blocked: release failure
+    WaitingForDestinationPublish --> Blocked: publish failure
+    CleaningSource --> Blocked: cleanup failure
+    Succeeded --> Succeeded
+    Blocked --> Blocked
 ```
 
-| Current phase | Required observation | Action and next phase |
+| Phase | 영속 증거 | 다음 action |
 |---|---|---|
-| `Pending` | source가 다시 schedulable, Volume은 source owner의 Ready/미잠금 | UID 조건부 Move 삭제, Volume/Pod 유지 |
-| `Pending` | source healthy, supported consumer, candidate 존재 | volume CAS lock, `Locking` |
-| `Pending` / 최초 eviction 전 `Locking`, `Evicting` | preflight 보류 | 기존 phase 유지, 재평가; eviction 안 함 |
-| `Locking` | `Moving`, expected `activeMove`, source owner | Eviction API, `Evicting` |
-| `Evicting` | original consumer 없음 | `WaitingForUnpublish` |
-| `WaitingForUnpublish` | source가 `publishedNodes`에서 제거됨 | `WaitingForReplacement` |
-| `WaitingForReplacement` | held replacement Pod 존재 | placement reservation 생성, `WaitingForDestination` |
-| `WaitingForDestination` | scheduler가 reservation을 candidate node에 지정 | `WaitingForCapacity`에서 destination Pool admission 시작 |
-| `WaitingForCapacity` | source 실제 bytes, destination 총예약과 statfs 여유 충족 | 승인을 Move status에 영속화하고 held replacement를 destination에 pin, copy resources 생성, `Copying` |
-| `WaitingForCapacity` | 논리 예약 또는 물리 여유 부족 | copy/owner 변경 없이 `Blocked`; source recovery 가능 |
-| `Copying` / `Promoting` / commit 전 `Committing` | 선택된 destination이 NotReady 또는 Pool 미등록 | 현재 phase와 source authority 유지, `DestinationUnavailable` 자동 대기 |
-| `Copying` | copy Job complete | promotion Job 생성, `Promoting` |
-| `Promoting` | promotion Job complete | owner CAS commit, `Committing` |
-| `Committing` | destination owner와 `Ready` read-back | reservation UID 조건부 삭제, `ReleasingDestination` |
-| `ReleasingDestination` | reservation 삭제 관찰, held replacement identity/pin 일치 | Placement Hold 제거와 `placement=owner` 기록, `WaitingForDestinationPublish` |
-| `WaitingForDestinationPublish` / `CleaningSource` | authoritative destination이 NotReady 또는 Pool 미등록 | 현재 phase와 destination authority 유지, source purge 보류 |
-| `WaitingForDestinationPublish` | destination이 `publishedNodes`에 존재 | cleanup Job 생성, `CleaningSource` |
-| `CleaningSource` | cleanup Job complete, source final/retired 모두 없음 | transfer resource 정리, `Succeeded` |
+| `Pending` | eligible source, consumer, candidates | Volume CAS lock |
+| `Locking` | `Moving`, expected owner와 `activeMove` | UID-bound eviction |
+| `Evicting` | original consumer 없음 | source unpublish 관찰 |
+| `WaitingForUnpublish` | source가 `publishedNodes`에서 제거됨 | held replacement 관찰 |
+| `WaitingForReplacement` | Placement Hold가 있는 replacement | placement reservation 생성 |
+| `WaitingForDestination` | scheduler가 reservation node 선택 | destination 영속화 |
+| `WaitingForCapacity` | source bytes와 destination admission | 승인 저장 후 copy 시작 |
+| `Copying` | checksum 검증 완료 | staging promotion |
+| `Promoting` | destination final과 Move marker | owner CAS commit |
+| `Committing` | destination owner/Ready read-back | placement reservation 삭제 |
+| `ReleasingDestination` | reservation 부재 | replacement pin과 Hold 해제 |
+| `WaitingForDestinationPublish` | destination이 `publishedNodes`에 존재 | source purge |
+| `CleaningSource` | source final/retired 모두 부재 | helper와 `activeMove` 정리 |
 
-각 non-terminal phase에는 허용된 self-transition 또는 다음 transition만 있다. source
-unhealthy, scheduling constraint 충돌, destination capacity 부족, copy/promotion/cleanup Job 실패는 `Blocked`로 끝난다.
-`Blocked`는 자동 rollback/retry가 없는 terminal 이동 결과이며 source 또는 이미 commit된
-destination authority를 추측해서 바꾸지 않는다. lock 전 지원되는 preflight 불합격은 대기한다.
-authority/binding이 사라지는 안전 위반은 Move만 Blocked이고 아직 소유하지 않은 Ready volume은 변경하지 않는다. lock 이후
-또는 commit 이후 실패는 Volume도 Blocked로 닫는다.
+Pending과 waiting phase는 cluster 조건 변화에 따라 재평가한다. `Succeeded`와 `Blocked`는 안정적인
+terminal phase다. Destination readiness가 일시적으로 사라지면 Copying부터 CleaningSource까지 현재
+authority와 phase를 보존한다. 실제 copy, promotion, commit, release, publish, cleanup 실패는 원인에
+맞는 Blocked reason으로 닫는다. Capacity 부족은 copy와 authority 변경 전에 Blocked로 닫는다.
 
-`consumerUID`는 이름이 같은 StatefulSet replacement를 기존 consumer와 구분한다. 새 이동은
-lock 때 UID를 기록한다. 해당 필드가 없는 기존 in-flight Move는 종전 이름 기반 관찰을
-유지하므로 이동이 없는 시점에 CRD/controller를 함께 upgrade한다.
+`consumerUID`는 같은 이름의 StatefulSet replacement와 원 consumer를 구분한다. 기존 in-flight Move의
+schema 변경은 active Move가 없는 upgrade window에서 CRD와 Controller를 함께 갱신한다.
 
 ## Explicit owner recovery
 
-운영자가 원인을 확인한 뒤 current owner를 uncordon하고 해당 Move에 한 번의 복구 요청을
-남긴다. 이 요청은 소유권을 지정하거나 변경하지 않는다.
+`ResumeOwner`는 Volume의 `activeMove`와 일치하는 Blocked Move의 current owner를 다시 연다.
 
-```sh
+```bash
 kubectl patch shiftpvmove <move-name> --type=merge \
   -p '{"spec":{"recovery":"ResumeOwner"}}'
-kubectl get shiftpvmove <move-name> -o yaml
 ```
 
-`spec.recovery`는 설정 후 제거/변경할 수 없으며 같은 요청은 멱등적이다. Blocked 아닌
-Move에 미리 요청하면 CRD 검증에서 거부한다. `status.phase=Blocked`와 원래 reason은 이력으로 유지하고
-`recoveryPhase`, `recoveryOwner`, `recoveryReason`, `recoveryMessage`로 복구를 구분한다.
-
-```text
-Quiescing -> Verifying -> Retiring -> Resuming -> Completing -> Recovered
-   old helpers   owner     non-owner    same-owner     resource/lock
-   stop + wait   directory quarantine   Ready/publish cleanup
+```mermaid
+stateDiagram-v2
+    [*] --> Quiescing
+    Quiescing --> Verifying
+    Verifying --> Retiring
+    Retiring --> Resuming
+    Resuming --> Completing
+    Completing --> Recovered
 ```
 
-- current Volume owner가 source 또는 기록된 destination이어야 하며 activeMove가 일치해야 한다.
-- source 및 선택된 destination은 Ready, current owner는 uncordoned여야 한다.
-- PV/ClaimRef/PVC UID와 volume handle을 검증하고 foreign published node가 있으면 거부한다.
-- 원래 helper Job을 UID 조건부 foreground 삭제하고 Pod 종료를 다시 관찰한다. 강제 삭제하지 않는다.
-- readonly Job으로 current owner의 final directory를 확인한다. destination이면 이 Move의
-  promotion marker도 일치해야 한다. 파일 내용의 무결성/백업 복원을 대신하는 검사는 아니다.
-- non-owner final/staging은 `.shiftpv/aborted/<move>-final` 및 `<move>-incoming`으로
-  같은 filesystem에서 rename한다. symlink, 다른 marker, 기존 quarantine 충돌은 거부하고
-  데이터를 덮어쓰거나 삭제하지 않는다. 이전 버전 또는 중단된 cleanup의 retired 경로도
-  호환해서 보존한다. commit 전에는 생성되지 않은 destination final/staging의 부재가 정상이다.
-  commit 후 source final과 retired가 모두 없는 상태는 cleanup purge 완료로 인정한다.
-- 모든 확인 후 Ready CAS가 마운트를 열되 owner는 변경하지 않는다. activeMove는 유지한다.
-- held/misplaced controller Pod만 UID 조건부 Eviction API로 교체한다. PDB를 무시하지 않으며
-  workload template/replica를 수정하지 않는다. admission이 새 Pod를 현재 owner에 pin한다.
-- owner publish 확인과 recovery Job 정리 후 activeMove를 비우고 Recovered로 끝낸다.
-  이력 Move는 새 이동을 막지 않는다.
+| Recovery phase | Action과 증거 |
+|---|---|
+| `Quiescing` | 원 helper Job을 UID 조건부 foreground 삭제하고 Pod 종료 관찰 |
+| `Verifying` | current owner final directory를 read-only Job으로 확인 |
+| `Retiring` | non-owner final/staging을 `.shiftpv/aborted/`로 same-filesystem rename |
+| `Resuming` | owner를 유지한 Ready CAS와 owner-bound workload 재생성 |
+| `Completing` | owner publish 확인, recovery resource와 `activeMove` 정리 |
+| `Recovered` | 같은 owner에서 정상 publication 수렴 |
 
-API 오류/모호한 authority/실패한 Job은 phase를 유지하며 recoveryReason/Message를 기록한다.
-owner Ready 공개 이후의 placement/PDB 대기는 Ready를 다시 Blocked로 바꾸지 않는다.
-실패한 recovery Job은 무한 재생성하지 않는다. 운영자는 로그와 경로/권한을 확인하고 원인을
-해소한 뒤 해당 실패 Job을 **foreground 삭제하고 Pod 종료를 확인**해야 같은 단계가 재시도된다.
-Volume status 직접 patch, helper force-delete, pool 교체/수동 파일 변경은 안전한 복구가 아니다.
-binding 기록이 없는 lock 이전 실패는 볼륨을 바꾸지 않으므로 이 복구 경로의 대상이 아니다.
+| 복구 완료 판정 | 값 |
+|---|---|
+| Move `status.phase`, `reason` | 원래 `Blocked`와 실패 reason 유지 |
+| Move `status.recoveryPhase` | `Recovered` |
+| Volume `status.phase`, `activeMove` | `Ready`, 빈 값 |
+| Volume owner/publication | 기존 owner 유지, 그 node에 publish |
 
-Recovery Job은 300초 deadline, backoff 0이며 완료 증거의 TTL을 두지 않는다. 단계 진행 후
-controller가 정리한다. Kubernetes 1.35 이상에서 Job terminal condition과 Pod 종료를
-사용한다. [Job 종료 규칙](https://kubernetes.io/docs/concepts/workloads/controllers/job/#terminal-job-conditions)
+| Recovery invariant | 증거 |
+|---|---|
+| Owner identity 유지 | Recovery는 owner를 선택하거나 변경하지 않음 |
+| Binding 일치 | PVC/PV UID와 volume handle 확인 |
+| Publication 단일화 | foreign published node 부재 |
+| Current owner data 존재 | read-only verification Job 성공 |
+| Destination authority 증명 | destination owner라면 exact Move marker 일치 |
+| Non-owner data 격리 | symlink·marker·기존 quarantine 충돌 없이 rename |
+| Workload disruption 준수 | UID-bound Eviction API와 PDB 사용 |
 
-기존 설치에서는 새 controller 실행 전에 CRD schema를 명시적으로 갱신해야 한다. Helm의
-`crds/`는 기존 CRD를 upgrade하지 않는다. [Helm CRD 제한](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/)
+`spec.recovery`는 Blocked Move에 한 번 기록하는 immutable 요청이다. Current owner가 uncordon되고 관련
+source/destination Pool이 Ready여야 한다. Commit 전 생성되지 않은 destination artifact의 부재와 commit
+후 purge된 source의 부재는 정상 상태로 판정한다. Recovery는 데이터를 덮어쓰거나 자동 삭제하지 않고
+검증되지 않은 artifact를 quarantine으로 보존한다.
+
+API 오류와 불명확한 authority는 recovery phase를 유지한다. 실패한 recovery Job은 증거로 남는다.
+운영자가 filesystem 또는 권한 원인을 해소하고 해당 Job을 foreground 삭제하면 같은 phase가 재시도된다.
+Recovery Job은 300초 deadline, `backoffLimit=0`, completion TTL 없음으로 실행되고 단계 전진 뒤 Controller가
+정리한다. CRD schema는 Helm upgrade 전에 명시적으로 적용한다.
 
 ## Operator diagnostics
 
-`ShiftPVMove.status`는 이동 transaction의 운영 진단 journal이다.
+| Status field | 의미 |
+|---|---|
+| `phase`, `reason`, `message` | 현재 transaction 상태와 다음 운영 행동 |
+| `lastTransitionTime` | Move 또는 recovery phase가 마지막으로 바뀐 시각 |
+| `lastProgressTime` | 영속 진행 증거가 마지막으로 바뀐 시각 |
+| `recoveryPhase`, `recoveryReason`, `recoveryMessage` | 명시적 recovery journal |
 
-- `phase/reason/message`: 현재 단계, 기계가 읽는 원인, 자동 재시도 여부와 다음 안전 행동.
-- `lastTransitionTime`: 이동 phase 또는 recovery phase가 마지막으로 바뀐 시각.
-- `lastProgressTime`: phase 전진, owner/destination 선택, eviction 요청, helper Job 기록처럼
-  transaction 증거가 마지막으로 전진한 시각. 같은 상태를 관찰하는 polling은 갱신하지 않는다.
-- `recoveryPhase/recoveryReason/recoveryMessage`: 원래 Blocked 원인을 보존하면서 명시적
-  ResumeOwner 복구만 별도로 설명한다. 복구 중에는 최상위 `message`도 현재 recovery를
-  설명하며 `Recovered` 뒤에는 원래 Blocked reason이 이력임을 명시한다.
-
-Pending과 Waiting phase는 기본적으로 자동 재평가된다. `Blocked`는 terminal이며 자동
-rollback하지 않는다. `ObservationFailed`와 `ActionFailed`는 현재 phase를 보존하고 자동
-재시도하며, 오류가 해소되면 정상 phase 진단으로 교체한다. status API까지 쓸 수 없는 장애는
-CR에 남길 수 없으므로 controller log와 Kubernetes component 상태를 확인해야 한다.
-
-phase/reason/recovery 변화는 status 저장 뒤 Kubernetes Event로 발행한다. 동일한 상태의 반복
-reconcile은 Event와 진행 시간을 계속 갱신하지 않는다. Event는 보조 신호이며 CR status가
-권위 있는 현재 상태다. 시간 필드는 감지/알림용이며 자동 실패나 rollback deadline이 아니다.
+CR status가 현재 상태의 source of truth다. Kubernetes Event는 phase, reason, recovery 변화를 보조한다.
+같은 관찰은 timestamp와 Event를 반복 갱신하지 않는다. Observation/action API 오류는 현재 phase를
+보존하고 재평가하며 status 저장 자체가 실패한 경우 Controller log가 진단 경로다. 시간 필드는 관측
+정보이며 자동 rollback이나 실패 deadline을 만들지 않는다.
 
 ## Placement coordination and CSI publish guard
 
-mobility opt-in namespace에서 provisioning한 PV만 당시 등록된 Pool node 전체를
-accessible topology로 허용한다. opt-in하지 않았거나 provisioner metadata가 없는 PV는
-최초 owner node만 허용한다. placement admission webhook은 opt-in namespace의 Pod CREATE만
-보고 `failurePolicy=Fail`로 동작한다. 규칙은 다음과 같다.
+| Provisioning namespace | PV accessible topology |
+|---|---|
+| Mobility opt-in | 당시 등록된 모든 Pool node |
+| 일반 namespace 또는 metadata 없음 | 최초 owner node |
 
-- unbound ShiftPV PVC: 변경하지 않아 `WaitForFirstConsumer`가 최초 owner를 선택한다.
-- bound volume, Ready/schedulable owner: owner에 pin한다.
-- bound volume, cordoned/unready owner: `shiftpv.io/placement-hold` Placement Hold를
-  적용한다.
-- bound volume, Moving/Blocked: Placement Hold를 적용한다.
-- 기존 hostname selector가 현재 owner와 충돌하거나 bound ShiftPV volume이 여러 개면
-  admission을 거부한다.
+Admission webhook은 opt-in namespace의 Pod CREATE를 `failurePolicy=Fail`로 처리한다.
 
-Controller는 source unpublish 뒤에도 실제 replacement의 Hold를 유지한다. 이 Hold는
-Kubernetes Pod Scheduling Readiness의 `spec.schedulingGates`로 구현한다. 대신 Move UID가
-소유하고 결정적 이름을 가진 placement reservation Pod를 `shiftpv-system`에 만든다.
-reservation은 candidate node affinity, workload의 node selector/node affinity,
-toleration, scheduler/priority/runtime class/OS, host network/port와 aggregate resource
-request를 복제한다. kube-scheduler가 reservation에 지정한 node를 destination으로
-영속화하고, 실제 replacement는 Hold가 있는 동안 같은 hostname에 pin한다.
+| Pod 상태 | Mutation |
+|---|---|
+| Unbound ShiftPV PVC | 변경 없이 WFFC가 최초 owner 선택 |
+| Ready volume과 schedulable owner | owner hostname에 pin |
+| cordon/unready owner | Placement Hold 추가 |
+| Moving 또는 Blocked volume | Placement Hold 추가 |
+| 기존 hostname selector 충돌 또는 bound ShiftPV volume 여러 개 | admission 거부 |
 
-copy, promotion과 commit 전에는 reservation이 같은 destination에 계속 scheduled되어야
-한다. preemption, eviction 또는 수동 삭제로 사라지면 persisted destination 하나만 후보로
-재생성하고, 다시 scheduled된 것을 확인할 때까지 다음 action을 실행하지 않는다. owner CAS
-직전에도 exact Move UID가 소유한 reservation과 destination node를 live read로 재검증한다.
+Controller는 source unpublish 뒤 실제 replacement의 Hold를 유지하고 Move UID가 소유한 결정적 이름의
+placement reservation Pod를 만든다. Reservation은 candidate affinity, workload node selector/affinity,
+toleration, scheduler, priority, runtime class, OS, host network/port와 aggregate resource request를
+복제한다. kube-scheduler가 선택한 node를 destination으로 영속화한다.
 
-inter-Pod affinity/anti-affinity, topology spread, resource claim, generic ephemeral/inline
-CSI scheduling volume은 reservation으로 동일한 의미를 만들 수 없으므로 preflight에서
-제외한다. destination이 정해지지 않으면 copy하지 않는다. destination이 일시적으로
-NotReady가 되면 source authority와 held workload를 유지하고 자동 재평가한다.
+Copy부터 commit까지 reservation이 persisted destination에 계속 scheduled되어야 한다. Reservation이
+사라지면 같은 destination 후보로 재생성하고 owner CAS 직전에도 exact Move UID와 node를 live read로
+확인한다. Inter-Pod affinity, topology spread, resource claim, generic ephemeral/inline CSI는 preflight가
+자동 입력에서 제외한다.
 
-promotion과 owner commit read-back 뒤 `ReleasingDestination`에서 reservation을 UID
-precondition으로 삭제한다. 그 삭제를 관찰한 뒤에만 replacement Hold를 제거하고
-`shiftpv.io/placement=owner`를 기록한다. 따라서 kubelet은 owner가 `Ready`가 되기 전에
-실제 workload의 destination CSI target을 만들지 않는다.
-
-CSI Node Plugin은 `ShiftPVVolume`이 `Ready`이고 현재 node가 owner이며 final directory가
-있을 때만 `NodePublishVolume`을 허용한다. `Moving`, `Blocked`, owner 불일치와 CR 조회 실패는
-즉시 fail-closed다. `Moving` 중 CSI 요청을 유지하는 방식은 node 재시작 뒤 kubelet의 미완성
-volume metadata 정리를 막을 수 있으므로 사용하지 않는다.
+Owner commit read-back 뒤 reservation을 UID 조건부 삭제하고 실제 부재를 관찰한 다음 replacement를
+destination에 pin하고 Hold를 해제한다. `NodePublishVolume`은 Ready, current owner, final directory를 모두
+확인한다. Moving, Blocked, owner mismatch와 CR 조회 실패는 즉시 publish를 닫으며 CSI 호출 안에서 상태
+변화를 기다리지 않는다.
 
 ## Copy, promotion and commit
 
 ```text
-source:      <pool>/volumes/<volume-id>/
-destination:<pool>/.shiftpv/incoming/<move-name>/
-retired:    <pool>/.shiftpv/retired/<move-name>/  # cleanup 중에만 존재
+source       <source Pool>/volumes/<volume-id>/
+staging      <destination Pool>/.shiftpv/incoming/<move-name>/
+destination <destination Pool>/volumes/<volume-id>/
+retired      <source Pool>/.shiftpv/retired/<move-name>/
 ```
 
-Controller image를 helper image로 사용한다. source와 destination helper의 hostPath는 각
-node의 `ShiftPVPool.spec.mountPath`에서 해석한다. source Pod는 one-time Secret으로 인증하는
-read-only rsync daemon이고 destination copy Job은 staging에 `rsync -a --delete`를 실행한
-뒤 checksum dry-run의 itemized 변경 목록이 비어 있는지 확인한다. promotion Job은 이 검사를
-통과한 뒤에만 쓰는 move marker와 device ID를
-검사한 뒤 같은 filesystem에서 `mv`로 final directory를 만든다.
+```mermaid
+sequenceDiagram
+    participant S as Source Pool
+    participant D as Destination Pool
+    participant V as ShiftPVVolume
+    participant P as Destination Pod
 
-copy가 ENOSPC로 실패하면 staging에는 일부 파일이나 비어 있거나 불완전한
-`.shiftpv-move-id`가 남을 수 있다. marker의 존재만으로 copy 완료를 인정하지 않으며 그
-내용이 현재 Move 이름과 정확히 일치해야 promotion할 수 있다. copy 또는 promotion이
-실패한 동안 source가 authoritative하고 destination staging은 비권위 데이터다. 목적지
-filesystem의 용량·권한·read-only 원인을 해소한 뒤 `ResumeOwner`를 요청하면 source final을
-검증하고 남은 destination staging을 `.shiftpv/aborted/<move-name>-incoming`으로 rename한
-후 같은 source owner를 다시 연다. 복구는 staging을 재사용하거나 자동으로 owner를
-destination으로 바꾸지 않는다.
+    S->>D: rsync -a --delete
+    S->>D: checksum dry-run
+    D->>D: staging → final (same-filesystem mv)
+    D->>V: owner CAS → destination/Ready
+    V->>P: Placement Hold 해제
+    P->>V: destination publish 관찰
+    V->>S: source → retired → purge
+```
 
-owner commit은 expected `phase=Moving`, source owner와 `activeMove=<move>`를 전제로 하는
-status CAS다. phase와 owner를 destination/Ready로 바꿔도 `activeMove`는 유지한다.
-commit read-back 뒤 reservation 삭제와 workload Hold 해제를 순서대로 끝낸다. 이후 kubelet의
-첫 정상 CSI publish가 destination publication을 기록해야 source cleanup을 실행한다.
-cleanup은 source를 같은 filesystem의 retired path로 원자적으로 격리한 뒤 즉시 삭제한다.
-재시작 시 남은 retired path 삭제를 반복하며 source final과 retired가 모두 없어야 Job이
-성공한다. 삭제 실패는 `Blocked/CleanupFailed`로 닫고 자동 성공 처리하지 않는다.
-cleanup과 transfer resource 정리가 끝나야 `activeMove`를 비우고 Move를 Succeeded로 만든다.
-CSI `DeleteVolume`은 phase가 Ready가 아니거나 active move가 있으면 거부한다.
+Source helper는 one-time password로 인증하는 read-only rsync service다. Destination은 checksum
+itemized diff가 비어 있는지 확인하고 exact Move marker와 device identity를 검증한 뒤 `mv`로 promotion한다.
+Partial 또는 marker가 다른 staging은 non-authoritative 상태로 남는다.
 
-Secret, ConfigMap, source Pod와 Service 이름은 move name에서 결정되며 성공 시 제거된다.
-copy/promotion/cleanup Job은 `activeDeadlineSeconds=300`, `backoffLimit=2`, 완료 후 TTL 600초다.
+Owner commit은 `Moving`, source owner, matching `activeMove`를 전제로 한 CAS다. Commit 뒤에도
+`activeMove`를 유지하고 destination owner/Ready를 read-back한 다음 workload를 해제한다. Destination
+publish가 관찰되면 source를 retired로 rename하고 `rm -rf --one-file-system`으로 삭제한다. Source final과
+retired가 모두 없어야 cleanup이 성공한다. 삭제 실패는 `CleanupFailed`로 닫는다.
+
+Transfer Secret, ConfigMap, source Pod와 Service는 Move-derived deterministic name을 사용하고 성공 뒤
+정리한다. Operation Job은 300초 deadline, `backoffLimit=2`, 600초 completion TTL을 사용한다.
 
 ## Safety invariants
 
-1. source unpublish가 확인되기 전 copy를 시작하지 않는다.
-2. verified staging을 promotion하기 전 owner를 바꾸지 않는다.
-3. owner CAS가 성공하기 전 destination CSI publish를 열지 않는다.
-4. owner commit 뒤 placement reservation 삭제를 관찰하기 전 workload Hold를 해제하지 않는다.
-5. destination publish가 확인되기 전 source를 purge하지 않는다.
-6. 선택된 destination이 Ready이고 Pool에 등록된 상태를 다시 확인하기 전 commit 또는
-   source purge를 진행하지 않는다.
-7. API/CR 상태가 불명확하면 publish와 promotion을 허용하지 않는다.
-8. Controller restart는 CR status와 helper resource 관찰로 같은 action에 수렴한다.
+| 순서 | 불변식 |
+|---:|---|
+| 1 | Source unpublish 뒤 copy |
+| 2 | Verified staging 뒤 promotion |
+| 3 | Promotion 뒤 owner CAS |
+| 4 | Owner read-back 뒤 reservation release |
+| 5 | Reservation 부재 관찰 뒤 workload release |
+| 6 | Destination publish 뒤 source purge |
+| 7 | Source final/retired 부재 확인 뒤 `Succeeded` |
+| 8 | API 또는 authority가 불명확하면 publication과 disk action 대기 |
 
-Kubernetes API 요청이 실제 반영된 뒤 응답만 timeout 또는 연결 단절로 유실될 수 있다.
-Controller는 이 경우 성공을 추측하지 않고 현재 phase를 유지한다. 다음 reconcile에서
-결정적 이름의 Move/helper resource, Move status와 Volume CAS 결과를 다시 읽어 이미 반영된
-action은 재사용하고 반영되지 않은 action만 재시도한다. 특히 destination, source bytes,
-capacity 승인과 copy Job 이름을 Move status에 먼저 기록하기 전에는 copy resource를 시작하지
-않는다. owner commit 응답이
-유실되어도 `Ready`, destination owner, 같은 `activeMove`의 세 값이 모두 관찰되어야
-commit 완료로 인정한다. 성공 정리 중 delete 또는 `activeMove` 해제 응답이 유실되면
-NotFound와 이미 비어 있는 `activeMove`를 멱등 성공으로 처리한다.
+결정적 resource 이름과 영속 관찰이 API response-loss window를 닫는다. 다음 reconcile은 관찰된 성공을
+재사용하고 미관찰 action만 멱등 재시도한다. Destination, source bytes와 capacity approval은 copy 전에
+Move status에 저장한다. Owner commit 응답이 유실되면 destination, Ready, matching active Move를 함께
+관찰해야 완료로 인정한다.
 
 ## Closure and limits
 
-FSM 그래프와 reconcile control loop는 닫혀 있다. 모든 알려진 phase는 허용된 transition과
-action을 반환하고 `Succeeded` 또는 `Blocked`는 안정적인 terminal self-loop다. 재시작과 node
-중단 검증 결과는 [validation evidence](../validation/README.md)에 기록한다.
+| 속성 | 현재 경계 |
+|---|---|
+| FSM closure | 모든 알려진 phase가 허용 transition 또는 terminal self-loop 선택 |
+| Waiting duration | 조건 기반이며 phase deadline은 현재 계약 밖 |
+| Controller availability | replica 1, `Recreate` strategy |
+| Data authority | owner 하나, planned cold migration |
+| Replication, failover, backup | 외부 시스템 |
+| Webhook availability | opt-in Pod admission은 단일 Controller 가용성을 따름 |
 
-종료 시간이 bounded라는 뜻은 아니다. workload controller가 replacement를 만들지 않거나
-scheduler가 constraint/resource 부족으로 결정을 내리지 못하거나 destination publish가
-계속 실패하면 해당 waiting phase에 머문다. 현재 구현은 phase-level deadline, 자동 Pod
-교체, automatic rollback, leader election, replication, failover와 backup을 제공하지 않는다.
-reservation 삭제와 실제 workload gate 해제는 Kubernetes scheduler와 원자적으로 묶이지
-않는다. 그 짧은 handoff 사이에 다른 workload가 capacity를 선점하면 owner는 destination에
-남고 source cleanup은 publish 전까지 보류되지만 replacement는 capacity가 생길 때까지
-Pending일 수 있다.
-opt-in namespace는 placement webhook outage 동안 새 Pod admission이 실패한다. chart는
-Controller replica를 1개로 제한하고 Deployment strategy를 `Recreate`로 고정해 upgrade 중
-old/new mobility reconciler가 겹치지 않게 한다.
+Workload controller가 replacement를 만들지 않거나 scheduler resource가 부족하면 waiting phase가 계속된다.
+Reservation 삭제와 workload Hold 해제 사이에 capacity가 선점되면 destination owner를 유지하고 source
+cleanup은 destination publish까지 대기한다. Runtime과 restart 검증 방법은
+[Testing](../development/testing.md)에 있다.

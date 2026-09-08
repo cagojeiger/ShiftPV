@@ -7,21 +7,21 @@
 
 ## Context
 
-ShiftPV는 StorageClass를 통한 동적 provisioning과 kubelet의 표준 volume lifecycle에
-참여해야 한다. PVC를 감시해 HostPath PV를 직접 만드는 방식은 단순하지만 kubelet mount
-lifecycle을 제공하지 않는다.
+ShiftPV는 StorageClass 동적 provisioning과 kubelet의 표준 volume lifecycle에 참여한다.
 
 ## Decision
 
-ShiftPV의 Kubernetes storage interface는 CSI로 고정한다. 표준 CSI sidecar와 kubelet
-registration을 사용하며, 구현하지 않는 capability는 광고하지 않는다.
+Kubernetes storage interface를 CSI로 고정한다. 표준 sidecar와 kubelet registration을 사용하고,
+실제로 구현한 capability만 광고한다.
 
 ## Alternatives considered
 
-- 외부 provisioner가 HostPath PV를 직접 만들면 CSI Node lifecycle과 명확한 mount 권한 경계가 없다.
-- 별도 scheduler나 in-tree volume plugin은 Kubernetes 표준 확장 경로와 맞지 않는다.
+| 대안 | 절충점 |
+|---|---|
+| PVC 감시 후 HostPath PV 생성 | 구현은 작지만 CSI Node lifecycle과 mount 권한 경계가 없다. |
+| 별도 scheduler 또는 in-tree plugin | Kubernetes 표준 확장 경로와 결합되지 않는다. |
 
 ## Consequences
 
-일반 PVC와 StorageClass 흐름을 사용할 수 있지만 Controller, Node Plugin, CSI sidecar,
-Unix socket과 RBAC 배포가 필요하다.
+사용자는 일반 PVC와 StorageClass 흐름을 사용한다. 배포는 Controller, Node Plugin, CSI sidecar,
+Unix socket과 RBAC를 포함한다.

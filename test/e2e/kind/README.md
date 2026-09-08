@@ -22,7 +22,8 @@ The script builds and loads `shiftpv:dev` and installs the Helm chart with
 ShiftPV marked as the default StorageClass. It first registers an ordinary
 directory inside a worker's root filesystem, proves the path is not a mount point,
 and verifies missing-path rejection followed by Pool readiness, provisioning,
-Pod write-through, deletion cleanup, and a checksum-preserving cordon move to an
+Pod write-through, Retain preservation followed by explicit Delete reclamation,
+and a checksum-preserving cordon move to an
 ordinary directory on the other worker. The terminal Move remains as history while
 the deleted volume no longer blocks later capacity admission. It then overlays one Pool with a
 bounded tmpfs, proves that external filesystem consumption blocks admission,

@@ -31,9 +31,7 @@ restore_default_pool() {
 }
 trap restore_default_pool EXIT
 
-# The regular Pools are removed temporarily because one node may have only one
-# registered Pool. Both new paths deliberately live inside their Kind nodes'
-# root filesystems and are not exact mount points.
+# Register one ordinary root-filesystem directory Pool per Kind node.
 kubectl delete shiftpvpool worker-a worker-b --wait=true
 docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}"
 docker exec "${POOL_B_NODE}" test ! -e "${POOL_B_PATH}"
@@ -156,10 +154,32 @@ kubectl exec "${WORKLOAD}" -- grep -Fx 'ShiftPV ordinary directory Pool' /data/p
 docker exec "${POOL_A_NODE}" grep -Fx \
 	'ShiftPV ordinary directory Pool' "${POOL_A_PATH}/volumes/${VOLUME_ID}/payload"
 
+kubectl patch pv "${PV_NAME}" --type=merge \
+	-p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
 kubectl delete pod "${WORKLOAD}" --wait=true
+for _ in {1..60}; do
+	PUBLISHED_NODES=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.publishedNodes[*]}')
+	[[ -z "${PUBLISHED_NODES}" ]] && break
+	sleep 1
+done
+if [[ -n "${PUBLISHED_NODES}" ]]; then
+	echo "retirement requires an unpublished volume: ${PUBLISHED_NODES}" >&2
+	exit 1
+fi
+kubectl wait --for=jsonpath='{.status.phase}'=Ready "shiftpvvolume/${VOLUME_ID}" --timeout=2m
+test -z "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')"
 kubectl delete pvc "${WORKLOAD}" --wait=true
+kubectl wait --for=jsonpath='{.status.phase}'=Released "pv/${PV_NAME}" --timeout=2m
+kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
+kubectl get "shiftpvvolume/${VOLUME_ID}" >/dev/null
+docker exec "${POOL_A_NODE}" grep -Fx \
+	'ShiftPV ordinary directory Pool' "${POOL_A_PATH}/volumes/${VOLUME_ID}/payload"
+
+kubectl patch pv "${PV_NAME}" --type=merge \
+	-p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
 kubectl wait --for=delete "pv/${PV_NAME}" --timeout=2m
 kubectl -n shiftpv-system wait --for=delete "configmap/${VOLUME_ID}" --timeout=2m
+kubectl wait --for=delete "shiftpvvolume/${VOLUME_ID}" --timeout=2m
 docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/volumes/${VOLUME_ID}"
 PV_NAME=
 

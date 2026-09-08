@@ -8,4 +8,21 @@
 | [storage-class.md](storage-class.md) | StorageClass, 기본 클래스 설정과 용량 의미 |
 | [volume-mobility.md](volume-mobility.md) | 정상 cordon cold migration과 안전 경계 |
 
+## Current scope
+
+| Capability | Current contract |
+|---|---|
+| Volume | RWO Filesystem |
+| Pool | node별 기존 absolute non-root directory 하나 |
+| Filesystem layout | root filesystem 하위 directory 또는 별도 mount |
+| Capacity | Pool reservation과 filesystem available bytes 기반 신규 할당 |
+| Mobility | 정상인 cordon owner의 계획된 cold migration |
+| Authority | owner node 하나와 active Move 하나 |
+| Recovery | 재시작 후 reconcile과 명시적 `ResumeOwner` |
+| Replication, HA, unavailable-node failover | 외부 storage architecture |
+| Snapshot과 backup | 외부 data-protection system |
+| RWX, raw block, volume expansion | 현재 제품 범위 밖 |
+| Per-volume filesystem quota | filesystem 또는 외부 quota manager |
+| 기존 PV migration | workload별 migration 절차 |
+
 계약 변경이 구조적 결정을 바꾸면 ADR을 먼저 추가하거나 대체한다.

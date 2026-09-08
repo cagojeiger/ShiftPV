@@ -1,28 +1,33 @@
-# 0004. 첫 제품 범위를 최소 CSI lifecycle로 제한한다
+# 0004. 최소 CSI lifecycle을 제공한다
 
 - 상태: Accepted
 - 날짜: 2026-09-01
-- 후속 결정: owner와 topology는 [ADR 0005](0005-automatic-cordon-volume-mobility.md)가 확장한다.
-- 후속 결정: Pool 총량 admission은 [ADR 0011](0011-pool-filesystem-capacity-admission.md)이 확장한다.
+- 관련 결정: [Pool 총량 admission](0005-pool-filesystem-capacity-admission.md), [owner와 topology](0007-automatic-cordon-volume-mobility.md)
 - 상세 계약: [CSI driver](../spec/csi-driver.md), [StorageClass](../spec/storage-class.md)
 
 ## Context
 
-첫 제품 상태는 StorageClass, PVC, provisioning, publish와 재설치 흐름이 실제 cluster에서
-성립하는지 검증할 수 있을 만큼 작아야 했다.
+Directory 기반 CSI는 provisioning, publish와 데이터 보존을 명확한 장애 경계 안에서 제공해야 한다.
+지원 capability가 늘어날수록 검증할 상태와 복구 경계도 늘어난다.
 
 ## Decision
 
-초기 범위는 single-owner RWO Filesystem volume의 동적 provisioning과 mount lifecycle,
-Retain 기반 보존으로 제한한다. Volume expansion, snapshot과 hard capacity quota는 포함하지
-않는다.
+| 선택 | 이유 |
+|---|---|
+| single-owner RWO Filesystem volume | directory의 authority를 단일화한다. |
+| 동적 provisioning과 mount lifecycle | Kubernetes PVC의 핵심 lifecycle에 집중한다. |
+| Retain 기반 데이터 보존 | workload 삭제와 데이터 폐기를 분리한다. |
+
+Requested capacity는 Pool 총량 회계의 단위로 사용한다.
 
 ## Alternatives considered
 
-- CSI 기능을 한 번에 넓히면 제품 기반을 검증하기 전에 상태와 장애 경계가 복잡해진다.
-- HostPath 전용 provisioner는 최소 구현은 쉽지만 ADR 0003의 CSI 제품 기반을 충족하지 못한다.
+| 대안 | 절충점 |
+|---|---|
+| CSI 기능 일괄 구현 | 기반 검증 전에 상태와 장애 경계가 커진다. |
+| HostPath 전용 provisioner | 작지만 CSI 제품 기반을 충족하지 못한다. |
 
 ## Consequences
 
-기본 lifecycle은 작고 검증 가능하지만 지원하지 않는 기능은 명시적으로 거부해야 한다.
-Requested capacity는 hard write limit가 아니다.
+지원 capability와 오류 경계가 작고 명확하다. 개별 volume의 실제 write 제한은 filesystem 운영
+계층이 담당한다.

@@ -1,8 +1,16 @@
 # StorageClass Contract
 
-ShiftPV StorageClass는 참여 node의 기존 filesystem 안에 등록한 Pool directory에서
-directory-backed volume을 provision한다. Pool directory 자체가 mount point일 필요는 없어서
-root filesystem 하위의 기존 hostPath 저장 경로도 사용할 수 있다.
+ShiftPV는 등록된 node Pool의 directory를 PVC로 동적 provisioning한다.
+
+```mermaid
+flowchart LR
+    POD[첫 consumer] --> WFFC[WaitForFirstConsumer]
+    WFFC --> NODE[선택된 node]
+    NODE --> POOL[Ready ShiftPVPool]
+    POOL --> PVC[Bound PVC/PV]
+```
+
+## Published class
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -17,41 +25,65 @@ parameters:
   shiftpv.io/capacity-enforcement: none
 ```
 
-| 항목 | 값 | 이유 |
-|------|---------|------|
-| `provisioner` | `csi.shiftpv.io` | ShiftPV CSI 식별자 |
-| binding | `WaitForFirstConsumer` | workload node를 먼저 선택 |
-| reclaim | `Retain` | 자동 데이터 삭제 방지 |
-| expansion | `false` | resize를 지원하지 않음 |
-| access/volume mode | RWO Filesystem만 | node-local directory volume |
+| 필드 | 계약 |
+|---|---|
+| Provisioner | `csi.shiftpv.io` |
+| Access | `ReadWriteOnce` |
+| Volume mode | `Filesystem` |
+| Binding | `WaitForFirstConsumer` |
+| Reclaim | `Retain` |
+| Expansion | 현재 제품 범위 밖 |
+| Parameters | 호환성 marker와 external-provisioner metadata |
 
-사용자가 설정하는 StorageClass parameter는 없다. `shiftpv.io/capacity-enforcement: none`은
-기존 StorageClass의 불변 필드를 유지하는 호환성 marker이며 동작을 선택하는 설정이 아니다.
-external-provisioner가 내부적으로 추가하는 PVC/PV metadata parameter와 이 marker를 제외한
-알 수 없는 parameter 또는 다른 marker 값은 `InvalidArgument`로 거부한다.
+`shiftpv.io/capacity-enforcement: none`은 upgrade 전후 StorageClass identity를 유지하는 호환성
+marker다. 알 수 없는 parameter와 다른 marker 값은 `InvalidArgument`로 닫는다.
 
-requested capacity는 PV capacity와 reservation idempotency뿐 아니라 owner Pool의 총예약
-입장 판단에 쓰인다. Controller는 `ShiftPVPool.spec.capacity.limit`에서 현재 총예약을 뺀 값과
-Pool filesystem의 현재 available bytes를 각각 확인한다. 둘 중 하나보다 요청량이 크면 신규
-provisioning을 거부한다. 선택된 Pool의 node-reported `Ready` 상태가 없거나 실패·stale이어도
-reservation을 만들기 전에 거부한다. 이 검사는 개별 directory write를 제한하는 quota가 아니다.
+## Capacity admission
 
-Helm의 `storageClass.defaultClass`를 `true`로 설정하면 chart가
-`storageclass.kubernetes.io/is-default-class: "true"` annotation을 추가한다. 그러면
-`storageClassName`을 생략한 새 PVC도 Kubernetes admission에 의해 `shiftpv`를 선택한다.
-기존 기본 StorageClass가 있는 cluster에서는 동시에 둘을 기본값으로 두지 않아야 한다.
-기본값인 `false`로 설치하면 chart는 기존 StorageClass의 annotation을 변경하지 않으며,
-workload는 `storageClassName: shiftpv`로 ShiftPV를 명시적으로 선택할 수 있다.
+```mermaid
+flowchart TD
+    R[PVC requested bytes] --> L{Pool limit - reservations 안에 있는가?}
+    L -- yes --> F{statfs available bytes 안에 있는가?}
+    L -- no --> X[ResourceExhausted]
+    F -- yes --> C[reservation + volume directory 생성]
+    F -- no --> X
+```
 
-ShiftPV를 기본 StorageClass로 바꾸는 것은 이후 생성되는 PVC의 기본 선택을 바꾸는 동작이다.
-다른 provisioner가 이미 만든 PV나 그 데이터를 자동으로 인수·변환하지 않는다. 기존 hostPath
-StorageClass의 PV는 workload별 데이터 이동 절차를 별도로 계획해야 한다.
+| 용량 신호 | 의미 |
+|---|---|
+| `ShiftPVPool.spec.capacity.limit` | ShiftPV가 Pool에 예약할 최대 PVC capacity |
+| Active reservations | 현재 owner의 requested bytes + 승인된 incoming Move의 requested bytes |
+| `statfs` availability | Pool이 속한 filesystem의 현재 available bytes |
+| PVC capacity | reservation과 PV capacity의 기준값 |
 
-## Helm lifecycle
+신규 할당은 논리 잔여량과 물리 잔여량을 모두 충족한다. ShiftPV 밖의 writer도 `statfs`에
+반영된다. 개별 volume 사용량은 filesystem 책임이며 Pool limit는 write quota가 아니라 admission
+경계다.
 
-Helm은 StorageClass를 소유하지만 이 StorageClass로 생성한 PVC/PV와 host data는 소유하지
-않는다. `Retain`이므로 PVC를 삭제해도 PV와 data directory가 자동 삭제되지 않는다.
-ShiftPV dependency가 남은 정상 uninstall은 fail-closed로 거부한다.
+Incoming 예약은 `capacityApproved=true`, destination 일치, Volume의 `activeMove` 일치,
+owner commit 전인 Move에 적용한다. Commit 뒤에는 destination owner 예약으로 한 번만 계산한다.
+Volume과 reservation이 삭제된 완료 Move는 용량을 점유하지 않는다.
 
-Helm과 Argo CD의 제거, emergency bypass와 재설치 절차는
-[chart 운영 문서](../../charts/shiftpv/README.md#uninstall-and-recovery)를 따른다.
+## Default-class selection
+
+| Helm value | 새 PVC 동작 |
+|---|---|
+| `storageClass.defaultClass=false` | `storageClassName: shiftpv`를 명시한 workload가 선택 |
+| `storageClass.defaultClass=true` | `storageClassName`이 없는 PVC가 ShiftPV 선택 |
+
+cluster의 기본 StorageClass는 하나로 운영한다. 기존 PV는 원래 provisioner를 유지하며 별도
+migration 절차를 따른다.
+
+## Lifecycle
+
+```text
+PVC 삭제
+   ↓
+PV Released (Retain)
+   ↓
+운영자 복구 또는 명시적 PV/data 폐기
+```
+
+Helm은 StorageClass를 소유한다. PVC, PV, CR, reservation과 host data는 독립 lifecycle을 갖는다.
+Uninstall guard는 storage dependency 해소를 확인한 뒤 release 제거를 허용한다. 배포와 제거 절차는
+[Helm chart guide](../../charts/shiftpv/README.md#uninstall-and-recovery)에 있다.

@@ -1,185 +1,169 @@
 # CSI Driver Contract
 
-ShiftPV의 Kubernetes storage interface는 `csi.shiftpv.io` CSI driver다. 제품
-기반은 [ADR 0003](../adr/0003-csi-product-foundation.md), 지원 범위는
-[ADR 0004](../adr/0004-minimal-csi-bootstrap.md)를 따른다.
+`csi.shiftpv.io`는 Kubernetes PVC lifecycle을 등록된 `ShiftPVPool` 안의 directory와 연결한다.
 
-## Initial deployment
+## Components
 
-```text
-Controller Deployment
-├── shiftpv-controller       Identity + Controller service + mobility reconcile/admission
-├── csi-provisioner
-└── liveness-probe
-
-Node Plugin DaemonSet (participating worker마다 1개)
-├── shiftpv-node             Identity + Node service + bind mount authorization + Pool readiness
-├── node-driver-registrar
-└── liveness-probe
+```mermaid
+flowchart TB
+    subgraph Controller Deployment
+        C[shiftpv-controller<br/>CSI + mobility + admission]
+        P[csi-provisioner]
+        CL[controller liveness]
+    end
+    subgraph Node Plugin DaemonSet
+        N[shiftpv-node<br/>CSI + Pool readiness]
+        R[node-driver-registrar]
+        NL[node liveness]
+    end
+    P --> C
+    C --> API[Kubernetes API]
+    N --> K[Kubelet]
 ```
 
-`external-attacher`, `external-resizer`, `external-snapshotter`는 배포하지 않는다.
+| 속성 | 값 |
+|---|---|
+| Driver | `csi.shiftpv.io` |
+| Lifecycle | Persistent |
+| Attach | `false` |
+| Topology key | `topology.csi.shiftpv.io/node` |
+| Node ID | Kubernetes node name |
+| Controller socket | `/run/csi/csi.sock` |
+| Node socket | `<kubeletRootDir>/plugins/csi.shiftpv.io/csi.sock` |
 
-| 항목 | 값 |
-|------|----|
-| driver name | `csi.shiftpv.io` |
-| controller socket | `/run/csi/csi.sock` |
-| node socket | `<node.kubeletRootDir>/plugins/csi.shiftpv.io/csi.sock` |
-| topology key | `topology.csi.shiftpv.io/node` |
-| attach required | `false` |
-| lifecycle mode | `Persistent` |
+한 Helm release가 선택한 node는 하나의 `node.kubeletRootDir`을 공유한다.
 
-`NodeGetInfo`의 node ID와 topology value는 Kubernetes node name과 같다.
-
-Helm의 `node.kubeletRootDir`는 Node Plugin이 사용하는 CSI plugin socket,
-`plugins_registry`, Pod volume target의 host path 기준이다. 선택된 모든 node의 실제 kubelet
-state root와 일치해야 한다. 기본값은 `/var/lib/kubelet`이고 MicroK8s의 기본 배치는
-`/var/snap/microk8s/common/var/lib/kubelet`을 명시해야 한다. 하나의 release는 하나의 값을
-DaemonSet 전체에 적용하므로 서로 다른 kubelet root를 가진 node를 같은 release로 관리하지
-않는다.
+| Kubernetes 구성 | `node.kubeletRootDir` |
+|---|---|
+| 일반 kubelet | `/var/lib/kubelet` |
+| MicroK8s | `/var/snap/microk8s/common/var/lib/kubelet` |
 
 ## RPC surface
 
-- Identity: `GetPluginInfo`, `GetPluginCapabilities`, `Probe`
-- Controller: `CreateVolume`, `DeleteVolume`, `ControllerGetCapabilities`,
-  `ValidateVolumeCapabilities`
-- Node: `NodeGetInfo`, `NodeGetCapabilities`, `NodePublishVolume`,
-  `NodeUnpublishVolume`
+| Service | RPC |
+|---|---|
+| Identity | `GetPluginInfo`, `GetPluginCapabilities`, `Probe` |
+| Controller | `CreateVolume`, `DeleteVolume`, `ControllerGetCapabilities`, `ValidateVolumeCapabilities` |
+| Node | `NodeGetInfo`, `NodeGetCapabilities`, `NodePublishVolume`, `NodeUnpublishVolume` |
 
-광고하지 않은 RPC는 구현하지 않는다. `STAGE_UNSTAGE_VOLUME`, expansion,
-stats, snapshot, attach capability는 광고하지 않는다.
+광고하는 RPC와 capability가 제품 경계다. Attach, stage/unstage, resize, snapshot, stats, raw block과
+RWX는 현재 제품 범위 밖이다.
 
 ## Provisioning
 
-1. StorageClass의 `WaitForFirstConsumer`가 workload node를 고른다.
-2. external-provisioner가 selected topology와 PVC/PV metadata를 포함해 `CreateVolume`을
-   호출한다.
-3. Controller는 request name의 SHA-256으로 안정적인 volume ID를 만든다.
-4. Controller는 selected node의 `ShiftPVPool`이 최근 `Ready=True`인지 확인한다. 상태가
-   없거나 `Accessible`, `Writable`, `CapacityReadable` 중 하나가 실패했거나 마지막 probe가
-   `poolReadiness.staleAfter`보다 오래됐으면 신규 할당을 거부한다.
-5. Controller는 selected node의 `ShiftPVPool.spec.capacity.limit`와 현재 owner 기준
-   reservation 합계를 확인한다. 예약 ConfigMap의 capacity가 크기이고, 대응하는
-   `ShiftPVVolume.status.ownerNode`가 있으면 최초 node 대신 현재 owner에 합산한다. Volume이
-   아직 없는 create 중간 상태만 reservation의 최초 node에 합산한다.
-6. Controller는 node-bound helper Pod로 Pool directory의 `statfs`를 읽는다. requested bytes가
-   `limit - reserved` 또는 `Bavail * Frsize`보다 크면 directory를 만들기 전에
-   `ResourceExhausted`로 거부한다. Pool 설정이나 측정 결과가 불명확해도 fail-closed다.
-7. Controller namespace의 `<volume-id>` ConfigMap을 idempotent reservation으로
-   생성한다. request name, node, capacity가 기존 값과 다르면 `AlreadyExists`다. 동일한 기존
-   reservation은 용량을 다시 차감하지 않고 중단된 create를 계속한다.
-8. Controller는 selected node의 `ShiftPVPool.spec.mountPath`를 조회하고 helper Pod를 띄워
-   `<mountPath>/volumes/<volume-id>`를 `mkdir -p`한다. hostPath type은 `Directory`라
-   등록 path가 없으면 자동 생성하지 않고 실패한다.
-9. Controller는 `ShiftPVVolume`을 만들고 selected node를 최초 authoritative owner로
-   기록한다. selected node에 해당하는 `ShiftPVPool` 등록이 없으면 provisioning을
-   거부한다.
-10. mobility opt-in namespace면 성공 응답에 생성 시점의 registered Pool node 전체를,
-    아니면 selected owner node 하나만 accessible topology로 담는다. PVC namespace metadata가
-    없을 때도 안전하게 owner-only를 선택한다. volume context의 node는 최초 배치 기록일 뿐
-    이동 후 권한의 source of truth가 아니다.
-11. external-provisioner가 이 topology를 PV node affinity로 변환한다.
+```mermaid
+sequenceDiagram
+    participant Pod
+    participant Scheduler
+    participant Provisioner
+    participant Controller
+    participant Pool
+    participant Helper
 
-Node Plugin은 `poolReadiness.interval`마다 host root 아래의 정확한 Pool 경로가 기존
-directory인지 확인하고, 그 경로 안에서 임시 directory/file 생성, write, file sync와
-cleanup을 수행한 뒤 그 directory가 속한 filesystem에 capacity syscall을 실행한다. Pool
-경로 자체가 mount point일 필요는 없다. 결과는 `ShiftPVPool.status.conditions`의
-`Accessible`, `Writable`, `CapacityReadable`, `Ready`와 `lastProbeTime`,
-`observedGeneration`에 기록한다. 같은 상태의 반복 probe는 condition transition time을
-변경하지 않는다. 이전 node image가 기록한 `Mounted` condition은 다음 reconcile에서 제거한다.
+    Pod->>Scheduler: first consumer
+    Scheduler->>Provisioner: selected topology
+    Provisioner->>Controller: CreateVolume
+    Controller->>Pool: Ready + limit + reservations
+    Controller->>Helper: statfs
+    Helper-->>Controller: available bytes
+    Controller->>Controller: durable reservation
+    Controller->>Helper: mkdir volumes/<id>
+    Controller->>Controller: ShiftPVVolume(owner)
+    Controller-->>Provisioner: volume + accessible topology
+```
 
-Controller는 node-local path에 직접 접근하지 않는다. statfs와 directory 생성은 등록 Pool을
-mount한 일회성 helper Pod가 수행한다. reservation ConfigMap은 Helm resource가 아니며 같은
-namespace 재설치 후에도 남는다.
+| 단계 | 영속 결과 |
+|---|---|
+| Identity | request name의 SHA-256으로 filesystem-safe volume ID 생성 |
+| Readiness | 선택한 Pool의 `Accessible`, `Writable`, `CapacityReadable`, `Ready`가 현재 상태 |
+| Capacity | requested bytes가 Pool reservation과 filesystem 여유를 모두 충족 |
+| Reservation | `<volume-id>` ConfigMap에 request, node, capacity를 멱등 기록 |
+| Directory | node-bound helper가 `<mountPath>/volumes/<volume-id>` 생성 |
+| Authority | `ShiftPVVolume.status.ownerNode`에 최초 owner 기록 |
+| Topology | mobility namespace는 등록 Pool node, 일반 namespace는 owner node 기록 |
+
+Pool 설정이나 capacity가 불명확하면 directory 생성 전에 admission을 닫는다. Kubernetes API
+throttling, timeout, unavailable은 재시도 가능한 `Unavailable`로 변환하고 request cancellation은
+원래 gRPC status를 유지한다.
+
+## Pool contract
+
+```text
+host /
+└── <ShiftPVPool.spec.mountPath>/
+    ├── volumes/<volume-id>/
+    └── .shiftpv/
+```
+
+| 규칙 | 결과 |
+|---|---|
+| 기존 absolute non-root directory | Pool candidate |
+| 현재 node에 Pool 하나 | owner 경계가 단일함 |
+| directory access 성공 | `Accessible=True` |
+| 임시 쓰기, sync, cleanup 성공 | `Writable=True` |
+| filesystem `statfs` 성공 | `CapacityReadable=True` |
+| 모든 최신 condition 성공 | `Ready=True` |
+| condition 실패 또는 stale | 신규 provisioning과 destination 선택 대기 |
+
+Pool path는 immutable이고 node마다 다를 수 있다. Node Plugin은 `/host` mount에서 정확한 path를
+해석한다. 운영자가 directory와 filesystem lifecycle을 소유하고 chart와 Controller는 기존
+directory를 사용한다.
 
 ## Publish authorization
 
-`NodePublishVolume`은 RWO Filesystem, writable publish, 안전한 volume ID, kubelet
-pods 아래 target path인지 확인한다. 이어 `ShiftPVVolume.status`를 조회해 phase가
-`Ready`이고 owner가 현재 node이며 canonical source directory가 실제로 있을 때만 bind
-mount한다. 상태 조회 실패, `Moving`, `Blocked`, owner 불일치는 즉시 fail-closed다.
-`Moving`에서 CSI 호출을 장시간 유지하지 않는다. Controller가 workload를 scheduling gate
-아래 두고 destination data promotion과 owner commit 뒤에 release하므로 정상 이동의 publish는
-`Ready` owner에서 재시도된다. 이 경계의 근거는
-[node publish 검증](../validation/node-publish-wait-rejection-2026-09-05.md)에 기록한다.
+```mermaid
+flowchart TD
+    REQ[NodePublishVolume] --> CAP{RWO Filesystem이며<br/>writable target인가?}
+    CAP -->|yes| PATH{target이 kubelet<br/>pods root 아래인가?}
+    PATH -->|yes| STATE{Volume Ready이며<br/>이 node가 owner인가?}
+    STATE -->|yes| DIR{canonical source<br/>directory가 있는가?}
+    DIR -->|yes| MOUNT[bind mount]
+    CAP -->|no| DENY[reject]
+    PATH -->|no| DENY
+    STATE -->|no| DENY
+    DIR -->|no| DENY
+```
 
-동시에 들어오는 `NodePublishVolume`도 요청마다 현재 `ShiftPVVolume`을 한 번 읽고 독립적으로
-승인 또는 즉시 거부한다. CSI 요청별 polling goroutine이나 Kubernetes watch는 만들지 않는다.
+`NodePublishVolume`은 요청마다 현재 `ShiftPVVolume` authority를 읽는다. Moving, Blocked, unknown,
+non-owner 상태는 즉시 publication을 닫는다. Placement coordination은 owner commit 뒤 destination
+Pod를 해제한다. CSI 호출은 bounded이며 polling loop나 Kubernetes watch를 소유하지 않는다.
 
-successful publish/unpublish는 `publishedNodes`를 갱신한다. 같은 node의 Pod 교체 중에는
-여러 kubelet target이 잠시 겹칠 수 있으므로 volume별 publish/unpublish를 직렬화하고 실제
-mount reference가 하나도 남지 않은 뒤에만 node를 제거한다. 이 값은 이동 전 실제 unpublish와
-이동 후 publish를 확인하는 관찰값이며, owner 권한을 대신하지 않는다.
+성공한 publish/unpublish는 `publishedNodes`를 갱신한다. Per-volume serialization과 실제 mount
+reference로 Pod 교체 중 겹치는 kubelet target을 처리한다. Owner field가 authority의 source of
+truth다.
 
-Node Plugin은 node마다 다른 Pool path를 지원하기 위해 privileged DaemonSet 안의 `/host`에
-host root를 mount하고, 현재 node의 immutable `ShiftPVPool.spec.mountPath`를 그 아래에서
-해석한다. 일반 directory와 별도 filesystem의 mount directory를 모두 지원하지만 `/`와 상대
-path, 누락, non-directory 또는 중복 node 등록은 fail-closed다. 없는 Pool directory를
-자동 생성하지 않는다. 따라서 Pool CR 쓰기 권한은 storage operator에게만 제한해야 한다.
-
-Pool readiness가 False 또는 stale이어도 기존 volume의 owner나 mount를 자동 변경하거나
-unmount하지 않는다. 기존 publish는 live Volume authority와 실제 source directory 검사를
-계속 사용한다. readiness는 새 provisioning과 새 이동 destination 선택만 차단한다.
-
-`/host` mount는 `HostToContainer` propagation을 사용한다. Node Plugin이 재시작될 때
-기존 kubelet volume mount가 `/host`의 private mount namespace에 남으면 실제 target을
-unmount한 뒤에도 디렉터리 제거가 `EBUSY`로 실패할 수 있기 때문이다. kubelet target
-mount는 별도의 `Bidirectional` mount로 host에 unpublish를 전달하고, `/host`는 그
-host-side mount/unmount 변화를 다시 수신한다.
-
-## Performance boundary
-
-정상 publish 뒤 애플리케이션 I/O는 node-local bind mount를 통해 등록된 filesystem으로
-직접 전달된다. ShiftPV Controller, CSI sidecar와 network copy 경로는 정상 read/write에
-참여하지 않는다. 따라서 정상 I/O의 throughput, latency, durability는 Pool filesystem,
-underlying device, mount option, encryption과 workload I/O pattern의 특성이다. ShiftPV는
-이 값에 대한 수치 SLO를 제공하지 않는다.
-
-CSI lifecycle 성능은 데이터 경로와 별도로 판단한다.
-
-- provisioning latency는 PVC/consumer 생성부터 WFFC scheduling, external-provisioner의
-  `CreateVolume`, statfs helper, directory helper, PV bind와 첫 Pod Ready까지를 포함한다.
-- republish latency는 새 Pod 생성부터 `NodePublishVolume`과 Pod Ready까지다. 기존 Pod의
-  termination grace와 workload shutdown 시간은 별도 측정한다.
-- Controller, Node Plugin과 sidecar의 chart 기본 resources는 비어 있다. Kubernetes가
-  보장하는 request/limit가 필요하면 운영자가 `controller.resources`, `node.resources`,
-  `sidecars.*.resources`를 명시해야 한다.
-- 성능 결과에는 Kubernetes 버전, node CPU/memory, 실제 Pool path/device/filesystem,
-  dataset 크기와 file count, cache 조건, 동시 workload와 표본 수를 함께 기록한다.
-
-측정된 성능은 제품 보장값이 아니라 해당 환경의 증거이며
-[dated validation](../validation/home-public-chart-performance-2026-09-05.md)에 기록한다.
+Node Plugin은 host root를 `HostToContainer`, kubelet target을 `Bidirectional` propagation으로
+mount한다. Node Plugin 재시작 전후 host와 plugin mount namespace가 일치한다.
 
 ## Idempotency and deletion
 
-- 같은 `CreateVolume` 재시도는 ConfigMap과 `ShiftPVVolume`의 최초 owner가 같을 때 같은
-  ID와 namespace opt-in 규칙에 따른 topology를 반환한다.
-- Kubernetes API의 timeout, server unavailable, throttling은 `Unavailable`로
-  반환한다. 호출 context의 deadline/cancellation은 해당 gRPC code를 유지한다.
-- reservation이나 `ShiftPVVolume` 생성·삭제의 응답이 유실되어 실제 반영 여부가 모호해도
-  다음 CSI 재시도는 남은 두 기록을 각각 확인해 동일 결과로 수렴한다. reservation은 이미
-  없지만 `ShiftPVVolume`이 남은 부분 삭제도 현재 owner에서 directory delete를 반복한 뒤
-  Volume 상태를 제거한다.
-- helper Pod가 directory 작업 중 실패하면 외부 파일시스템의 일시 장애로 취급해
-  `Unavailable`을 반환한다. Create 실패는 reservation을, Delete 실패는
-  reservation과 directory를 보존해 다음 CSI 재시도가 같은 상태에서 계속된다.
-- 제공 chart는 Controller replica를 1개로 고정한다. Controller는 같은 volume
-  ID의 Create/Delete lifecycle을 직렬화한다. 신규 reservation admission은 같은 Pool에서
-  직렬화하고 서로 다른 Pool은 병렬 처리한다.
-- 이미 올바르게 mount된 target publish와 이미 unmount된 unpublish는 성공한다.
-- `DeleteVolume`은 dynamic owner node에서 directory를 제거한 다음 reservation과
-  `ShiftPVVolume`을 제거한다. phase가 `Ready`가 아니거나 `activeMove`가 남아 있으면
-  data 삭제를 거부한다. reservation과 `ShiftPVVolume`이 모두 없을 때만 이미 완료된
-  삭제로 성공한다.
-- 제공 chart의 StorageClass는 `Retain` 고정이므로 PVC/PV 삭제 경로에서
-  `DeleteVolume`은 자동 호출되지 않는다.
+| 작업 상태 | Reconcile 결과 |
+|---|---|
+| 동일한 `CreateVolume` 재요청 | 같은 volume ID와 topology 반환 |
+| 같은 reservation의 다른 request | `AlreadyExists` |
+| reservation 또는 Volume 일부 생성 | 영속 상태에서 계속 진행 |
+| 이미 published target | 성공 |
+| 이미 unpublished target | 성공 |
+| active Move가 없는 Ready volume | owner directory, reservation, Volume state 순서로 삭제 |
+| Moving 또는 Blocked volume | data와 state 보존 |
+| 재시도 가능한 directory 실패 | metadata를 보존하고 같은 단계 재시도 |
+| reservation과 Volume 모두 없음 | 삭제 완료 |
 
-Mobility는 source unpublish 뒤 실제 volume directory bytes를 한 번 측정하고, destination Pool의
-총예약과 `statfs` 여유를 복사 전에 승인한다. 승인된 진행 중 Move는 destination의 논리·물리
-예약으로 계산되며 결과는 Move status에 남는다. 공간 부족은 copy Job과 owner commit 전에
-Move를 `Blocked`로 전환하고 source recovery를 허용한다. `DeleteVolume`이 Volume state와
-reservation을 모두 제거한 뒤 남는 terminal Move는 audit 기록일 뿐 capacity를 예약하거나
-후속 provisioning·이동을 막지 않는다. 둘 중 하나만 남은 불완전 상태는 fail-closed다.
+Volume별 Create/Delete와 Pool별 capacity admission은 직렬화한다. 서로 다른 Pool은 독립적으로
+진행한다. Chart는 Controller replica를 하나로 고정한다.
 
-검증 방법은 [development testing](../development/testing.md), 실행 결과는
-[validation evidence](../validation/README.md)를 따른다.
+StorageClass의 `Retain` 정책에 따라 일반 PVC 삭제는 Released PV, owner data와 reservation을 유지한다.
+폐기할 PV의 reclaim policy를 `Delete`로 바꾸고 PVC가 해제되면 external-provisioner가 `DeleteVolume`을 호출한다.
+대상 확인과 완료 조건은 [Retained volume 폐기 절차](../../charts/shiftpv/README.md#retire-a-retained-volume)를 따른다.
+
+## Performance boundary
+
+```text
+정상 I/O: Pod ↔ bind mount ↔ Pool filesystem ↔ device
+이동:     source Pool ↔ authenticated rsync ↔ destination Pool
+```
+
+정상 I/O의 throughput, latency와 durability는 Pool filesystem, device, mount option, encryption과
+workload pattern을 따른다. CSI lifecycle 측정은 provisioning과 republish를 포함한다. 이동 측정은
+dataset size, file count, cache state, network와 destination publish time도 함께 기록한다. 환경별 측정값은
+제품 SLO로 간주하지 않는다.
