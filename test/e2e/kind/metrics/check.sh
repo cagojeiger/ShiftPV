@@ -26,6 +26,9 @@ wait_query() {
 
 wait_query 'count(up{job="shiftpv"} == 1) == 3'
 wait_query 'count(up{shiftpv="true",namespace="shiftpv-system"} == 1) == 3'
+wait_query 'count(up{shiftpv="true",cluster=~".*",namespace="shiftpv-system"} == 1) == 3'
+wait_query 'absent(time() - (vector(0) > 0)) == 1'
+wait_query '(time() - (vector(time() - 30) > 0)) == 30'
 wait_query 'count(shiftpv_pool_filesystem_available_bytes > 0) == 2'
 wait_query 'count(shiftpv_pool_ready == 1) == 2'
 wait_query 'count(shiftpv_pool_accounting_valid == 1) == 2'

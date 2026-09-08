@@ -64,6 +64,9 @@ func TestDashboardContract(t *testing.T) {
 			}
 		}
 		for _, target := range panel.Targets {
+			if panel.ID == 2 && (!strings.HasPrefix(target.Expr, "time() - (") || !strings.HasSuffix(target.Expr, " > 0)")) {
+				t.Fatal("snapshot age must exclude never-observed timestamp zero")
+			}
 			for _, label := range []string{`shiftpv="true"`, `cluster=~"${cluster:regex}"`, `namespace=~"${namespace:regex}"`} {
 				if !strings.Contains(target.Expr, label) {
 					t.Fatalf("unscoped query: %s", target.Expr)

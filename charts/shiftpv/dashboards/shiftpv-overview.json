@@ -180,7 +180,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Snapshot age · seconds",
-      "description": "Age since last successful observation, including preserved values after failures. A timestamp of zero means no successful observation yet. Compare with configured metadata / Pool probe intervals.",
+      "description": "Age since last successful observation, including preserved values after failures. Before the first success this panel has No data; check Snapshot result for failure. Compare with configured metadata / Pool probe intervals.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -230,7 +230,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"}",
+          "expr": "time() - (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} > 0)",
           "legendFormat": "{{pod}} / {{source}}",
           "range": true
         }

@@ -87,7 +87,7 @@ Dashboard ConfigMap은 기본 false이며 Grafana를 설치하지 않는다. 활
 생성된다. Grafana sidecar가 해당 namespace를 감시하도록 설정한다.
 ServiceMonitor는 target에 `shiftpv="true"`를 추가한다. 직접 scrape하는 구성도 이 target label을
 추가한다. Cluster·Namespace·Pool 변수를 제공하며 cluster label이 없는 단일 Prometheus에서는
-Cluster를 All로 사용한다. Pool 선택은 capacity panel에만 적용된다.
+Cluster를 All로 사용한다. Pool 선택은 Pool 상태·용량 panel에만 적용된다.
 
 | Panel 묶음 | 운영 질문 |
 |---|---|
