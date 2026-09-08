@@ -17,8 +17,7 @@ ShiftPV/
 ├── docs/
 │   ├── adr/
 │   ├── development/
-│   ├── spec/
-│   └── validation/
+│   └── spec/
 ├── src/
 │   ├── cmd/
 │   │   ├── controller/

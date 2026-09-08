@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
-ADR은 구조적 결정과 그 결과만 기록한다. 동작 계약은 [`spec/`](../spec/README.md), 실행 증거는
-[`validation/`](../validation/README.md)가 소유한다.
+ADR은 구조적 결정과 그 결과만 기록한다. 동작 계약은 [`spec/`](../spec/README.md), 현재 검증 기준은
+[`development/testing.md`](../development/testing.md)가 소유한다.
 
 ```mermaid
 flowchart LR

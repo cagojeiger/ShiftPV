@@ -7,5 +7,5 @@
 | [source-layout.md](source-layout.md) | source tree와 package 경계 |
 | [testing.md](testing.md) | 로컬 검사, CI와 E2E 실행 기준 |
 
-제품 동작은 [`spec/`](../spec/README.md), 설계 이유는 [`adr/`](../adr/README.md),
-실행 결과는 [`validation/`](../validation/README.md)을 따른다.
+제품 동작은 [`spec/`](../spec/README.md), 설계 이유는 [`adr/`](../adr/README.md), 현재 commit의
+검증 결과는 required CI job을 따른다.

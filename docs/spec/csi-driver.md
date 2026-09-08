@@ -164,5 +164,5 @@ retained data를 정리한 뒤 명시적 retirement 경로가 CSI deletion을 �
 
 정상 I/O의 throughput, latency와 durability는 Pool filesystem, device, mount option, encryption과
 workload pattern을 따른다. CSI lifecycle 측정은 provisioning과 republish를 포함한다. 이동 측정은
-dataset size, file count, cache state, network와 destination publish time도 함께 기록한다. 실행 결과는
-[Validation](../validation/README.md)에 남긴다.
+dataset size, file count, cache state, network와 destination publish time도 함께 기록한다. 환경별 측정값은
+제품 SLO로 간주하지 않는다.

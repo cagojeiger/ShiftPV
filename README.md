@@ -62,7 +62,8 @@ owns disks, filesystems, encryption, mounts, and backup.
 
 | Requirement | Value |
 |---|---|
-| Kubernetes | 1.35+ |
+| Chart compatibility | Kubernetes 1.35+ |
+| Automated E2E baseline | Kubernetes 1.35.8 |
 | Nodes | Linux |
 | Node access | Privileged DaemonSet with HostPath |
 | Pool | Existing writable absolute non-root directory |
@@ -109,16 +110,8 @@ the [Helm chart guide](charts/shiftpv/README.md).
 
 ## Support boundary
 
-| Capability | Ownership |
-|---|---|
-| Planned movement from a healthy cordoned node | ShiftPV |
-| Replication, HA, unavailable-node failover | External storage architecture |
-| Snapshot and backup | External data-protection system |
-| RWO Filesystem | ShiftPV |
-| RWX, raw block, volume expansion | Current scope outside ShiftPV |
-| Pool-wide admission | ShiftPV |
-| Per-volume filesystem quota | Filesystem or external quota manager |
-| Existing PV migration | Workload-specific migration procedure |
+The authoritative support matrix is maintained in the
+[current product contracts](docs/spec/README.md#current-scope).
 
 ## Documentation
 
@@ -126,14 +119,13 @@ the [Helm chart guide](charts/shiftpv/README.md).
 |---|---|
 | Why is the architecture shaped this way? | [ADR](docs/adr/README.md) |
 | What behavior does the product guarantee? | [Specifications](docs/spec/README.md) |
+| How is ShiftPV installed and operated? | [Helm chart guide](charts/shiftpv/README.md) |
 | How is the source changed and tested? | [Development](docs/development/README.md) |
-| What has run in real environments? | [Validation evidence](docs/validation/README.md) |
 
 ## Status
 
 Early `dev-v1` product. CI covers unit, race, Linux mount, Helm, CSI, mobility,
-node-restart, and Argo CD lifecycle paths. Dated environment evidence remains in
-`docs/validation/`.
+node-restart, and Argo CD lifecycle paths.
 
 ## License
 

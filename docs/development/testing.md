@@ -179,6 +179,4 @@ Kind 검증용이며 독립 제품 버전 대신 component 버전을 담는다.
 
 Smoke test는 GitHub Pages chart와 [`versions.env`](../../test/e2e/kind/artifact/versions.env)의
 digest-pinned 공개 image를 설치한다. PR CI는 lock 형식과 불변성을 검사하고 scheduled/manual workflow는
-동적인 공개 가용성과 배포된 upgrade 경로를 검증한다.
-
-날짜별 실행 결과는 commit CI를 보완한다. [Validation evidence](../validation/README.md)에서 확인한다.
+동적인 공개 가용성과 배포된 upgrade 경로를 검증한다. 현재 commit의 판정은 required CI job으로 확인한다.

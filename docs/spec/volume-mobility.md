@@ -322,5 +322,5 @@ Move status에 저장한다. Owner commit 응답이 유실되면 destination, Re
 
 Workload controller가 replacement를 만들지 않거나 scheduler resource가 부족하면 waiting phase가 계속된다.
 Reservation 삭제와 workload Hold 해제 사이에 capacity가 선점되면 destination owner를 유지하고 source
-cleanup은 destination publish까지 대기한다. Runtime과 restart 실행 증거는
-[Validation](../validation/README.md)에 있다.
+cleanup은 destination publish까지 대기한다. Runtime과 restart 검증 방법은
+[Testing](../development/testing.md)에 있다.
