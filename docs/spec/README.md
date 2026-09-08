@@ -7,6 +7,7 @@
 | [csi-driver.md](csi-driver.md) | CSI RPC, topology, provision/publish와 mount 동작 |
 | [storage-class.md](storage-class.md) | StorageClass, 기본 클래스 설정과 용량 의미 |
 | [volume-mobility.md](volume-mobility.md) | 정상 cordon cold migration과 안전 경계 |
+| [metrics.md](metrics.md) | Pool·이동·CSI 관측 지표와 freshness |
 
 ## Current scope
 

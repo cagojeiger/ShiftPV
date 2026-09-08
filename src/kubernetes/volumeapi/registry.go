@@ -236,6 +236,15 @@ func (r *Registry) SetPublished(ctx context.Context, volumeID, nodeName string, 
 }
 
 func (r *Registry) Pools(ctx context.Context) ([]Pool, error) {
+	pools, err := r.ListPools(ctx)
+	if err == nil && len(pools) == 0 {
+		return nil, fmt.Errorf("%w: no ShiftPVPool nodes are registered", ErrPoolConfiguration)
+	}
+	return pools, err
+}
+
+// ListPools permits an empty registry for read-only inventory.
+func (r *Registry) ListPools(ctx context.Context) ([]Pool, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
 	}
@@ -260,9 +269,6 @@ func (r *Registry) Pools(ctx context.Context) ([]Pool, error) {
 		result = append(result, pool)
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].NodeName < result[right].NodeName })
-	if len(result) == 0 {
-		return nil, fmt.Errorf("%w: no ShiftPVPool nodes are registered", ErrPoolConfiguration)
-	}
 	return result, nil
 }
 

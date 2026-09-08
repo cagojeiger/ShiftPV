@@ -18,6 +18,7 @@ import (
 	nodecsi "github.com/cagojeiger/ShiftPV/src/csi/node"
 	csiserver "github.com/cagojeiger/ShiftPV/src/csi/server"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/metrics"
 	shiftmount "github.com/cagojeiger/ShiftPV/src/node/mount"
 	poolreadiness "github.com/cagojeiger/ShiftPV/src/pool/readiness"
 )
@@ -31,6 +32,7 @@ func main() {
 		hostRoot              = flag.String("host-root", "/host", "host filesystem root mounted into the node plugin")
 		targetRoot            = flag.String("target-root", "/var/lib/kubelet/pods", "allowed kubelet publish target root")
 		poolReadinessInterval = flag.Duration("pool-readiness-interval", time.Minute, "interval between local Pool mount and write probes")
+		metricsAddress        = flag.String("metrics-listen-address", "", "metrics HTTP address; empty disables observation")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -62,6 +64,12 @@ func main() {
 	readinessReconciler := &poolreadiness.Reconciler{
 		NodeName: *nodeName, Pools: registry, Inspector: poolreadiness.NewProbe(*hostRoot), Interval: *poolReadinessInterval,
 	}
+	var exporter *metrics.Exporter
+	if *metricsAddress != "" {
+		exporter = metrics.New("filesystem")
+		exporter.Start(ctx, *metricsAddress)
+		readinessReconciler.Observe = exporter.ObservePool
+	}
 
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
 	errCh := make(chan error, 2)
@@ -70,7 +78,7 @@ func main() {
 		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {
 			csi.RegisterIdentityServer(server, identityService)
 			csi.RegisterNodeServer(server, nodeService)
-		})
+		}, exporter.ServerOptions()...)
 	}()
 	select {
 	case <-ctx.Done():

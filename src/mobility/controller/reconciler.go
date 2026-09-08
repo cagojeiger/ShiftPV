@@ -42,16 +42,17 @@ type CapacityProbe interface {
 }
 
 type Reconciler struct {
-	Client        kubernetes.Interface
-	Repository    Repository
-	CapacityProbe CapacityProbe
-	PoolLocks     *poolcapacity.Locker
-	Namespace     string
-	HelperImage   string
-	Interval      time.Duration
-	Now           func() time.Time
-	Recorder      record.EventRecorder
-	Wake          <-chan struct{}
+	Client           kubernetes.Interface
+	Repository       Repository
+	CapacityProbe    CapacityProbe
+	PoolLocks        *poolcapacity.Locker
+	Namespace        string
+	HelperImage      string
+	Interval         time.Duration
+	Now              func() time.Time
+	Recorder         record.EventRecorder
+	Wake             <-chan struct{}
+	ObserveDiscovery func(map[string]int, error)
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -107,7 +108,11 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	return errors.Join(reconcileErrors...)
 }
 
-func (r *Reconciler) discoverMoves(ctx context.Context) error {
+func (r *Reconciler) discoverMoves(ctx context.Context) (discoveryErr error) {
+	deferred := make(map[string]int)
+	if r.ObserveDiscovery != nil {
+		defer func() { r.ObserveDiscovery(deferred, discoveryErr) }()
+	}
 	volumes, err := r.Repository.ListVolumes(ctx)
 	if err != nil {
 		return err
@@ -153,6 +158,7 @@ func (r *Reconciler) discoverMoves(ctx context.Context) error {
 			return fmt.Errorf("preflight volume %s: %w", volumeID, err)
 		}
 		if !observed.FSM.PreconditionsValid {
+			deferred[observed.FSM.UnsafeReason]++
 			klog.V(2).Infof("deferred ShiftPV mobility for volume %s: %s", volumeID, observed.FSM.UnsafeReason)
 			continue
 		}

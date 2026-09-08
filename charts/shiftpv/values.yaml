@@ -2,12 +2,26 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+metrics:
+  enabled: false
+  port: 8080
+  snapshotInterval: 30s
+  dashboard:
+    enabled: false
+    labels:
+      grafana_dashboard: "1"
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 5s
+    additionalLabels: {}
+
 controller:
   replicas: 1
   logLevel: 2
   image:
     repository: ghcr.io/cagojeiger/shiftpv-controller
-    tag: 0.1.8
+    tag: 0.1.9
     pullPolicy: IfNotPresent
   resources: {}
 
@@ -15,7 +29,7 @@ mobility:
   enabled: true
   interval: 30s
   webhookPort: 9443
-  helperImage: ghcr.io/cagojeiger/shiftpv-controller:0.1.8
+  helperImage: ghcr.io/cagojeiger/shiftpv-controller:0.1.9
 
 node:
   # This must match the kubelet state root on every selected node.
@@ -24,7 +38,7 @@ node:
   logLevel: 2
   image:
     repository: ghcr.io/cagojeiger/shiftpv-node
-    tag: 0.1.4
+    tag: 0.1.5
     pullPolicy: IfNotPresent
   nodeSelector: {}
   tolerations: []

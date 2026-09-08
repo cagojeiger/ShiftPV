@@ -2,6 +2,36 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "port", "snapshotInterval", "serviceMonitor"],
+      "properties": {
+        "dashboard": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "labels"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        },
+        "enabled": {"type": "boolean"},
+        "port": {"type": "integer", "minimum": 1024, "maximum": 65535, "not": {"enum": [9808]}},
+        "snapshotInterval": {"type": "string", "pattern": "^[1-9][0-9]*(s|m)$"},
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "interval", "scrapeTimeout", "additionalLabels"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "interval": {"type": "string", "pattern": "^[1-9][0-9]*s$"},
+            "scrapeTimeout": {"type": "string", "pattern": "^[1-9][0-9]*s$"},
+            "additionalLabels": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        }
+      }
+    },
     "controller": {
       "type": "object",
       "required": ["replicas", "image"],

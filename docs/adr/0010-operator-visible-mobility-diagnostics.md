@@ -15,6 +15,9 @@
 다음 안전 행동을 machine-readable 상태와 사람용 설명으로 함께 제공한다. 의미 있는 변화는
 Kubernetes Event로 보조한다.
 
+Prometheus 지표는 기존 관찰 결과의 읽기 전용 집계로 제공한다. 수집 요청은 메모리에 보존한
+결과를 사용하고, storage action의 승인과 상태 전이는 기존 controller와 CSI가 소유한다.
+
 ## Alternatives considered
 
 | 대안 | 절충점 |

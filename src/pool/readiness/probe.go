@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
 type Check struct {
@@ -23,6 +24,7 @@ type Result struct {
 	Accessible       Check
 	Writable         Check
 	CapacityReadable Check
+	Filesystem       poolcapacity.Filesystem
 }
 
 type Inspector interface {
@@ -33,7 +35,7 @@ type Probe struct {
 	HostRoot string
 	inspect  func(string) error
 	write    func(string) error
-	statFS   func(string) error
+	statFS   func(string) (poolcapacity.Filesystem, error)
 }
 
 func NewProbe(hostRoot string) *Probe {
@@ -41,8 +43,12 @@ func NewProbe(hostRoot string) *Probe {
 		HostRoot: hostRoot,
 		inspect:  inspectDirectory,
 		write:    writeProbe,
-		statFS: func(path string) error {
-			return syscall.Statfs(path, &syscall.Statfs_t{})
+		statFS: func(path string) (poolcapacity.Filesystem, error) {
+			var stat syscall.Statfs_t
+			if err := syscall.Statfs(path, &stat); err != nil {
+				return poolcapacity.Filesystem{}, err
+			}
+			return poolcapacity.ParseStatOutput(fmt.Sprintf("%d %d %d %d", stat.Blocks, stat.Bavail, stat.Bsize, stat.Ffree))
 		},
 	}
 }
@@ -65,9 +71,11 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 	} else {
 		result.Writable = Check{OK: true, Known: true, Reason: "Writable", Message: "temporary directory, write, sync, and cleanup succeeded"}
 	}
-	if err := p.statFS(path); err != nil {
+	stats, err := p.statFS(path)
+	if err != nil {
 		result.CapacityReadable = failure(err)
 	} else {
+		result.Filesystem = stats
 		result.CapacityReadable = Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "filesystem capacity is readable"}
 	}
 	return result

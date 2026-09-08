@@ -45,6 +45,61 @@ helm install shiftpv shiftpv/shiftpv \
 
 한 release는 kubelet root가 같은 node 집합을 담당한다. `node.nodeSelector`로 해당 집합을 선택한다.
 
+## Metrics
+
+```yaml
+metrics:
+  enabled: true
+  port: 8080
+  snapshotInterval: 30s
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 5s
+    additionalLabels:
+      release: kube-prometheus-stack
+```
+
+| 설정 | 동작 |
+|---|---|
+| 기본값 | metrics와 ServiceMonitor 모두 false |
+| metrics 활성화 | Controller/Node 내부 HTTP endpoint와 ClusterIP Service 두 개 |
+| ServiceMonitor 활성화 | 설치된 Prometheus Operator CRD 사용; `additionalLabels`를 Prometheus selector에 맞춤 |
+| Node 관측 주기 | 기존 `poolReadiness.interval` 사용 |
+| API 관측 주기 | `snapshotInterval`; timeout 10s |
+| 접근 | monitoring namespace에서 metrics port로 접근 허용; 외부 공개와 별개 |
+
+Endpoint는 인증 없는 내부 HTTP다. 네트워크 접근 범위는 운영 환경의 NetworkPolicy로 제한한다.
+ServiceMonitor를 사용하지 않는 Prometheus도 두 Service의 endpoint를 발견해 수집할 수 있다.
+Argo CD에서는 values를 Git으로 관리하고 Operator CRD를 먼저 설치한다.
+[지표 계약](../../docs/spec/metrics.md)은 논리 예약과 filesystem 여유를 구분한다.
+
+### Grafana dashboard
+
+| 배포 구성 | 설정 |
+|---|---|
+| 같은 cluster의 Grafana sidecar | `metrics.dashboard.enabled: true`; 기본 label `grafana_dashboard: "1"` |
+| Sidecar label 변경 | `metrics.dashboard.labels`를 Grafana selector에 맞춤 |
+| 중앙 Grafana | Chart의 `dashboards/shiftpv-overview.json`을 중앙 cluster의 dashboard ConfigMap으로 GitOps 관리 |
+| 수동 import | 동일 JSON을 import하고 Prometheus datasource 선택 |
+
+Dashboard ConfigMap은 기본 false이며 Grafana를 설치하지 않는다. 활성화 시 release namespace에
+생성된다. Grafana sidecar가 해당 namespace를 감시하도록 설정한다.
+ServiceMonitor는 target에 `shiftpv="true"`를 추가한다. 직접 scrape하는 구성도 이 target label을
+추가한다. Cluster·Namespace·Pool 변수를 제공하며 cluster label이 없는 단일 Prometheus에서는
+Cluster를 All로 사용한다. Pool 선택은 capacity panel에만 적용된다.
+
+| Panel 묶음 | 운영 질문 |
+|---|---|
+| 수집·관측 | endpoint가 살아 있고 마지막 관측이 최신인가? |
+| Filesystem | 지정 directory가 속한 filesystem의 byte·inode 여유는 얼마인가? |
+| 예약 | 논리 한도·예약량·Volume CR 없는 예약은 얼마인가? |
+| Mobility | 현재 Volume·연결된 Move·이동 보류 이유는 무엇인가? |
+| CSI | 완료 RPC의 빈도·non-OK 응답·p95 처리 시간은 얼마인가? |
+
+빈 데이터는 `No data`로 표시한다. 오래된 수치는 snapshot age와 함께 해석한다.
+Grafana는 관측 화면이며 알림 규칙과 PVC별 실제 사용량 측정은 별도 기능이다.
+
 ## Register Pools
 
 각 참여 node에 기존 writable directory를 가리키는 immutable Pool 하나를 선언한다.
