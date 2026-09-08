@@ -69,7 +69,7 @@ code는 gRPC status code다. 식별자·경로·오류 원문은 CR/Event/log에
 ## Freshness
 
 ```promql
-time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{source="filesystem"}
+time() - (shiftpv_metrics_snapshot_last_success_timestamp_seconds{source="filesystem"} > 0)
 shiftpv_metrics_snapshot_success == 0
 shiftpv_pool_accounting_valid == 0
 ```
