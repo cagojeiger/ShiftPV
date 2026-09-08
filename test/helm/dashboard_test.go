@@ -17,25 +17,28 @@ func TestDashboardContract(t *testing.T) {
 	var dashboard struct {
 		UID    string
 		Panels []struct {
-			ID                 int
-			Title, Description string
-			GridPos            struct{ X, Y, W, H int }
-			Datasource         struct{ UID string }
-			Targets            []struct{ Expr string }
+			ID                       int
+			Title, Description, Type string
+			GridPos                  struct{ X, Y, W, H int }
+			Datasource               struct{ UID string }
+			Targets                  []struct {
+				Expr           string
+				Instant, Range bool
+			}
 		}
 		Templating struct{ List []struct{ Name string } }
 	}
 	if err := json.Unmarshal(raw, &dashboard); err != nil {
 		t.Fatal(err)
 	}
-	if dashboard.UID != "shiftpv-overview" || len(dashboard.Panels) != 14 {
+	if dashboard.UID != "shiftpv-overview" {
 		t.Fatal("dashboard identity or panel contract changed")
 	}
 	variables := map[string]bool{}
 	for _, variable := range dashboard.Templating.List {
 		variables[variable.Name] = true
 	}
-	for _, name := range []string{"DS_PROMETHEUS", "cluster", "namespace", "pool"} {
+	for _, name := range []string{"DS_PROMETHEUS", "cluster", "namespace", "pool", "freshness"} {
 		if !variables[name] {
 			t.Fatalf("missing variable %s", name)
 		}
@@ -47,6 +50,9 @@ func TestDashboardContract(t *testing.T) {
 			t.Fatal("invalid panel ID")
 		}
 		ids[panel.ID] = true
+		if panel.Type == "row" {
+			continue
+		}
 		if panel.Description == "" || panel.Datasource.UID != "${DS_PROMETHEUS}" || len(panel.Targets) == 0 {
 			t.Fatalf("missing explanation, datasource or queries: %s", panel.Title)
 		}
@@ -64,7 +70,13 @@ func TestDashboardContract(t *testing.T) {
 			}
 		}
 		for _, target := range panel.Targets {
-			if panel.ID == 2 && (!strings.HasPrefix(target.Expr, "time() - (") || !strings.HasSuffix(target.Expr, " > 0)")) {
+			if panel.ID <= 5 && (!target.Instant || target.Range) {
+				t.Fatal("overview must use current instant values, not historical lastNotNull")
+			}
+			if panel.ID == 2 && (!strings.Contains(target.Expr, "> bool 0") || !strings.Contains(target.Expr, "${freshness}")) {
+				t.Fatal("observation status must include first-success and age guards")
+			}
+			if panel.ID == 14 && strings.Contains(target.Expr, "\"Age\"") && !strings.Contains(target.Expr, "> 0)") {
 				t.Fatal("snapshot age must exclude never-observed timestamp zero")
 			}
 			for _, label := range []string{`shiftpv="true"`, `cluster=~"${cluster:regex}"`, `namespace=~"${namespace:regex}"`} {
@@ -79,6 +91,17 @@ func TestDashboardContract(t *testing.T) {
 			if isPool != strings.Contains(target.Expr, "${pool:regex}") {
 				t.Fatal("pool filter scope mismatch")
 			}
+		}
+	}
+	for id, kind := range map[int]string{1: "stat", 2: "stat", 3: "stat", 4: "stat", 5: "table", 9: "table", 10: "table", 14: "table"} {
+		found := false
+		for _, panel := range dashboard.Panels {
+			if panel.ID == id {
+				found = panel.Type == kind
+			}
+		}
+		if !found {
+			t.Fatalf("panel %d must be %s", id, kind)
 		}
 	}
 	for _, metric := range []string{"pool_capacity_limit_bytes", "pool_reserved_bytes", "pool_unregistered_reserved_bytes",

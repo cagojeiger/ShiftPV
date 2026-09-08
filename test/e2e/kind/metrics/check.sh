@@ -46,11 +46,12 @@ for component in controller node; do
 done
 
 dashboard="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)/charts/shiftpv/dashboards/shiftpv-overview.json"
-expressions=$(jq -er '.panels[].targets[].expr
+expressions=$(jq -er '.panels[].targets[]?.expr
   | gsub("\\$\\{cluster:regex\\}"; ".*")
   | gsub("\\$\\{namespace:regex\\}"; "shiftpv-system")
   | gsub("\\$\\{pool:regex\\}"; ".*")
-  | gsub("\\$__rate_interval"; "5m")' "${dashboard}")
+  | gsub("\\$__rate_interval"; "5m")
+  | gsub("\\$\\{freshness\\}"; "180")' "${dashboard}")
 while IFS= read -r expression; do
   query "${expression}" >/dev/null
 done <<< "${expressions}"

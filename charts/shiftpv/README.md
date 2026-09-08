@@ -87,17 +87,24 @@ Dashboard ConfigMap은 기본 false이며 Grafana를 설치하지 않는다. 활
 생성된다. Grafana sidecar가 해당 namespace를 감시하도록 설정한다.
 ServiceMonitor는 target에 `shiftpv="true"`를 추가한다. 직접 scrape하는 구성도 이 target label을
 추가한다. Cluster·Namespace·Pool 변수를 제공하며 cluster label이 없는 단일 Prometheus에서는
-Cluster를 All로 사용한다. Pool 선택은 Pool 상태·용량 panel에만 적용된다.
+Cluster를 All로 사용한다. `Driver namespace`는 ShiftPV 설치 namespace다.
+Pool 선택은 `Pool comparison` 구역에만 적용되며 나머지 구역은 설치 전체를 보여준다.
+`Observation window`는 화면의 관측 유효기간(기본 3분)이며 실제 Pool probe 주기보다 길게 선택한다.
+이 설정은 storage admission이나 지표 수집 주기를 변경하지 않는다.
 
 | Panel 묶음 | 운영 질문 |
 |---|---|
-| 수집·관측 | endpoint가 살아 있고 마지막 관측이 최신인가? |
-| Filesystem | 지정 directory가 속한 filesystem의 byte·inode 여유는 얼마인가? |
-| 예약 | 논리 한도·예약량·Volume CR 없는 예약은 얼마인가? |
-| Mobility | 현재 Volume·연결된 Move·이동 보류 이유는 무엇인가? |
-| CSI | 완료 RPC의 빈도·non-OK 응답·p95 처리 시간은 얼마인가? |
+| 상단 현재값 카드 | 발견된 target의 수집 상태, 관측 성공·freshness, 활성 Move, Blocked Volume |
+| Pool 비교표 | Ready, 예약 집계 상태, filesystem 여유, 예약·한도·Volume CR 없는 예약 |
+| 용량 추이 | filesystem 여유 비율, 예약 한도 사용 비율, inode 여유 |
+| 이동 현재값 표 | 0보다 큰 Volume 상태·이동 보류 사유 |
+| CSI 추이 | 완료 RPC 빈도·non-OK 응답·p95 처리 시간 |
+| 관측 상세표 | source별 상태와 마지막 성공 이후 경과 시간 |
 
-빈 데이터는 `No data`로 표시한다. 오래된 수치는 snapshot age와 함께 해석한다.
+현재값의 수집 실패·유효기간 초과는 `Unknown`으로 표시하고 상태는 문자와 색상을 함께 사용한다.
+상단 observation 상태는 오래된 관측을 `Attention`으로 표시한다. 추이에서는 유효하지 않은 구간이
+끊어진다. 빈 이동 표는 해당 항목 0건 또는 관측 불가일 수 있으므로 상단 관측 상태를 함께 본다.
+CSI 호출 전 빈 그래프는 `No data`다. 발견된 target 상태는 기대 target 전체가 존재한다는 보증과 구분한다.
 Grafana는 관측 화면이며 알림 규칙과 PVC별 실제 사용량 측정은 별도 기능이다.
 
 ## Register Pools

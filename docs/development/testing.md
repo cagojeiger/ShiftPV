@@ -43,6 +43,10 @@ make verify
 
 Coverage artifact는 `.tmp/coverage.out`과 `.tmp/coverage.txt`에 생성된다.
 
+Dashboard의 현재값·관측 유효기간·결측 처리는 `bash test/helm/dashboard/run.sh`로 검증한다.
+CI의 `verify` job은 `make verify` 다음 단계에서 이 명령을 실행한다. 전용 Prometheus에 합성 정상·실패·지연·첫 관측 전 데이터를
+생성하고 실제 dashboard PromQL 결과를 검사한다. 테스트 container는 종료 시 제거한다.
+
 메트릭스 비용은 `go test ./src/metrics -run TestCachedScrapeLatency -v -bench BenchmarkCachedScrape -benchmem`으로
 측정한다. 2 Pool / 100 Volume fixture의 cached HTTP p99 기준은 100ms이며 실제 workload I/O 성능과 구분한다.
 
