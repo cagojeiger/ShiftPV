@@ -1,43 +1,40 @@
 # ShiftPV Helm chart
 
-The chart installs one CSI controller Deployment, one CSI node DaemonSet, the
-required provisioner/registrar/liveness sidecars, `CSIDriver`, RBAC, and a
-chart-created StorageClass. With `mobility.enabled=true`, the same Controller
-Pod also runs the automatic cordon reconciler and HTTPS admission webhook. The
-StorageClass is not the cluster default unless explicitly enabled.
+Chart는 CSI runtime, StorageClass, admission endpoint, RBAC와 안전한 제거 lifecycle을 설치한다.
+Node Pool은 storage 운영자가 별도로 등록한다.
 
-Each selected node must already have a writable absolute directory declared by that
-node's `ShiftPVPool.spec.mountPath`. Paths may differ by node and may be ordinary
-directories on the root filesystem or directories on separate mounts. The chart never
-creates Pool directories or creates, formats, mounts, or repairs filesystems. ShiftPV uses
-each Pool's aggregate reservation limit and current containing-filesystem availability for
-new-volume admission, but does not enforce a per-volume write limit.
+```mermaid
+flowchart TB
+    H[Helm release] --> C[Controller Deployment]
+    H --> N[Node Plugin DaemonSet]
+    H --> SC[StorageClass]
+    H --> CSI[CSIDriver + RBAC + Services]
+    O[Storage operator] --> P[node별 ShiftPVPool]
+    P --> C
+    P --> N
+```
+
+## Install
 
 ```bash
 helm repo add shiftpv https://cagojeiger.github.io/ShiftPV
 helm repo update shiftpv
 helm install shiftpv shiftpv/shiftpv \
-  --namespace shiftpv-system --create-namespace
+  --namespace shiftpv-system --create-namespace \
+  --wait
 ```
 
-For repository development, replace `shiftpv/shiftpv` with
-`./charts/shiftpv`. Chart versions and component image versions are independent:
-the initial chart release was `0.1.0`; its defaults select the separately released
-controller and node images. Override those image values together only when
-testing an unpublished build.
-Published chart packages are gated until both default component image tags expose
-`linux/amd64` and `linux/arm64` manifests.
+Repository 개발에서는 `shiftpv/shiftpv` 대신 `./charts/shiftpv`를 사용한다. Chart, Controller,
+Node 버전은 독립적으로 release하고 공개 chart가 multi-architecture image tag를 선택한다.
 
 ### Kubelet state root
 
-`node.kubeletRootDir` must match the kubelet state root on every node selected by
-the Node Plugin DaemonSet. The value controls the CSI plugin socket,
-`plugins_registry`, and Pod volume target host paths. A mismatch can leave the CSI
-workloads Ready while application Pods remain in `FailedMount` because kubelet and
-the Node Plugin are operating on different directories.
+| Kubernetes 구성 | 값 |
+|---|---|
+| 일반 kubelet | `/var/lib/kubelet` |
+| MicroK8s | `/var/snap/microk8s/common/var/lib/kubelet` |
 
-The chart default is the conventional `/var/lib/kubelet`. MicroK8s normally uses
-`/var/snap/microk8s/common/var/lib/kubelet`, so install it with an explicit value:
+MicroK8s 설치:
 
 ```bash
 helm install shiftpv shiftpv/shiftpv \
@@ -46,15 +43,11 @@ helm install shiftpv shiftpv/shiftpv \
   --wait
 ```
 
-For an existing release, pass the same value to `helm upgrade`. The DaemonSet
-rollout is sufficient; a Pending Pod recovers on kubelet's normal mount retry once
-the Node Plugin uses the correct root. One release has one kubelet root. Standardize
-the root or exclude inconsistent nodes with `node.nodeSelector`; a single ShiftPV
-release cannot manage mixed kubelet roots.
+한 release는 kubelet root가 같은 node 집합을 담당한다. `node.nodeSelector`로 해당 집합을 선택한다.
 
-After installation, explicitly register one `ShiftPVPool` for every participating
-node before provisioning volumes. `spec.mountPath` is the runtime authority used
-by provisioning helpers, mobility Jobs, and the node plugin on that node.
+## Register Pools
+
+각 참여 node에 기존 writable directory를 가리키는 immutable Pool 하나를 선언한다.
 
 ```yaml
 apiVersion: shiftpv.io/v1alpha1
@@ -68,259 +61,230 @@ spec:
     limit: 500Gi
 ```
 
-`capacity.limit` is the total requested capacity that ShiftPV may reserve on that
-Pool. It is not the disk size and does not reserve space from other processes.
-The Node Plugin reports `Accessible`, `Writable`, `CapacityReadable`, and aggregate
-`Ready` conditions on the Pool. Wait for readiness before creating PVCs:
-
 ```bash
 kubectl wait --for=condition=Ready shiftpvpool/storage-worker-a --timeout=2m
 ```
 
-`poolReadiness.interval` controls the node-local probe and
-`poolReadiness.staleAfter` controls how long the Controller trusts its last success.
-Set `staleAfter` longer than `interval` with enough allowance for API delays; an
-equal or shorter value can make a healthy Pool intermittently unavailable.
-The probe verifies that the exact Pool path is an existing directory, then creates,
-syncs, and removes a small temporary file in it. The path itself does not need to be a
-mount point. A missing or non-directory path, read-only filesystem, permission failure,
-failed capacity syscall, outdated generation, or stale probe excludes the Pool from new
-provisioning and mobility without changing existing volume ownership.
-Pool CRs are cluster operating state; the Helm release does not create or own
-them. Because the privileged Node Plugin resolves these paths through a host-root
-mount, permission to create or change Pool CRs is security-sensitive and must be
-restricted to cluster storage operators. Root (`/`) is rejected.
+| Pool 신호 | Ready 계약 |
+|---|---|
+| Path | 기존 absolute non-root directory |
+| Access | directory lookup 성공 |
+| Write | 임시 create, sync, cleanup 성공 |
+| Capacity | filesystem `statfs` 성공 |
+| Freshness | 마지막 probe가 `poolReadiness.staleAfter` 안에 있음 |
+| Ownership | node마다 Pool 하나, path는 immutable |
+| Security | Pool CR 변경 권한은 storage operator에 한정 |
 
-For a Pool intended to be a separate mount, monitor that mount at the OS layer. If
-unmounting exposes another writable directory at the same path, ShiftPV cannot distinguish
-that fallback from an intentionally configured ordinary-directory Pool.
+`capacity.limit`는 PVC reservation 총량을 제어한다. Filesystem available bytes는 같은 filesystem의
+모든 writer를 포함한다. 별도 mount의 연속성은 OS monitoring이 담당하며 unmount 뒤 나타난 writable
+directory는 ShiftPV 관점에서 일반 directory와 같은 입력이다.
 
-Setting `storageClass.defaultClass=true` changes the default only for newly created
-PVCs. ShiftPV does not adopt PVs provisioned by an older hostPath StorageClass; migrate
-those workloads and data separately.
+Chart와 Controller는 Pool directory를 생성하지 않는다. Missing, non-directory, root(`/`), read-only,
+permission failure, stale probe는 신규 provisioning과 이동 후보에서 제외되며 기존 owner authority는
+유지된다. `storageClass.defaultClass=true`는 새 PVC의 default 선택만 바꾸고 기존 hostPath PV는 유지한다.
 
-Automatic mobility is opt-in per workload namespace. Label only namespaces whose
-controller-owned, single-PVC workloads follow the current mobility contract.
+## Configure
 
-ShiftPV does not cordon nodes. A cordon is a cluster-wide maintenance signal, so
-inspect other workloads and controllers that react to it before changing the node.
-Use a dedicated node or an approved maintenance window for mobility validation.
+| Value | 역할 | 기본값 |
+|---|---|---|
+| `controller.image.*` | Controller image | 공개 controller |
+| `controller.resources` | Controller resource 정책 | `{}` |
+| `node.image.*` | Node Plugin image | 공개 node |
+| `node.kubeletRootDir` | kubelet state root | `/var/lib/kubelet` |
+| `node.nodeSelector`, `node.tolerations` | 참여 node | empty |
+| `node.resources` | Node Plugin resource 정책 | `{}` |
+| `helperPod.*` | `sh`, `stat`, `du`, `awk`, `mkdir`, `rm`을 제공하는 helper | BusyBox, `2m` |
+| `poolReadiness.interval` | node-local probe 주기 | `1m` |
+| `poolReadiness.staleAfter` | Controller freshness window | `3m` |
+| `mobility.enabled`, `mobility.webhookPort` | cordon mobility와 admission endpoint | `true`, `9443` |
+| `mobility.interval` | event watch를 보완하는 safety interval | `30s` |
+| `mobility.helperImage` | rsync transfer image | controller image |
+| `lifecycle.uninstallMode` | Helm 또는 Argo CD 제거 owner | `helm` |
+| `storageClass.create`, `storageClass.name` | StorageClass 생성과 이름 | `true`, `shiftpv` |
+| `storageClass.defaultClass` | default-class annotation | `false` |
+| `sidecars.*` | CSI sidecar image와 resource | pinned image |
+
+`poolReadiness.staleAfter`는 한 번의 probe interval과 Kubernetes API 지연을 포함한다. 고정 driver
+이름과 cluster-scoped resource에 따라 cluster마다 ShiftPV release 하나를 운영한다.
+
+## Mobility and admission
 
 ```bash
 kubectl label namespace my-workload shiftpv.io/admission=enabled
 ```
 
-The placement webhook is registered only for labeled namespaces and uses
-`failurePolicy=Fail`. In those namespaces it pins a bound ShiftPV volume to its
-dynamic owner or applies a Placement Hold while moving. Volumes provisioned outside
-the opt-in boundary receive owner-only PV topology and do not depend on the
-webhook. The Controller Deployment is fixed to one replica with `Recreate`
-strategy so two mobility reconcilers do not overlap.
+| Namespace | PV topology | Pod admission |
+|---|---|---|
+| Opt-in | 등록된 Pool node | owner pin 또는 Placement Hold |
+| 일반 | 최초 owner만 | mobility webhook과 독립 |
 
-The Controller creates and reconciles the webhook TLS Secret, mobility
-`MutatingWebhookConfiguration`, and lifecycle `ValidatingWebhookConfiguration`;
-Helm renders only the stable webhook Service.
-It checks once per minute, renews the 90-day serving certificate 30 days before
-expiry, and rotates the ten-year CA one year before expiry. TLS handshakes read the
-latest in-memory certificate, so renewal does not require a Pod restart. During CA
-rotation the old and new CA are temporarily published together before trust is
-converged to the new CA. If the Secret is lost, the Controller recovers the old
-trust root from the current webhook configuration before switching certificates.
-These periods are fixed product contracts rather than chart values.
+Controller는 replica 하나와 `Recreate` strategy로 실행한다. 기존 node cordon을 관찰하고
+[mobility preflight](../../docs/spec/volume-mobility.md#non-disruptive-preflight)를 거쳐 각 transaction을
+`ShiftPVMove`에 기록한다.
 
-### Recovery
+ShiftPV는 Node를 cordon하지 않는다. Cordon은 cluster-wide maintenance 신호이므로 운영자가 다른
+workload 영향과 maintenance window를 확인한다. Blocked 이동은 현재 owner를 검증하는
+[ResumeOwner 절차](../../docs/spec/volume-mobility.md#explicit-owner-recovery)로 복구한다.
 
-The source-tree controller checks live Pod and ReplicaSet/StatefulSet template
-constraints, destination taints/PV topology, and PDB allowance before locking or
-first eviction. A known-ineligible workload is left running and reevaluated;
-this does not reserve scheduler capacity or guarantee eventual scheduling.
-See the [preflight contract](../../docs/spec/volume-mobility.md#non-disruptive-preflight).
-The chart grants read-only `get` on ReplicaSets/StatefulSets and `list` on PDBs.
-Use a matching new controller build and apply the CRD including `consumerUID`;
-upgrade only with no active moves. Published older binaries do not gain this behavior
-from chart/RBAC changes alone.
+### Webhook certificates
 
-The source-tree controller supports explicit `ShiftPVMove.spec.recovery=ResumeOwner`
-on a Blocked move. It verifies and reopens the current owner; it never rolls a
-committed destination back to the stale source. See the
-[recovery contract and operating procedure](../../docs/spec/volume-mobility.md#explicit-owner-recovery).
-Use a matching controller/helper image when testing this source tree: changing a
-chart or CRD alone does not add recovery to an older published binary.
+```mermaid
+flowchart LR
+    C[Controller] --> S[TLS Secret]
+    S --> M[Mobility webhook]
+    S --> L[Lifecycle webhook]
+    C --> R[renew / rotate]
+    R --> S
+```
 
-### Upgrade from chart 0.1.3 or earlier
+| Material | 유효 기간 | 교체 시점 |
+|---|---:|---:|
+| Serving certificate | 90 days | 30 days before expiry |
+| CA | 10 years | 1 year before expiry |
 
-The capacity contract makes `ShiftPVPool.spec.capacity.limit` required. Upgrade
-in this order so the new controller never observes the old Pool shape:
+Controller는 매분 certificate resource를 reconcile하고 Pod 재시작 없이 새 인증서를 제공한다. CA
+교체는 trust bundle을 겹쳐 공개한 뒤 수렴한다. Secret 유실 시 webhook configuration의 active trust
+root로 복구한다. 기간은 제품 상수다.
 
-1. Apply the target CRDs and explicitly take ownership from the Helm field
-   manager. Never delete and recreate a CRD.
-2. Add a capacity limit to every existing Pool. Choose a limit no larger than
-   the storage allocation that operators intend ShiftPV to reserve on that
-   containing filesystem.
-3. Upgrade the Helm release and wait for the Controller and Node Plugin.
+`mobility.enabled=false`는 HTTPS resource를 유지하고 `failurePolicy=Ignore`와 항상 false인 match
+condition으로 placement admission을 inert 상태로 둔다.
 
-Set `TARGET_CHART_VERSION` to the chart being installed from the repository:
+## Upgrade
 
-```sh
+```mermaid
+flowchart LR
+    CRD[target CRD 적용] --> POOL[Pool schema 완성]
+    POOL --> HELM[Helm upgrade]
+    HELM --> READY[Controller + Node Ready 대기]
+```
+
+```bash
 TARGET_CHART_VERSION=x.y.z
 helm repo update shiftpv
 helm show crds shiftpv/shiftpv --version "${TARGET_CHART_VERSION}" | \
   kubectl apply --server-side --field-manager=shiftpv-crds \
     --force-conflicts -f -
+
+helm upgrade shiftpv shiftpv/shiftpv \
+  --version "${TARGET_CHART_VERSION}" \
+  --namespace shiftpv-system --values shiftpv-values.yaml \
+  --wait
 ```
 
-For a local chart checkout, the equivalent CRD command is:
+Local checkout은 같은 순서를 현재 chart에 적용한다.
 
-```sh
+```bash
 helm show crds ./charts/shiftpv | \
   kubectl apply --server-side --field-manager=shiftpv-crds \
     --force-conflicts -f -
-```
-
-Then repair every Pool:
-
-```sh
-kubectl get shiftpvpools.shiftpv.io -o name
-kubectl patch shiftpvpool <pool-name> --type=merge \
-  -p '{"spec":{"capacity":{"limit":"500Gi"}}}'
-```
-
-Upgrade using the same values file used to install the release:
-
-```sh
-helm upgrade shiftpv shiftpv/shiftpv \
-  --version "${TARGET_CHART_VERSION}" \
-  --namespace shiftpv-system --values shiftpv-values.yaml --wait
-```
-
-For a local chart checkout, use:
-
-```sh
 helm upgrade shiftpv ./charts/shiftpv \
   --namespace shiftpv-system --values shiftpv-values.yaml --wait
 ```
 
-Repeat the patch for every Pool before the Helm upgrade. The new controller
-fails closed for provisioning and moves when a Pool has no valid limit. Helm's
-`crds/` installation path does not upgrade existing CRDs; `--force-conflicts`
-is intentional because the initial Helm installation owns `.spec.versions`.
+Helm은 설치된 CRD를 보존하므로 새 Controller보다 schema를 먼저 적용한다. Chart 0.1.3 이하에서
+upgrade할 때는 Helm 단계 전에 모든 Pool에 `spec.capacity.limit`도 추가한다.
 
-Do not disable mobility or downgrade to a controller without recovery support while recovery is
-in progress; confirm `recoveryPhase=Recovered` and `activeMove` empty first.
+```bash
+kubectl patch shiftpvpool <pool-name> --type=merge \
+  -p '{"spec":{"capacity":{"limit":"500Gi"}}}'
+```
 
-Inspect mobility without starting from Controller logs:
+Upgrade window는 모든 `activeMove`가 비어 있고 recovery journal이 완료된 상태에서 시작한다. CRD는
+삭제·재생성하지 않으며 `--force-conflicts`로 최초 Helm field ownership을 명시적으로 인수한다.
 
-```sh
+## Operate
+
+```bash
+kubectl get shiftpvpools
+kubectl get shiftpvvolumes
 kubectl get shiftpvmoves
 kubectl get shiftpvmove <move-name> -o yaml
 kubectl get events -n default \
   --field-selector involvedObject.kind=ShiftPVMove,involvedObject.name=<move-name>
 ```
 
-`Reason`, `message`, `lastTransitionTime`, and `lastProgressTime` distinguish an
-automatically retried wait from a terminal `Blocked` move and show the next safe
-operator action. Events are emitted only after a phase, reason, or recovery status
-change; CR status remains the current source of truth. These timestamps do not
-trigger timeout rollback. Cluster-scoped Move events are stored in the `default`
-namespace by the Kubernetes Event API.
+Cluster-scoped Move Event는 Kubernetes Event API의 `default` namespace에 기록된다. Status가 source of
+truth이며 timestamp는 관측과 알림을 위한 값이다.
 
-Changing `mobility.enabled` from `true` to `false` stops the mobility reconciler
-but keeps the webhook Service, TLS Secret, HTTPS endpoint, and webhook
-configuration. The Controller makes that configuration inert with a match
-condition that is always false and changes `failurePolicy` to `Ignore`. This
-avoids a Service/configuration deletion-order dependency in Helm and Argo CD.
-Re-enabling mobility restores `failurePolicy=Fail` and removes the disabling
-condition. The Controller refuses to update same-named certificate resources
-without ShiftPV managed labels and expected owner references.
-
-The CSI driver name, topology key, `WaitForFirstConsumer`, `Retain`, RWO
-filesystem support, Pool capacity admission, and disabled expansion are fixed
-product contracts.
-
-Key configurable values:
-
-| Value | Purpose |
-|-------|---------|
-| `controller.image.*` | Controller and CSI provisioner-facing binary image |
-| `node.image.*` | Node Plugin binary image |
-| `mobility.helperImage` | rsync-capable helper image; the Controller image satisfies this contract |
-| `mobility.enabled`, `mobility.interval`, `mobility.webhookPort` | event-driven cordon reconciler, bounded safety interval (default `30s`), and admission policy; the HTTPS endpoint remains available while disabled |
-| `node.kubeletRootDir` | kubelet state root, normally `/var/lib/kubelet` |
-| `node.nodeSelector`, `node.tolerations` | participating node selection |
-| `helperPod.image`, `helperPod.timeout`, `helperPod.resources` | node-local directory and capacity helper; a custom image must provide `sh`, `stat`, `du`, `awk`, `mkdir`, and `rm` |
-| `poolReadiness.interval`, `poolReadiness.staleAfter` | node-local directory/write/capacity probe interval and Controller freshness limit |
-| `lifecycle.uninstallMode` | uninstall owner: `helm` (default, fail fast) or `argocd` (wait and retry) |
-| `storageClass.create`, `storageClass.name`, `storageClass.defaultClass` | StorageClass publication and explicit default-class opt-in |
-| `controller.resources`, `node.resources`, `sidecars.*.resources` | workload resources |
-
-The fixed `csi.shiftpv.io` name and cluster-scoped resources allow one ShiftPV
-Helm release per cluster.
+| 신호 | Source of truth |
+|---|---|
+| Pool health | `ShiftPVPool.status.conditions` |
+| Volume authority | `ShiftPVVolume.status.ownerNode` |
+| Move 진행과 운영 행동 | `ShiftPVMove.status` |
+| 알림 | Kubernetes Events |
+| Blocked owner 복구 | [ResumeOwner 절차](../../docs/spec/volume-mobility.md#explicit-owner-recovery) |
 
 ## Uninstall and recovery
 
-The chart runs a fail-closed pre-delete Job and lifecycle validation webhook.
-Keep the default `lifecycle.uninstallMode=helm` for Helm-owned releases. Set
-`lifecycle.uninstallMode=argocd` in an Argo CD Application so a blocked
-PreDelete Job remains active and retries bounded quiesce attempts until storage
-dependencies are removed. A normal `helm uninstall`, Argo CD Application deletion, or direct Kubernetes
-deletion of protected ShiftPV components is denied
-while any ShiftPV PV, PVC using the configured StorageClass, `ShiftPVVolume`, or
-non-terminal `ShiftPVMove` exists. Kubernetes API inspection errors also deny
-the operation. The webhook protects the labeled CSI Deployment, DaemonSet,
-Service, ServiceAccounts, RBAC, StorageClass, and CSIDriver even if an Argo CD
-PreDelete hook creation race advances resource pruning. A denial leaves the
-release and CSI workloads in place; inspect it with
-`kubectl -n <namespace> logs job/<release>-uninstall-guard`.
+Uninstall guard와 lifecycle webhook이 하나의 제거 시도를 조정한다.
 
-The guard first creates a five-minute `quiescing` state owned by the current
-`CSIDriver` UID. The Controller then rejects new CSI `CreateVolume` calls and
-waits for already-running provisioning calls to drain before acknowledging that
-specific attempt. Certificate reconciliation is fenced by the same state, so it
-cannot recreate lifecycle validation during teardown. Only after acknowledgement
-does the guard inspect dependencies, remove lifecycle validation, and change the
-state to `granted`. This keeps the remaining Helm or Argo CD deletion independent
-of Service and RBAC deletion order. A rapid reinstall gets a new `CSIDriver` UID,
-so it cannot inherit the old state.
+```mermaid
+sequenceDiagram
+    participant H as Helm / Argo CD
+    participant G as Uninstall guard
+    participant C as Controller
+    participant W as Lifecycle webhook
 
-If inspection or teardown preparation fails, the guard cancels its attempt and
-the Controller resumes provisioning and lifecycle validation reconciliation.
-Argo CD mode waits five seconds and begins a fresh bounded attempt; Helm mode
-returns the failure immediately.
-Both `quiescing` and `granted` states expire after five minutes. The lifecycle
-webhook itself is read-only: a direct or dry-run DELETE cannot mint permission,
-and a direct DELETE is denied even with no storage dependency unless the guard
-has completed the quiesce protocol.
+    H->>G: PreDelete
+    G->>C: quiescing (CSIDriver UID)
+    C->>C: CreateVolume 종료 + 진행 호출 drain
+    C-->>G: acknowledged
+    G->>G: dependency 검사
+    G->>W: lifecycle validation 제거
+    G-->>H: granted
+    H->>H: release resource 제거
+```
 
-For a normal decommission, stop workloads, let Moves become `Succeeded` or
-`Blocked`, and explicitly remove the PVC/PV and ShiftPVVolume metadata before
-uninstalling. The `Retain` policy means metadata cleanup does not automatically
-remove host data.
+| Mode | 동작 |
+|---|---|
+| `helm` | 한 번의 bounded 시도; blocker가 있으면 uninstall 실패 반환 |
+| `argocd` | Argo CD 3.3+ PreDelete가 dependency 해소까지 bounded 시도 반복 |
 
-For emergency recovery, an operator can explicitly remove lifecycle validation
-and then bypass the Helm hook with:
+| Dependency | 제거 준비 상태 |
+|---|---|
+| 설정된 class를 사용하는 PVC | 해소 |
+| ShiftPV PV | 해소 |
+| `ShiftPVVolume` | 해소 |
+| non-terminal `ShiftPVMove` | 해소 |
+| Kubernetes API 검사 | 성공 |
 
-```sh
+보호 대상은 labeled CSI Deployment, DaemonSet, Service, ServiceAccount, RBAC, StorageClass와
+`CSIDriver`다. 직접 `kubectl delete`도 lifecycle admission을 통과한다. Admission은 read-only이므로
+DELETE 또는 dry-run DELETE 자체가 제거 permit을 만들지 않는다.
+
+정상 제거:
+
+```text
+workload 중지
+  → Move 수렴
+  → retained PVC/PV/data 처리
+  → ShiftPVVolume metadata 제거
+  → helm uninstall 또는 전용 Argo CD Application 삭제
+```
+
+차단된 Helm 시도는 다음 log에서 확인한다.
+
+```bash
+kubectl -n <namespace> logs job/<release>-uninstall-guard
+```
+
+5분 동안 유지되는 quiescing/granted 상태는 현재 `CSIDriver` UID에 결합된다. 재설치는 새 UID와
+새 lifecycle로 시작한다. 검사 실패는 quiescing을 취소하고 Controller reconciliation을 복구한다.
+Argo CD mode는 5초 뒤 새 bounded 시도를 시작하고 Helm mode는 즉시 실패를 반환한다.
+
+Emergency recovery는 Helm hook 우회 전에 lifecycle admission을 명시적으로 제거한다.
+
+```bash
 kubectl get validatingwebhookconfiguration \
   -l app.kubernetes.io/managed-by=shiftpv-controller,app.kubernetes.io/component=lifecycle-admission
 kubectl delete validatingwebhookconfiguration <name-from-above>
 helm uninstall <release> --namespace <namespace> --no-hooks
 ```
 
-This removes the driver workloads, RBAC, `CSIDriver`, chart-created StorageClass,
-and the remaining Controller-managed mobility webhook and TLS Secret through
-owner garbage collection. It does not delete CRDs, user PVCs/PVs,
-Pool/Volume/Move CRs, dynamically-created reservation ConfigMaps, or data
-directories. Existing Pods must not be treated as safely mounted while the node
-plugin is absent.
+Release 제거는 driver workload, RBAC, service, `CSIDriver`, chart-created StorageClass와
+Controller-owned webhook resource를 처리한다. CRD, 사용자 PVC/PV, Pool/Volume/Move CR,
+reservation과 host data는 독립 lifecycle을 유지한다. 복구는 같은 release namespace, Pool 선언과
+mount path를 복원한 뒤 workload를 재개한다.
 
-In `argocd` mode the Job is an Argo CD 3.3+ `PreDelete` hook for whole-Application
-deletion, while the lifecycle validation webhook is the authoritative deletion barrier.
-Argo CD does not run `PreDelete` during ordinary sync pruning. Direct
-`kubectl delete` bypasses Helm/Argo hooks but still reaches lifecycle admission
-for protected resources. Manage ShiftPV as a dedicated Application and use
-Application deletion as its normal removal path.
-
-Reinstall the release into the same namespace, restore the same Pool CRs and
-mount paths, wait for controller and node Pods to become ready, and then restart
-the user workload. `Retain` also means deleting a PVC leaves its PV and data for
-manual recovery instead of calling CSI `DeleteVolume` automatically.
+Argo CD에서는 ShiftPV를 전용 Application으로 관리하고 `lifecycle.uninstallMode=argocd`를 사용한다.
+`PreDelete`는 Application 삭제에서 실행되며 일반 sync prune은 lifecycle admission만 적용된다.

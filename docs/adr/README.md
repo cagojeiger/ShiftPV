@@ -1,26 +1,33 @@
 # Architecture Decision Records
 
-ADR은 현재 구현의 구조적 결정을 한 문서에 하나씩 기록한다. 모든 ADR은 `Context`,
-`Decision`, `Alternatives considered`, `Consequences` 순서를 사용한다. 동작 세부사항은
-[`spec/`](../spec/README.md)에 두고 실행 결과는 [`validation/`](../validation/README.md)에
-둔다.
+ADR은 구조적 결정과 그 결과만 기록한다. 동작 계약은 [`spec/`](../spec/README.md), 실행 증거는
+[`validation/`](../validation/README.md)가 소유한다.
 
-| ADR | 결정 | 상태 |
-|-----|------|------|
-| [0001](0001-position-local-hostpath-only-no-replication.md) | 복제 없는 로컬 스토리지 | Accepted |
-| [0002](0002-mounted-filesystem-boundary.md) | 기존 filesystem의 지정 directory를 Pool로 관리 | Accepted |
-| [0003](0003-csi-product-foundation.md) | Kubernetes CSI를 제품 기반으로 사용 | Accepted |
-| [0004](0004-minimal-csi-bootstrap.md) | 첫 제품 범위를 최소 CSI lifecycle로 제한 | Accepted |
-| [0005](0005-automatic-cordon-volume-mobility.md) | 정상 cordon 이동과 Kubernetes 배치 협력 | Accepted |
-| [0006](0006-fail-closed-uninstall-guard.md) | 의존 storage가 남은 제거를 기본 거부 | Accepted |
-| [0007](0007-controller-managed-webhook-certificates.md) | admission 인증서를 Controller가 관리 | Accepted |
-| [0008](0008-explicit-owner-recovery.md) | Blocked 이동에서 현재 owner를 명시적으로 재개 | Accepted |
-| [0009](0009-nondisruptive-mobility-preflight.md) | 이동 전 consumer를 보존하는 사전 점검 | Accepted |
-| [0010](0010-operator-visible-mobility-diagnostics.md) | 기존 Move journal을 운영 진단에 사용 | Accepted |
-| [0011](0011-pool-filesystem-capacity-admission.md) | Pool filesystem 총량으로 신규 할당 제어 | Accepted |
-| [0012](0012-node-reported-pool-readiness.md) | Node가 실제 Pool directory readiness를 보고 | Accepted |
+```mermaid
+flowchart LR
+    SCOPE[서비스 경계] --> FS[Pool filesystem 경계]
+    FS --> CSI[CSI lifecycle]
+    CSI --> POOL[Capacity + readiness]
+    POOL --> MOVE[계획 이동]
+    MOVE --> SAFE[복구 + 관측]
+    SAFE --> OPS[제거 + 인증서]
+```
 
-파일 이름은 `NNNN-kebab-title.md` 형식을 사용한다. 구체적인 필드, 상태 전이, 명령과
-테스트 결과는 ADR에 복제하지 않는다. 새 구조적 결정이나 기존 결정의 대체는 새 ADR로
-기록한다. 정식 버전 전 문서 정리와 사실 오류 수정은 결정의 의미를 바꾸지 않는 범위에서
-기존 ADR에 반영할 수 있다.
+| 계층 | ADR | 결정 | 상태 |
+|---|---|---|---|
+| 제품 | [0001](0001-service-boundary.md) | 기존 filesystem의 로컬 directory를 관리 | Accepted |
+| 제품 | [0002](0002-mounted-filesystem-boundary.md) | Pool directory와 host filesystem 책임 분리 | Accepted |
+| CSI | [0003](0003-csi-product-foundation.md) | Kubernetes CSI를 제품 인터페이스로 사용 | Accepted |
+| CSI | [0004](0004-minimal-csi-bootstrap.md) | 최소 CSI lifecycle로 시작 | Accepted |
+| Pool | [0005](0005-pool-filesystem-capacity-admission.md) | Pool filesystem 총량으로 신규 할당 제어 | Accepted |
+| Pool | [0006](0006-node-reported-pool-readiness.md) | Node가 실제 Pool readiness 보고 | Accepted |
+| 이동 | [0007](0007-automatic-cordon-volume-mobility.md) | 정상 cordon 이동과 Kubernetes 배치 협력 | Accepted |
+| 이동 | [0008](0008-nondisruptive-mobility-preflight.md) | consumer를 보존하는 이동 사전 점검 | Accepted |
+| 이동 | [0009](0009-explicit-owner-recovery.md) | 현재 owner를 명시적으로 복구 | Accepted |
+| 이동 | [0010](0010-operator-visible-mobility-diagnostics.md) | Move journal을 운영 진단에 사용 | Accepted |
+| 운영 | [0011](0011-fail-closed-uninstall-guard.md) | storage dependency 해소 후 제거 | Accepted |
+| 운영 | [0012](0012-controller-managed-webhook-certificates.md) | Controller가 admission 인증서 관리 | Accepted |
+
+모든 ADR은 `Context → Decision → Alternatives considered → Consequences` 순서를 사용한다.
+파일명은 `NNNN-kebab-title.md` 형식이다. 정식 release 전에는 넓은 경계에서 세부 경계로 번호를
+정돈하고, 정식 release 뒤에는 기존 번호를 고정한 채 새 결정과 대체 결정을 뒤에 추가한다.

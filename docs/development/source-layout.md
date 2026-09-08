@@ -1,7 +1,7 @@
 # Source layout
 
-ShiftPV Go 코드는 `src/*` 아래에서 실행 단위와 책임별로 나눈다. 현재 구현에 없는 역할의
-빈 package는 미리 만들지 않는다.
+ShiftPV Go 코드는 `src/*` 아래에서 현재 실행 단위와 책임별로 나눈다. 각 package는 하나의
+구체적인 제품 책임을 나타낸다.
 
 ## Tree
 
@@ -67,6 +67,10 @@ ShiftPV/
 | `src/volume` | 외부 API type에 독립적인 volume ID와 path 규칙 |
 | `src/webhook/certificate` | admission certificate, CA rotation과 hot reload |
 
-Unit test는 대상 package 옆에 둔다. Cluster가 필요한 검증만 `test/e2e`, 실제 Linux mount
-namespace가 필요한 검증은 `test/integration`에 둔다. 외부 Go library가 아니므로 root
-`pkg/`는 만들지 않는다.
+| 검증 종류 | 위치 |
+|---|---|
+| package unit test | 대상 package 옆 |
+| Kubernetes cluster 검증 | `test/e2e` |
+| 실제 Linux mount namespace 검증 | `test/integration` |
+
+내부 제품 코드는 `src/`, 실행 검증은 `test/`가 소유한다.

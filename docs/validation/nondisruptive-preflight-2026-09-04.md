@@ -30,7 +30,7 @@ accepted despite its success text; its Retain/PVC binding defect was fixed and r
 - No scheduler reservation, resource-fit guarantee, workload spec modification, hard
   quota or dead-source failover. Explicit unsupported hard placement constraints defer.
 
-See [ADR 0009](../adr/0009-nondisruptive-mobility-preflight.md) and
+See [ADR 0008](../adr/0008-nondisruptive-mobility-preflight.md) and
 [mobility contract](../spec/volume-mobility.md#non-disruptive-preflight).
 
 ## Scenario matrix

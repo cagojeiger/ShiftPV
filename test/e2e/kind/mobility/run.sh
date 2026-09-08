@@ -128,8 +128,7 @@ kubectl -n shiftpv-system wait --for=condition=Ready pod \
 
 BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
 test_preflight
-# Real pre-commit copy failure retains the source recovery regression. The former
-# source-only selector is now rejected non-disruptively by preflight.
+# Exercise source recovery after a real pre-commit copy failure.
 kubectl cordon "${CLUSTER_NAME}-worker2"
 sed \
 	-e "s|__SOURCE_NODE__|${BLOCKED_SOURCE_NODE}|g" \
@@ -173,8 +172,7 @@ recover_source_only
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/mobility/manifests/wffc-workload.yaml"
 kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=5m
 kubectl -n shiftpv-mobility-test wait --for=jsonpath='{.status.phase}'=Bound pvc/wffc --timeout=2m
-# Recreate once on the owner so admission injects a hostname pin. That pin must
-# not be mistaken for a user constraint during the subsequent normal migration.
+# Recreate on the owner and prove the injected hostname pin still permits migration.
 kubectl -n shiftpv-mobility-test delete pod -l app=shiftpv-mobility-wffc --wait=true --timeout=120s
 kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=180s
 test "$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.annotations.shiftpv\.io/placement}')" = owner

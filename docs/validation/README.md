@@ -1,29 +1,53 @@
 # Validation Evidence
 
-이 디렉터리는 특정 commit과 환경에서 실제로 실행한 검증 결과를 기록한다. 설계
-요구사항은 ADR/spec에, 실행 방법과 CI 합격 기준은
-[`development/testing.md`](../development/testing.md)에 둔다.
+각 문서는 특정 commit과 환경에서 실행한 검증 snapshot이다. 현재 branch는 같은 테스트의 재실행
+또는 해당 commit의 CI check로 판정한다.
 
-| 기록 | 범위 |
-|------|------|
-| [kind-e2e-2026-09-01.md](kind-e2e-2026-09-01.md) | Kubernetes 1.35.8, 두 worker의 분리된 pool, 기본 StorageClass와 Helm 재설치 |
-| [kind-mobility-e2e-2026-09-02.md](kind-mobility-e2e-2026-09-02.md) | cordon mobility의 Blocked/Succeeded terminal과 Controller restart recovery |
-| [kind-ultraqa-2026-09-03.md](kind-ultraqa-2026-09-03.md) | Node Plugin 재시작, 병렬 E2E 격리, admission outage와 filesystem fault 회복 |
-| [kind-argocd-uninstall-2026-09-03.md](kind-argocd-uninstall-2026-09-03.md) | Argo CD Application guard와 lifecycle admission 허용/거부, blocker 해소 후 삭제 수렴 |
-| [blocked-owner-recovery-2026-09-03.md](blocked-owner-recovery-2026-09-03.md) | 명시적 Blocked owner 복구, before/after commit 데이터 보존, 실패·재시작·CRD 검증 |
-| [nondisruptive-preflight-2026-09-04.md](nondisruptive-preflight-2026-09-04.md) | eviction 전 제약/PDB 판정, Retain PV/PVC UID 격리, 일시적 조건 해소 후 재개 |
-| [public-artifact-ci-2026-09-04.md](public-artifact-ci-2026-09-04.md) | 공개 chart package SHA-256과 image manifest digest 고정, 실제 Helm/PVC mount CI |
-| [operator-diagnostics-2026-09-04.md](operator-diagnostics-2026-09-04.md) | Move reason/message/진행 시각/Event, API 오류 복구와 실제 Blocked/Recovered/Succeeded 진단 |
-| [api-response-loss-2026-09-04.md](api-response-loss-2026-09-04.md) | Move/helper 생성, 상태 기록, owner CAS와 정리 요청의 반영 후 응답 유실 수렴 |
-| [mobility-filesystem-faults-2026-09-04.md](mobility-filesystem-faults-2026-09-04.md) | 실제 destination ENOSPC/read-only와 partial staging의 source-owner 복구 |
-| [mobility-node-restarts-2026-09-05.md](mobility-node-restarts-2026-09-05.md) | active Move의 source/destination Kind node 중단과 명시적 source-owner 복구 |
-| [home-public-chart-performance-2026-09-05.md](home-public-chart-performance-2026-09-05.md) | 공개 Helm chart의 Home lifecycle baseline, cross-node 이동 병목과 destination publish A/B 검증 |
-| [node-publish-wait-rejection-2026-09-05.md](node-publish-wait-rejection-2026-09-05.md) | CSI 호출 내부 대기 최적화의 API 효율 증거와 node-restart 반증, 폐기 결정 |
-| [event-driven-placement-2026-09-05.md](event-driven-placement-2026-09-05.md) | held workload, scheduler placement reservation, coalescing watch와 destination restart 수렴 |
-| [g0-safety-2026-09-06.md](g0-safety-2026-09-06.md) | checksum copy 검증, DeleteVolume 부분 삭제 재시도, reservation 복구 회귀와 전체 Kind 재검증 |
-| [home-public-chart-capacity-2026-09-06.md](home-public-chart-capacity-2026-09-06.md) | 공개 chart 0.1.4의 MicroK8s kubelet root 교정과 Pool 총예약 capacity admission |
-| [pool-readiness-2026-09-07.md](pool-readiness-2026-09-07.md) | node-reported mount/write/capacity 상태와 ENOSPC/read-only 자동 복구 |
-| [general-directory-pools-2026-09-07.md](general-directory-pools-2026-09-07.md) | root filesystem 일반 directory Pool의 provisioning, cordon 이동과 전체 회귀 |
+```mermaid
+flowchart LR
+    SPEC[ADR + spec] --> TEST[test suite]
+    TEST --> CI[CI result]
+    TEST --> SNAP[dated evidence]
+    CI --> NOW[현재 판정]
+    SNAP --> TRACE[운영 근거 추적]
+```
 
-검증 문서는 당시의 환경과 결과를 보존하는 snapshot이다. 현재 branch의 통과 여부는
-같은 테스트를 다시 실행하거나 해당 commit의 CI check로 판단한다.
+## Core lifecycle
+
+| 기록 | 확인한 경계 |
+|---|---|
+| [Kind 기본 E2E](kind-e2e-2026-09-01.md) | 두 worker Pool, 기본 StorageClass, Helm 재설치 |
+| [공개 artifact CI](public-artifact-ci-2026-09-04.md) | chart SHA-256, image digest, 실제 PVC mount |
+| [Home 공개 chart capacity](home-public-chart-capacity-2026-09-06.md) | MicroK8s kubelet root, Pool 총예약 admission |
+| [일반 directory Pool](general-directory-pools-2026-09-07.md) | root filesystem 하위 directory의 provisioning과 이동 |
+| [Pool readiness](pool-readiness-2026-09-07.md) | 접근·쓰기·capacity 상태와 fault 자동 복구 |
+
+## Mobility and recovery
+
+| 기록 | 확인한 경계 |
+|---|---|
+| [Kind mobility](kind-mobility-e2e-2026-09-02.md) | cordon 이동, terminal 상태, Controller 재시작 |
+| [Blocked owner recovery](blocked-owner-recovery-2026-09-03.md) | commit 전후 owner 복구와 데이터 보존 |
+| [Non-disruptive preflight](nondisruptive-preflight-2026-09-04.md) | 제약·PDB·UID 확인 후 consumer 보존 |
+| [API response loss](api-response-loss-2026-09-04.md) | API 반영 뒤 응답 유실의 멱등 수렴 |
+| [Filesystem faults](mobility-filesystem-faults-2026-09-04.md) | ENOSPC, read-only, partial staging |
+| [Node restarts](mobility-node-restarts-2026-09-05.md) | source·destination 중단과 owner 복구 |
+| [Event-driven placement](event-driven-placement-2026-09-05.md) | Placement Hold, scheduler reservation, watch coalescing |
+| [G0 safety](g0-safety-2026-09-06.md) | checksum, 부분 삭제 재시도, reservation 복구 |
+
+## Operations and performance
+
+| 기록 | 확인한 경계 |
+|---|---|
+| [Kind UltraQA](kind-ultraqa-2026-09-03.md) | plugin restart, 병렬 격리, admission·filesystem fault |
+| [Argo CD uninstall](kind-argocd-uninstall-2026-09-03.md) | Application guard와 dependency 해소 후 삭제 |
+| [Operator diagnostics](operator-diagnostics-2026-09-04.md) | Move 상태, Event, API 오류 복구 |
+| [Home chart performance](home-public-chart-performance-2026-09-05.md) | lifecycle baseline과 cross-node 병목 A/B |
+| [Node publish wait 검토](node-publish-wait-rejection-2026-09-05.md) | 대기 최적화 반증과 폐기 근거 |
+
+| 정보의 종류 | 소유 문서 |
+|---|---|
+| 구조적 결정 | [`adr/`](../adr/README.md) |
+| 현재 동작 계약 | [`spec/`](../spec/README.md) |
+| 실행 방법과 합격 기준 | [`development/testing.md`](../development/testing.md) |
+| 과거 실행 결과 | 이 디렉터리의 dated snapshot |

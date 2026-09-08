@@ -1,55 +1,77 @@
 # ShiftPV
 
-ShiftPV is a CSI driver that replaces a basic hostPath StorageClass with managed,
-movable directory-backed local volumes on filesystems already present on Kubernetes nodes.
+ShiftPV is a CSI driver for managed, movable local volumes inside existing Linux
+filesystems. It replaces a basic hostPath StorageClass with standard PVC lifecycle,
+Pool capacity admission, and planned node-to-node movement.
 
-## Current scope
+## Architecture
 
-ShiftPV dynamically provisions RWO Filesystem volumes through a standard
-StorageClass and bind-mounts each volume from its owner node into a Pod.
-
-```text
-StorageClass
-    ↓
-PVC → ShiftPV Controller → owner node directory
-    ↓
-Pod → ShiftPV Node Plugin → bind mount
+```mermaid
+flowchart LR
+    PVC[PVC] --> SC[StorageClass<br/>csi.shiftpv.io]
+    SC --> CTRL[Controller]
+    CTRL --> POOL[ShiftPVPool<br/>existing directory]
+    POOL --> VOL[volumes/&lt;volume-id&gt;]
+    VOL --> NODE[Node Plugin<br/>bind mount]
+    NODE --> POD[Pod]
 ```
 
-The current implementation provides:
+Application I/O follows the node-local bind mount. The Controller and network copy
+path participate in lifecycle and movement only.
 
-- CSI Identity, Controller and Node services
-- `Retain` and `WaitForFirstConsumer` StorageClass
-- optional cluster-default StorageClass annotation
-- deterministic volume IDs and namespace-scoped reservation ConfigMaps
-- explicit node Pool registration with per-node directories and dynamic owner publish guard
-- Pool filesystem capacity admission using aggregate PVC reservations and current shared-filesystem space
-- node-reported Pool directory, write and capacity readiness with stale-status rejection
-- automatic healthy-node cordon cold migration with Placement Hold, authenticated rsync,
-  dynamic owner CAS and restart-safe reconciliation
-- fail-closed Helm/Argo CD Application uninstall guard and explicit recovery bypass
-- isolated Helm, mobility, and Argo CD kind E2E validation
+## Feature map
+
+| Area | Current contract |
+|---|---|
+| Volume | Dynamic RWO Filesystem provisioning |
+| Placement | `WaitForFirstConsumer` topology |
+| Storage | One existing absolute Pool directory per participating node |
+| Capacity | Pool reservation limit plus containing-filesystem availability |
+| Readiness | Directory access, write/sync/cleanup, and `statfs` probes |
+| Mobility | Healthy cordoned-node cold migration with authenticated rsync |
+| Authority | One owner node, one active Move, CSI publish guard |
+| Recovery | Restart-safe reconcile and explicit `ResumeOwner` |
+| Lifecycle | `Retain` PVs and guarded Helm/Argo CD uninstall |
+| Delivery | Helm repository and multi-architecture images |
+
+The Kubernetes API is represented by three cluster-scoped resources:
+
+```text
+ShiftPVPool    node + Pool directory + capacity + readiness
+ShiftPVVolume volume handle + owner + publish state + active Move
+ShiftPVMove   one movement transaction + phase + diagnosis + recovery
+```
+
+## Runtime model
+
+```text
+<registered Pool>/
+├── volumes/
+│   └── <volume-id>/       authoritative PVC data
+└── .shiftpv/
+    ├── incoming/          verified destination staging
+    ├── retired/           source purge staging
+    └── aborted/           recovery quarantine
+```
+
+Pool paths may differ by node and may be ordinary root-filesystem directories or
+directories on separate mounts. ShiftPV manages its directory layout; the operator
+owns disks, filesystems, encryption, mounts, and backup.
 
 ## Requirements
 
-- Kubernetes 1.35 or newer
-- Linux nodes with privileged DaemonSet and HostPath access
-- Argo CD 3.3 or newer when Application deletion must run the uninstall guard
-- an existing writable absolute directory on every participating node; each directory is
-  declared by its `ShiftPVPool` and may be on the root or a separately mounted filesystem
+| Requirement | Value |
+|---|---|
+| Kubernetes | 1.35+ |
+| Nodes | Linux |
+| Node access | Privileged DaemonSet with HostPath |
+| Pool | Existing writable absolute non-root directory |
+| Argo CD | 3.3+ for guarded Application deletion |
 
-Each participating node must use a distinct local path. The Pool path itself does not need
-to be a mount point, but it must already exist and cannot be `/`. ShiftPV does not create
-Pool directories or create, format, mount, or repair filesystems. It reads capacity from the
-filesystem containing the registered Pool path when admitting a new volume.
+MicroK8s normally uses
+`/var/snap/microk8s/common/var/lib/kubelet` as its kubelet state root.
 
-Register every participating node explicitly with a `ShiftPVPool` CR after
-installing the chart, then wait for its `Ready=True` condition before provisioning.
-
-Automatic mobility applies only to workload namespaces explicitly labeled
-`shiftpv.io/admission=enabled`.
-
-## Install with Helm
+## Install
 
 ```bash
 helm repo add shiftpv https://cagojeiger.github.io/ShiftPV
@@ -58,43 +80,60 @@ helm install shiftpv shiftpv/shiftpv \
   --namespace shiftpv-system --create-namespace
 ```
 
-The default kubelet state root is `/var/lib/kubelet`. MicroK8s installations
-normally require
-`--set node.kubeletRootDir=/var/snap/microk8s/common/var/lib/kubelet`; see the
-[chart deployment contract](charts/shiftpv/README.md#kubelet-state-root).
+Register one Pool for each participating node after the chart is ready:
 
-The chart does not register storage paths. After installation, create one
-`ShiftPVPool` for each participating node using an existing writable host
-directory. The chart version and the controller/node image versions are released
-independently.
+```yaml
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVPool
+metadata:
+  name: worker-a
+spec:
+  nodeName: worker-a
+  mountPath: /var/lib/shiftpv
+  capacity:
+    limit: 500Gi
+```
 
-## Limitations
+```bash
+kubectl wait --for=condition=Ready shiftpvpool/worker-a --timeout=2m
+```
 
-- data has exactly one authoritative owner; automatic movement is planned cold migration from
-  a healthy cordoned node, not failover from an unavailable node
-- automatic mobility supports one controller-owned consumer and one RWO Filesystem ShiftPV PVC;
-  `Blocked` is terminal and waiting phases have no deadline
-- no replication, HA, failover, backup or snapshot
-- RWO Filesystem only; no RWX or raw block
-- no volume expansion
-- requested capacity contributes to the owner Pool's aggregate reservation but is not a per-volume write limit
-- capacity admission does not prevent external writers or a PVC from consuming space after provisioning
-- mobility measures quiesced source bytes and admits destination capacity before copy
-- PVs provisioned by another StorageClass are not adopted or converted automatically
-- deleting a PVC leaves its `Retain` PV and data for manual recovery
+Automatic mobility is enabled for selected workload namespaces:
+
+```bash
+kubectl label namespace my-workload shiftpv.io/admission=enabled
+```
+
+Deployment values, MicroK8s configuration, upgrades, and removal are documented in
+the [Helm chart guide](charts/shiftpv/README.md).
+
+## Support boundary
+
+| Capability | Ownership |
+|---|---|
+| Planned movement from a healthy cordoned node | ShiftPV |
+| Replication, HA, unavailable-node failover | External storage architecture |
+| Snapshot and backup | External data-protection system |
+| RWO Filesystem | ShiftPV |
+| RWX, raw block, volume expansion | Current scope outside ShiftPV |
+| Pool-wide admission | ShiftPV |
+| Per-volume filesystem quota | Filesystem or external quota manager |
+| Existing PV migration | Workload-specific migration procedure |
 
 ## Documentation
 
-- [Documentation map](docs/README.md)
-- [Architecture decisions](docs/adr/README.md)
-- [Current contracts](docs/spec/README.md)
-- [Development](docs/development/README.md)
-- [Runtime validation](docs/validation/README.md)
+| Question | Document |
+|---|---|
+| Why is the architecture shaped this way? | [ADR](docs/adr/README.md) |
+| What behavior does the product guarantee? | [Specifications](docs/spec/README.md) |
+| How is the source changed and tested? | [Development](docs/development/README.md) |
+| What has run in real environments? | [Validation evidence](docs/validation/README.md) |
 
 ## Status
 
-Early `dev-v1` bootstrap. The CSI lifecycle and Helm/Argo CD removal guards have
-been validated in isolated Kubernetes 1.35.8 kind clusters.
+Early `dev-v1` product. CI covers unit, race, Linux mount, Helm, CSI, mobility,
+node-restart, and Argo CD lifecycle paths. Dated environment evidence remains in
+`docs/validation/`.
 
 ## License
 

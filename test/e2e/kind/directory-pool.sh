@@ -31,9 +31,7 @@ restore_default_pool() {
 }
 trap restore_default_pool EXIT
 
-# The regular Pools are removed temporarily because one node may have only one
-# registered Pool. Both new paths deliberately live inside their Kind nodes'
-# root filesystems and are not exact mount points.
+# Register one ordinary root-filesystem directory Pool per Kind node.
 kubectl delete shiftpvpool worker-a worker-b --wait=true
 docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}"
 docker exec "${POOL_B_NODE}" test ! -e "${POOL_B_PATH}"

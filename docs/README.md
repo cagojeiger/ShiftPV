@@ -1,38 +1,29 @@
 # ShiftPV Documentation
 
-이 문서는 현재 구현된 ShiftPV의 결정, 동작 계약, 개발 검사와 실행 증거만 다룬다.
+문서는 네 가지 질문에 답한다.
 
 ```text
 docs/
-├── README.md
-├── adr/
-│   ├── README.md
-│   └── 0001-...md ~ 0010-...md
-├── spec/
-│   ├── README.md
-│   ├── csi-driver.md
-│   ├── storage-class.md
-│   └── volume-mobility.md
-├── development/
-│   ├── README.md
-│   ├── source-layout.md
-│   └── testing.md
-└── validation/
-    ├── README.md
-    └── <dated-evidence>.md
+├── adr/          Why was the architecture selected?
+├── spec/         What does the current product guarantee?
+├── development/  How is the product changed and tested?
+└── validation/   What ran, where, and with what result?
 ```
 
-| 위치 | 책임 |
-|---|---|
-| [`adr/`](adr/README.md) | 현재 구조를 선택한 이유 |
-| [`spec/`](spec/README.md) | 현재 코드와 Helm이 지켜야 하는 동작 계약 |
-| [`development/`](development/README.md) | source 구조, 로컬 검사와 CI 합격 기준 |
-| [`validation/`](validation/README.md) | 실제 환경에서 실행한 검증 증거 |
+| 영역 | 내용 규칙 | Index |
+|---|---|---|
+| ADR | 구조적 결정 하나; `Context → Decision → Alternatives → Consequences` | [adr/](adr/README.md) |
+| Spec | 현재 binary와 chart 계약 | [spec/](spec/README.md) |
+| Development | source 경계와 반복 가능한 검사 | [development/](development/README.md) |
+| Validation | commit과 환경에 결합된 실행 증거 | [validation/](validation/README.md) |
 
-현재 구현에 없는 기능은 요구사항이나 설계 문서로 유지하지 않는다. 구조적 결정이 새로
-생기거나 기존 결정을 대체할 때 ADR을 추가하고 spec과 구현을 함께 변경한다. 정식 버전 전에는
-결정의 의미를 유지하는 범위에서 기존 ADR의 잘못된 표현과 문서 경계를 바로잡을 수 있다.
+```mermaid
+flowchart LR
+    ADR[ADR<br/>decision] --> SPEC[Spec<br/>contract]
+    SPEC --> CODE[Code + Chart]
+    CODE --> TEST[Development checks]
+    TEST --> EVIDENCE[Validation evidence]
+```
 
-각 영역은 자기 질문에만 답한다. ADR은 동일한 네 목차를 사용하고, spec과 development는
-도메인에 필요한 목차만 둔다. Validation은 실행 환경과 결과가 다른 과거 snapshot이므로
-형식을 억지로 다시 쓰지 않고 README 색인으로 탐색한다.
+현재 동작은 Spec, 실행 명령은 Development 또는 Helm guide가 소유한다. 날짜별 결과는 Validation
+snapshot으로 보존한다. 정식 release 전 사실 교정은 결정의 의미를 유지하며 기존 ADR에 반영한다.
