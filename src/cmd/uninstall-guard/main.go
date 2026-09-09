@@ -48,6 +48,7 @@ func main() {
 		Client:           client,
 		Volumes:          &volumeapi.Registry{Client: dynamicClient},
 		StorageClassName: *storageClassName,
+		Namespace:        *permitNamespace,
 	}
 	permit := &uninstallcheck.PermitStore{Client: client, Namespace: *permitNamespace, Name: *permitName, CSIDriver: uninstallcheck.DriverName}
 	var runErr error

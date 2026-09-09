@@ -13,6 +13,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/lifecycle/cleanup"
 	"github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
@@ -101,8 +102,30 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 		}
 		counts[bounded(move.Status.Phase, movePhases)]++
 	}
+	for _, move := range moves {
+		state, exists := volumes[move.Spec.VolumeID]
+		if move.Status.Phase == "Completing" && (!exists || state.ActiveMove != move.Name) {
+			counts["Completing"]++
+		}
+	}
 	for _, phase := range movePhases {
 		values = append(values, sample{"moves", float64(counts[phase]), []string{phase}})
+	}
+	requests, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: cleanup.Label})
+	if err != nil {
+		return err
+	}
+	cleanupCounts := map[string]int{}
+	for index := range requests.Items {
+		record, err := cleanup.Decode(&requests.Items[index])
+		state := record.State
+		if err != nil {
+			state = "Unknown"
+		}
+		cleanupCounts[state]++
+	}
+	for _, state := range []string{cleanup.Pending, cleanup.Running, cleanup.NeedsReview, cleanup.Completed, "Unknown"} {
+		values = append(values, sample{"cleanup_requests", float64(cleanupCounts[state]), []string{state}})
 	}
 	c.Exporter.Cache.update("metadata", values, true)
 	return nil

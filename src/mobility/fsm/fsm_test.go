@@ -18,6 +18,7 @@ func TestHappyPathIsClosed(t *testing.T) {
 		{ReplacementExists: true, ReplacementHeld: true},
 		{PublishedOnDestination: true},
 		{CleanupComplete: true},
+		{CompletionReady: true},
 	}
 	wantActions := []Action{
 		ActionLockVolume,
@@ -32,6 +33,7 @@ func TestHappyPathIsClosed(t *testing.T) {
 		ActionDeletePlacement,
 		ActionReleasePlacement,
 		ActionEnsureCleanup,
+		ActionConfirmCleanup,
 		ActionMarkSucceeded,
 	}
 	for index, observation := range observations {
@@ -50,6 +52,21 @@ func TestHappyPathIsClosed(t *testing.T) {
 	decision, err := Decide(phase, Observation{})
 	if err != nil || decision.Next != PhaseSucceeded || decision.Action != ActionWait {
 		t.Fatalf("terminal decision = %#v, %v", decision, err)
+	}
+}
+
+func TestCompletingUsesDurableCleanupEvidence(t *testing.T) {
+	decision, err := Decide(PhaseCleaningSource, Observation{CleanupComplete: true})
+	if err != nil || decision.Next != PhaseCompleting || decision.Action != ActionConfirmCleanup {
+		t.Fatalf("cleanup must be journaled before effects: %+v, %v", decision, err)
+	}
+	decision, err = Decide(PhaseCompleting, Observation{CompletionReady: true, DestinationUnavailable: true})
+	if err != nil || decision.Next != PhaseSucceeded || decision.Action != ActionMarkSucceeded {
+		t.Fatalf("metadata completion depended on unavailable disk work: %+v, %v", decision, err)
+	}
+	decision, err = Decide(PhaseCompleting, Observation{})
+	if err != nil || decision.Next != PhaseCompleting || decision.Action != ActionWait || decision.Reason != "CompletionAuthorityMismatch" {
+		t.Fatalf("completion ignored authority: %+v, %v", decision, err)
 	}
 }
 

@@ -21,7 +21,7 @@ controller:
   logLevel: 2
   image:
     repository: ghcr.io/cagojeiger/shiftpv-controller
-    tag: 0.1.9
+    tag: 0.1.10
     pullPolicy: IfNotPresent
   resources: {}
 
@@ -29,7 +29,7 @@ mobility:
   enabled: true
   interval: 30s
   webhookPort: 9443
-  helperImage: ghcr.io/cagojeiger/shiftpv-controller:0.1.9
+  helperImage: ghcr.io/cagojeiger/shiftpv-controller:0.1.10
 
 node:
   # This must match the kubelet state root on every selected node.

@@ -17,6 +17,7 @@ import (
 type observation struct {
 	FSM             fsm.Observation
 	Volume          volumeapi.State
+	VolumeMissing   bool
 	PV              *corev1.PersistentVolume
 	Claim           *corev1.PersistentVolumeClaim
 	Consumer        *corev1.Pod
@@ -32,10 +33,21 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	result := observation{Names: namesFor(move.Name)}
 	state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
 	if err != nil {
+		if apierrors.IsNotFound(err) && completionAllowed(move, state, true) {
+			result.VolumeMissing = true
+			result.FSM.CompletionReady = true
+			return result, nil
+		}
 		return result, err
 	}
 	result.Volume = state
 	result.DestinationNode = move.Status.DestinationNode
+	// Completing is persisted cleanup evidence. Finalization reads authority only;
+	// expired Jobs or a deleted PVC must not restart disk work after unlock.
+	if move.Status.Phase == string(fsm.PhaseCompleting) {
+		result.FSM.CompletionReady = completionAllowed(move, state, false)
+		return result, nil
+	}
 	result.FSM.OwnerCommitted = result.DestinationNode != "" && state.Phase == volumeapi.PhaseReady && state.OwnerNode == result.DestinationNode && state.ActiveMove == move.Name
 
 	pools, err := r.Repository.Pools(ctx)
@@ -300,9 +312,11 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		return result, err
 	}
 	result.FSM.PublishedOnDestination = result.DestinationNode != "" && contains(state.PublishedNodes, result.DestinationNode)
-	result.FSM.CleanupComplete, result.FSM.CleanupFailed, err = r.jobState(ctx, result.Names.CleanupJob)
-	if err != nil {
-		return result, err
+	if move.Status.Phase == string(fsm.PhaseWaitingForDestinationPublish) || move.Status.Phase == string(fsm.PhaseCleaningSource) {
+		result.FSM.CleanupComplete, result.FSM.CleanupFailed, err = r.cleanupState(ctx, move)
+		if err != nil {
+			return result, err
+		}
 	}
 	return result, nil
 }

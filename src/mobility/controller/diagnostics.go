@@ -112,6 +112,8 @@ func mobilityMessage(phase fsm.Phase, reason string) string {
 		return "automatic retry; waiting for the destination node to publish the volume"
 	case fsm.PhaseCleaningSource:
 		return "automatic retry; waiting for source cleanup"
+	case fsm.PhaseCompleting:
+		return "automatic retry; finalizing confirmed cleanup and releasing the move lock"
 	case fsm.PhaseSucceeded:
 		return "mobility completed; no operator action is required"
 	default:
@@ -121,6 +123,8 @@ func mobilityMessage(phase fsm.Phase, reason string) string {
 
 func waitReasonMessage(reason string) string {
 	switch reason {
+	case "CompletionAuthorityMismatch":
+		return "cleanup is confirmed but volume authority changed; inspect the current owner and active Move"
 	case "DisruptionBudgetDenied":
 		return "the PodDisruptionBudget does not currently allow eviction; wait for budget capacity or update the budget"
 	case "NoCompatibleDestination", "DestinationUnavailable":

@@ -82,7 +82,8 @@ ShiftPVMove   source-to-destination transaction + 영속 journal
 | Owner commit 전 | Source |
 | Owner commit 후 | Destination |
 
-한 volume은 active Move 하나를 갖는다. `activeMove`는 첫 lock부터 source cleanup 성공까지 유지한다.
+한 volume은 active Move 하나를 갖는다. `activeMove`는 첫 lock부터 정리 완료 증거를 저장한 뒤
+`MarkSucceeded`가 해제할 때까지 유지한다.
 CSI volume context의 node는 최초 배치 기록이며 현재 publication은
 `ShiftPVVolume.status.ownerNode`가 결정한다.
 
@@ -91,16 +92,16 @@ CSI volume context의 node는 최초 배치 기록이며 현재 publication은
 ```mermaid
 flowchart LR
     OBS[API + CR + helper 관찰] --> DECIDE[순수 FSM 결정]
-    DECIDE --> ACTION[멱등 action 하나]
-    ACTION --> SAVE[status 또는 owner CAS 저장]
+    DECIDE --> ACTION[API·helper 요청 + 필요한 선행 기록]
+    ACTION --> SAVE[phase·진단 기록]
     SAVE --> EVENT[event 또는 30s safety tick]
     EVENT --> OBS
 ```
 
 Node, managed Pod, helper Pod/Job, Pool, Volume, Move 변경은 하나의 coalescing event stream을 깨운다.
 기본 30초 safety tick(`mobility.interval`)은 watch 누락과 재연결 복구를 보완한다. CSI 요청은 watch와
-polling goroutine을 소유하지 않는다. Controller 재시작은 CR과 결정적 helper 이름을 다시 관찰해 같은
-action으로 수렴한다.
+polling goroutine을 소유하지 않는다. Controller 재시작은 CR과 결정적 helper 이름을 다시 관찰해 다음
+action을 판단한다. 정리 완료 증거는 잠금 해제 전에 Move에 영속 기록한다.
 
 ## Move capacity admission
 
@@ -131,7 +132,8 @@ stateDiagram-v2
     Committing --> ReleasingDestination
     ReleasingDestination --> WaitingForDestinationPublish
     WaitingForDestinationPublish --> CleaningSource
-    CleaningSource --> Succeeded
+    CleaningSource --> Completing
+    Completing --> Succeeded
     Pending --> Blocked: terminal safety failure
     Locking --> Blocked: terminal safety failure
     Evicting --> Blocked: terminal safety failure
@@ -142,36 +144,136 @@ stateDiagram-v2
     Copying --> Blocked: transfer failure
     Promoting --> Blocked: promotion failure
     Committing --> Blocked: authority failure
-    ReleasingDestination --> Blocked: release failure
-    WaitingForDestinationPublish --> Blocked: publish failure
+    ReleasingDestination --> Blocked: terminal safety failure
+    WaitingForDestinationPublish --> Blocked: terminal safety failure
     CleaningSource --> Blocked: cleanup failure
+    Completing --> Completing: authority mismatch or API retry
     Succeeded --> Succeeded
     Blocked --> Blocked
 ```
 
-| Phase | 영속 증거 | 다음 action |
-|---|---|---|
-| `Pending` | eligible source, consumer, candidates | Volume CAS lock |
-| `Locking` | `Moving`, expected owner와 `activeMove` | UID-bound eviction |
-| `Evicting` | original consumer 없음 | source unpublish 관찰 |
-| `WaitingForUnpublish` | source가 `publishedNodes`에서 제거됨 | held replacement 관찰 |
-| `WaitingForReplacement` | Placement Hold가 있는 replacement | placement reservation 생성 |
-| `WaitingForDestination` | scheduler가 reservation node 선택 | destination 영속화 |
-| `WaitingForCapacity` | source bytes와 destination admission | 승인 저장 후 copy 시작 |
-| `Copying` | checksum 검증 완료 | staging promotion |
-| `Promoting` | destination final과 Move marker | owner CAS commit |
-| `Committing` | destination owner/Ready read-back | placement reservation 삭제 |
-| `ReleasingDestination` | reservation 부재 | replacement pin과 Hold 해제 |
-| `WaitingForDestinationPublish` | destination이 `publishedNodes`에 존재 | source purge |
-| `CleaningSource` | source final/retired 모두 부재 | helper와 `activeMove` 정리 |
+### Transitions
 
-Pending과 waiting phase는 cluster 조건 변화에 따라 재평가한다. `Succeeded`와 `Blocked`는 안정적인
-terminal phase다. Destination readiness가 일시적으로 사라지면 Copying부터 CleaningSource까지 현재
-authority와 phase를 보존한다. 실제 copy, promotion, commit, release, publish, cleanup 실패는 원인에
-맞는 Blocked reason으로 닫는다. Capacity 부족은 copy와 authority 변경 전에 Blocked로 닫는다.
+안전 guard를 통과한 정상 진행 경로다. `Next`는 진행 단계이며 action의 작업 완료를 뜻하지 않는다.
+예를 들어 `Copying` 진입은 copy 준비 요청 뒤이며, 다음 단계는 checksum 검증 Job의 완료 관찰 뒤다.
+
+| Phase | 전환 조건 | Action | Next |
+|---|---|---|---|
+| `Pending` | source·consumer·candidate 적격 | `LockVolume` | `Locking` |
+| `Locking` | expected owner·`Moving`·`activeMove` 확인 | `EvictConsumer` | `Evicting` |
+| `Evicting` | 원 consumer 부재 | `Wait` | `WaitingForUnpublish` |
+| `WaitingForUnpublish` | source publication 부재 | `Wait` | `WaitingForReplacement` |
+| `WaitingForReplacement` | held replacement 존재 | `EnsurePlacement` | `WaitingForDestination` |
+| `WaitingForDestination` | 적격 destination 배치·Ready | `EnsureCapacity` | `WaitingForCapacity` |
+| `WaitingForCapacity` | 용량 승인 저장 | `EnsureCopy` | `Copying` |
+| `Copying` | placement 유효·copy Job 완료 | `EnsurePromotion` | `Promoting` |
+| `Promoting` | placement 유효·promotion Job 완료 | `CommitOwner` | `Committing` |
+| `Committing` | destination owner/Ready read-back·destination 가용 | `DeletePlacement` | `ReleasingDestination` |
+| `ReleasingDestination` | placement 부재·held replacement 존재 | `ReleasePlacement` | `WaitingForDestinationPublish` |
+| `WaitingForDestinationPublish` | destination publication 확인 | `EnsureCleanup` | `CleaningSource` |
+| `CleaningSource` | 승인된 Job UID의 source final/retired 부재 검사 완료 | `ConfirmCleanup` | `Completing` |
+| `Completing` | destination `Ready`·잠금이 현재 Move 또는 비어 있음, 또는 Volume 삭제 확인 | `MarkSucceeded` | `Succeeded` |
+| `Succeeded` | terminal | `Wait` | `Succeeded` |
+| `Blocked` | terminal; 명시적 recovery는 별도 journal | `Wait` | `Blocked` |
+
+| Guard / 대기 조건 | 결정 |
+|---|---|
+| Binding·authority 불일치 | `MarkBlocked` |
+| Commit 전 source 불가용 | `MarkBlocked`; 이미 확인된 owner commit 보존 |
+| Eviction 전 조건 보류 | 현재 phase에서 `Wait` |
+| Destination 선택 뒤 일시 불가용 | `Wait`; 선택 단계에서는 `WaitingForCapacity` 진입, 이후 현재 phase 유지 |
+| Copy·promotion Job 실패, capacity 거절, placement 안전 조건 위반 | 해당 reason으로 `MarkBlocked` |
+| Copying·Promoting·미커밋 Committing의 placement 부재 | 현재 phase에서 `EnsurePlacement` |
+| 준비·실행 결과 미완료 | 현재 phase에서 해당 action 재요청 또는 `Wait` |
+| ReleasingDestination의 held replacement 부재, placement 부재 | `Wait`로 `WaitingForDestinationPublish` 진입 |
+| Cleanup Job 실패 | `CleanupFailed`로 `MarkBlocked` |
+| Completing의 owner·잠금·Volume phase 불일치 | `CompletionAuthorityMismatch`로 현재 phase에서 `Wait` |
+
+### Actions
+
+Controller가 아래 action을 지시한다. Helper Pod/Job은 파일 작업을 실행하며 다음 phase를 결정하지 않는다.
+
+| Action | 실행 대상 | 결과 확인 |
+|---|---|---|
+| `Wait` | 관찰 대기 | 다음 reconcile의 조건 |
+| `LockVolume` | Volume CAS | expected owner·phase·activeMove |
+| `EvictConsumer` | UID-bound Eviction API | consumer 부재, 이후 source unpublish |
+| `EnsurePlacement` | scheduler용 placement Pod | identity·배치 node |
+| `EnsureCapacity` | Pool 검사·Move journal | sourceBytes·capacityApproved |
+| `EnsureCopy` | destination journal·replacement pin·transfer helper | copy Job 완료 |
+| `EnsurePromotion` | promotion Job | final 경로·Move marker를 검사한 Job 완료 |
+| `CommitOwner` | Volume CAS | destination owner/Ready read-back |
+| `DeletePlacement` | placement Pod 삭제 | Pod 부재 |
+| `ReleasePlacement` | replacement pin 확인·Hold 해제 | destination publication |
+| `EnsureCleanup` | immutable 정리 요청 저장 후 source cleanup Job 생성·UID 연결 | 같은 요청·Job identity 재관찰 |
+| `ConfirmCleanup` | Job 성공 재확인·정리 완료 기록·Job TTL 설정 | 영속 요청의 완료 acknowledgement |
+| `MarkSucceeded` | Completing 증거·authority 확인 후 transfer resource 삭제·activeMove CAS 해제 | 성공한 API 처리와 Move journal |
+| `MarkBlocked` | reason 기록·해당 Volume 상태 갱신 | 실패 원인과 현재 authority 보존 |
+
+### Reconcile boundary
+
+```text
+관찰 → FSM 결정 → action 요청 → phase·진단 기록 → 다시 관찰
+```
+
+| 경계 | 계약 |
+|---|---|
+| 관찰 오류 | action 실행 없이 기존 phase에 오류 기록 |
+| 결정·action 요청 오류 | 기존 phase에 오류 기록; 다음 reconcile에서 재시도 |
+| Action 요청 성공 | `Next` 기록; 비동기 Job 완료는 다음 관찰에서 판단 |
+| 파일 작업 전 선행 기록 | `EnsureCopy`는 destination·replacement UID·Job 이름을 먼저 저장 |
+| 정리 요청 저장 실패 | Job 생성 없이 기존 phase·잠금 유지 |
+| Cleanup Job 생성·UID 연결 응답 유실 | 요청과 일치하는 Job을 재관찰·UID 연결 재시도 |
+| 정리 완료 증거 저장 실패 | `CleaningSource`와 잠금 유지; acknowledgement·`Completing` 기록 재시도 |
+| 최종 잠금 해제 후 `Succeeded` 저장 실패 | `Completing`에서 destination authority 재확인 후 성공 기록 재시도 |
+| 재시도 | 같은 Move의 리소스 이름·CAS·존재 검사를 사용 |
+| 정리 완료 | destination publish와 source cleanup 확인 뒤 `activeMove` 해제 |
+
+API 요청 오류와 관찰된 작업 실패는 다르다. 전자는 같은 phase 재시도, 후자는 FSM의 안전 guard에
+따라 `Blocked`로 진행한다. 일반 operation Job은 600초 완료 TTL을 가지므로 장기 중단 뒤 재요청될 수 있다.
+현재 원본 정리는 Move가 소유하고, Volume 예약 삭제는 CSI `DeleteVolume`이 소유한다.
+
+### Source cleanup journal
+
+```text
+Move: EnsureCleanup
+  → immutable ConfigMap: 승인된 정리 요청
+  → helper Job: 원본 격리·삭제·부재 확인
+  → Move: ConfirmCleanup → 요청 완료 기록 → Completing
+  → MarkSucceeded → activeMove 해제
+```
+
+| 항목 | 계약 |
+|---|---|
+| 요청 위치 | controller namespace, `shiftpv.io/cleanup-request=source-v1` ConfigMap |
+| 불변 요청 | Move 이름·UID, volume ID, source/destination, 승인된 Pool 경로, Job 이름 |
+| 실행 연결 | 실제 Job UID를 metadata annotation으로 저장; 다른 UID·명령·경로는 오류 |
+| 완료 | 같은 Job의 성공을 재확인한 뒤 `shiftpv.io/cleanup-completed=true` 기록 |
+| 수명 | parent ownerReference 없이 보존; 완료 기록은 조건 충족 시 7일 후 정리 |
+| Job TTL | acknowledgement 전 보존, acknowledgement 후 600초 |
+| Job 소멸 | UID 연결 전 생성 재시도; 연결 후 소멸은 CleanupFailed로 Blocked, ResumeOwner 복구 |
+| Pool 경로 변경 | 기존 요청과 다른 경로로 실행 재요청 시 오류 |
+| 부모 소멸·실패 | 요청 보존·uninstall 차단; 기록만으로 파일 삭제를 새로 시작하지 않음 |
+
+Move controller는 삭제 권한과 잠금을 소유한다. 같은 controller의 cleanup lifecycle은 요청 상태와
+완료 기록 보존을 관리한다. `ResumeOwner` 이후 잔여 의무는 운영자의 경로 정리와 읽기 전용 부재
+검증으로 종료한다. [Source cleanup 계약](source-cleanup.md)이 요청 상태·실행 예산·보존 조건을 소유한다.
+식별되지 않은 orphan 디렉터리·예약의 폐기는 별도 운영 판단이다.
+
+`Completing`은 source cleanup Job의 성공을 관찰해 저장한 완료 증거다. 이 단계는 Volume authority만
+관찰하며 PVC·Node·완료 Job의 존속에 의존하지 않는다. 파일 작업은 다시 시작하지 않는다.
+잠금 해제 응답 유실·성공 기록 실패는 같은 Move에서 재시도한다. Owner 변경·다른 Move 잠금·Ready 이외
+상태에서는 `CompletionAuthorityMismatch`로 대기하고, 현재 authority를 운영자가 확인한다.
+Discovery는 `Completing`이 종결될 때까지 같은 Volume의 새 Move 생성을 보류한다.
+잠금 해제 뒤 CSI 삭제로 Volume이 사라지면 API의 `NotFound`를 확인하고 Move 기록만 마무리한다.
+Timeout·접근 거부는 삭제 증거가 아니므로 관찰 오류로 재시도한다. `Completing` 이전의 Volume 부재는
+성공으로 처리하지 않는다. 메트릭은 잠금 해제·Volume 삭제 뒤에도 미완료 `Completing`을 집계한다.
 
 `consumerUID`는 같은 이름의 StatefulSet replacement와 원 consumer를 구분한다. 기존 in-flight Move의
 schema 변경은 active Move가 없는 upgrade window에서 CRD와 Controller를 함께 갱신한다.
+정리 요청 기록이 없는 기존 cleanup Job도 이 upgrade window에서 먼저 종결한다.
+`Completing`을 포함한 CRD를 Controller보다 먼저 적용한다. 기존 `CleaningSource`의 잠금이 이미
+해제되어 완료 증거가 없는 상태는 자동 성공으로 추정하지 않고, 별도 운영 확인 대상으로 처리한다.
 
 ## Explicit owner recovery
 
@@ -309,7 +411,8 @@ publish가 관찰되면 source를 retired로 rename하고 `rm -rf --one-file-sys
 retired가 모두 없어야 cleanup이 성공한다. 삭제 실패는 `CleanupFailed`로 닫는다.
 
 Transfer Secret, ConfigMap, source Pod와 Service는 Move-derived deterministic name을 사용하고 성공 뒤
-정리한다. Operation Job은 300초 deadline, `backoffLimit=2`, 600초 completion TTL을 사용한다.
+정리한다. Operation Job은 300초 deadline, `backoffLimit=2`를 사용한다. Copy/promotion의 completion
+TTL은 600초이며, cleanup의 600초 TTL은 영속 acknowledgement 뒤에 설정한다.
 
 ## Safety invariants
 

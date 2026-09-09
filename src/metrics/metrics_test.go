@@ -25,6 +25,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/lifecycle/cleanup"
 	"github.com/cagojeiger/ShiftPV/src/pool/capacity"
 	"github.com/cagojeiger/ShiftPV/src/pool/readiness"
 )
@@ -151,6 +152,31 @@ func TestMetadataFailuresPreserveLastSuccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompletingMoveHasBoundedMetricPhase(t *testing.T) {
+	c, inv := fixture()
+	inv.moves[0].Status.Phase = "Completing"
+	inv.volumes["v"] = volumeapi.State{OwnerNode: "b", Phase: "Ready", ActiveMove: "move"}
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter), "shiftpv_moves{phase=\"Completing\"} 1", "shiftpv_moves{phase=\"Unknown\"} 0")
+	inv.volumes["v"] = volumeapi.State{OwnerNode: "b", Phase: "Ready"}
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter), "shiftpv_moves{phase=\"Completing\"} 1")
+	delete(inv.volumes, "v")
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter), "shiftpv_moves{phase=\"Completing\"} 1")
+	inv.moves[0].Status.Phase = "Succeeded"
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter), "shiftpv_moves{phase=\"Completing\"} 0")
 }
 
 func TestInvalidAccountingKeepsNumbersAndUnknownInitial(t *testing.T) {
@@ -399,7 +425,7 @@ func TestDedicatedMetricFamilyContract(t *testing.T) {
 	e.ObserveDiscovery(nil, nil)
 	_, _ = e.intercept(context.Background(), nil, &grpc.UnaryServerInfo{FullMethod: "/csi.v1.Controller/CreateVolume"}, func(context.Context, any) (any, error) { return nil, status.Error(codes.Code(1000), "unknown code") })
 	families, err := e.Registry.Gather()
-	if err != nil || len(families) != 15 {
+	if err != nil || len(families) != 16 {
 		t.Fatalf("families=%d err=%v", len(families), err)
 	}
 	for _, family := range families {
@@ -410,7 +436,7 @@ func TestDedicatedMetricFamilyContract(t *testing.T) {
 		for _, metric := range family.Metric {
 			for _, label := range metric.Label {
 				switch label.GetName() {
-				case "pool", "node", "source", "phase", "reason", "method", "code":
+				case "pool", "node", "source", "phase", "state", "reason", "method", "code":
 				default:
 					t.Fatalf("unexpected label %s", label.GetName())
 				}
@@ -422,4 +448,28 @@ func TestDedicatedMetricFamilyContract(t *testing.T) {
 	if err != nil || len(problems) != 0 {
 		t.Fatalf("metric contract lint: %v %v", problems, err)
 	}
+}
+
+func TestCleanupRequestMetricsKeepInvalidEvidenceVisible(t *testing.T) {
+	ctx := context.Background()
+	c, _ := fixture()
+	j := cleanup.Journal{Client: c.Client, Namespace: c.Namespace}
+	i := cleanup.Intent{MoveName: "move-a", MoveUID: "uid-a", VolumeID: "volume-a", SourceNode: "source", DestinationNode: "destination", PoolPath: "/pool", JobName: "job-a"}
+	if _, err := j.Ensure(ctx, i); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.SetState(ctx, i, cleanup.NeedsReview, "inspect"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter), `shiftpv_cleanup_requests{state="NeedsReview"} 1`)
+	cm, _ := c.Client.CoreV1().ConfigMaps(c.Namespace).Get(ctx, cleanup.Name(i.MoveUID), metav1.GetOptions{})
+	cm.Data["intent"] = "broken"
+	c.Client.CoreV1().ConfigMaps(c.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter), `shiftpv_cleanup_requests{state="Unknown"} 1`, `shiftpv_cleanup_requests{state="NeedsReview"} 0`)
 }

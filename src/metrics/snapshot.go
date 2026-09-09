@@ -49,7 +49,8 @@ var definitions = []struct {
 	{"metrics_snapshot_success", "Whether the latest observation completed successfully.", []string{"source"}},
 	{"metrics_snapshot_last_success_timestamp_seconds", "Unix time of the last successful observation, zero before first success.", []string{"source"}},
 	{"volumes", "Current Volume objects by phase.", []string{"phase"}},
-	{"moves", "Moves referenced by a live Volume activeMove, by phase.", []string{"phase"}},
+	{"moves", "Moves referenced by a live Volume activeMove plus unfinished Completing journals, by phase.", []string{"phase"}},
+	{"cleanup_requests", "Durable source cleanup requests by observed lifecycle state; Unknown means invalid metadata.", []string{"state"}},
 	{"mobility_deferred_volumes", "Volumes deferred during the last completed cordon discovery.", []string{"reason"}},
 }
 

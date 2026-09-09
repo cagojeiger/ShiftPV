@@ -192,7 +192,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", &admission.Handler{Client: client, Volumes: volumeRegistry})
 	mux.Handle("/validate-delete", &lifecycleadmission.Handler{Checker: &uninstallcheck.Checker{
-		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, StorageClassName: *storageClassName,
+		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, StorageClassName: *storageClassName, Namespace: *namespace,
 	}, Permit: &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}})
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
 	webhookServer = &http.Server{Addr: *webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}

@@ -213,7 +213,17 @@ condition으로 placement admission을 inert 상태로 둔다.
 
 ## Upgrade
 
-Upgrade window는 모든 `activeMove`가 비어 있고 recovery journal이 완료된 상태에서 시작한다.
+Upgrade와 rollback은 다음 조건을 유지하는 이동 트리거 동결 창에서 진행한다.
+
+| 대상 | 교체 조건 |
+|---|---|
+| Volume | 모든 `activeMove`가 빈 값 |
+| Move | 모두 `Succeeded` 또는 `Blocked` + `recoveryPhase=Recovered` |
+| Cleanup | 실행 중인 확인 Job이 종결되고 미완료 정리 의무가 해소된 상태 |
+| 유지보수 창 | cordon·drain·수동 Move 요청을 동결하여 교체 조건 유지 |
+
+`Completing`은 잠금 해제 뒤에도 남을 수 있는 미완료 journal이다. 이전 Controller가 만든 Move와
+cleanup Job은 해당 Controller에서 종결한 뒤 교체한다.
 Helm은 설치된 CRD를 보존하므로 새 Controller보다 schema를 먼저 적용한다. `--force-conflicts`는
 최초 Helm field ownership을 명시적으로 인수한다.
 
@@ -324,6 +334,36 @@ CSI는 owner directory → reservation → Volume CR 순서로 정리한다. Poo
 PV finalizer는 Kubernetes/provisioner가 정리한다. Timeout이면 PV Event와 Controller/helper log의 원인을
 해소해 재시도를 기다린다. Recovery의 `.shiftpv/aborted/` quarantine은 별도 운영자 검토·폐기 대상이다.
 
+## Cleanup review
+
+정리 확인 요청은 `mobility.enabled=true`에서 처리한다.
+Controller와 `mobility.helperImage`는 `/shiftpv-cleanup-check` 실행 파일을 포함한 같은 구현 버전으로 배포한다.
+이 실행 파일은 controller image에 포함되며, node image의 역할은 유지한다.
+
+정리 의무는 service recovery와 별도로 확인한다. `NeedsReview` 요청은 경로·로그를 점검한 뒤
+읽기 전용 검증으로 종료한다. [계약과 확인 대상 경로](../../docs/spec/source-cleanup.md)를 기준으로
+보존 데이터의 필요성을 판단하고, 운영자가 승인한 잔여 데이터만 별도로 정리한다.
+
+```bash
+kubectl -n shiftpv-system get cm -l shiftpv.io/cleanup-request \
+  -o custom-columns='NAME:.metadata.name,STATE:.metadata.annotations.shiftpv\.io/cleanup-state,REASON:.metadata.annotations.shiftpv\.io/cleanup-reason,CHECK:.metadata.annotations.shiftpv\.io/cleanup-check-id'
+kubectl -n shiftpv-system get cm <request-name> -o jsonpath='{.data.intent}'
+# 필요한 경우 먼저 해당 Blocked Move의 ResumeOwner를 완료한다.
+# 확인 번호는 이전 cleanup-check-id보다 큰 양의 정수로 지정한다.
+kubectl -n shiftpv-system annotate cm <request-name> shiftpv.io/cleanup-check=1 --overwrite
+kubectl -n shiftpv-system get cm <request-name> -w
+```
+
+| 결과 | 다음 동작 |
+|---|---|
+| `Completed` | 정리 의무 종료; 완료 증거는 7일 보존 조건 적용 |
+| `NeedsReview` | reason 및 확인 Job 로그 점검, 원인 해소 후 증가한 번호로 확인 |
+| `Running` | 같은 번호로 대기; 재시작에도 동일 Job UID·image 유지 |
+| `Unknown` 지표 | 요청의 손상·불일치 점검; 원래 증거 복구 |
+
+검증 Job은 파일을 읽기 전용으로 확인한다. 기존 데이터 삭제나 완료 annotation의 직접 수정은
+이 검증 절차와 별개의 운영 권한이며, 정상 처리에서는 controller가 완료 증거를 기록한다.
+
 ## Uninstall and recovery
 
 Uninstall guard와 lifecycle webhook이 하나의 제거 시도를 조정한다.
@@ -356,6 +396,7 @@ sequenceDiagram
 | ShiftPV PV | 해소 |
 | `ShiftPVVolume` | 해소 |
 | non-terminal `ShiftPVMove` | 해소 |
+| controller namespace의 정리 요청 | 완료 acknowledgement 확인; 미완료·손상된 기록은 보존·확인 |
 | Kubernetes API 검사 | 성공 |
 
 보호 대상은 labeled CSI Deployment, DaemonSet, Service, ServiceAccount, RBAC, StorageClass와
