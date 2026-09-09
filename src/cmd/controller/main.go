@@ -108,7 +108,7 @@ func main() {
 			go observer.Run(ctx)
 		}
 	}
-	permitStore := &uninstallcheck.PermitStore{Client: client, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}
+	permitStore := &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}
 	quiesceGate := &uninstallcheck.QuiesceGate{Store: permitStore, Interval: 200 * time.Millisecond}
 	if err := wait.PollUntilContextTimeout(ctx, time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
 		if gateErr := quiesceGate.Bootstrap(ctx); gateErr != nil {
