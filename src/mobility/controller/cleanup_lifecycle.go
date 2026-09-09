@@ -16,7 +16,10 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/lifecycle/cleanup"
 )
 
-const cleanupRetention = 7 * 24 * time.Hour
+const (
+	cleanupRetention     = 7 * 24 * time.Hour
+	cleanupRecordTimeout = 5 * time.Second
+)
 
 func (r *Reconciler) reconcileCleanupLifecycle(ctx context.Context) error {
 	now := r.now()
@@ -57,7 +60,7 @@ func (r *Reconciler) sweepCleanup(ctx context.Context) error {
 		r.cleanupCursor = cm.Name
 		record, err := cleanup.Decode(cm)
 		if err == nil {
-			itemCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			itemCtx, cancel := context.WithTimeout(ctx, cleanupRecordTimeout)
 			err = r.reconcileCleanupRecord(itemCtx, record, byName)
 			cancel()
 		}
@@ -72,6 +75,12 @@ func (r *Reconciler) reconcileCleanupRecord(ctx context.Context, record cleanup.
 	if record.Completed {
 		return r.retainCleanupEvidence(ctx, record, moves)
 	}
+	pendingRequest := record.CheckRequest != "" && record.CheckRequest != record.CheckID && (record.CheckID == "" || record.CheckDone)
+	if pendingRequest {
+		if err := cleanup.ValidateCheckRequest(record.CheckRequest, record.CheckID); err != nil {
+			return r.cleanupReview(ctx, record, err)
+		}
+	}
 	if record.CheckDone {
 		if err := r.expireFinishedCheck(ctx, record); err != nil {
 			return err
@@ -80,7 +89,7 @@ func (r *Reconciler) reconcileCleanupRecord(ctx context.Context, record cleanup.
 	if record.CheckID != "" && !record.CheckDone {
 		return r.reconcileCleanupCheck(ctx, record, moves)
 	}
-	if record.CheckRequest != "" && record.CheckRequest != record.CheckID {
+	if pendingRequest {
 		if err := r.cleanupCheckAuthority(ctx, record, moves); err != nil {
 			return r.cleanupReview(ctx, record, err)
 		}

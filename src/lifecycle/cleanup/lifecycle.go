@@ -35,6 +35,26 @@ func checkSequence(value string) (uint64, error) {
 	return n, nil
 }
 
+// ValidateCheckRequest validates a new sequence before authority lookups.
+// StartCheck repeats it against the current journal at the mutation boundary.
+func ValidateCheckRequest(token, previous string) error {
+	next, err := checkSequence(token)
+	if err != nil {
+		return err
+	}
+	var prior uint64
+	if previous != "" {
+		prior, err = checkSequence(previous)
+		if err != nil {
+			return err
+		}
+	}
+	if next <= prior {
+		return fmt.Errorf("cleanup check number must increase")
+	}
+	return nil
+}
+
 func decodeLifecycle(cm *corev1.ConfigMap, r *Record) error {
 	r.UID, r.ResourceVersion = string(cm.UID), cm.ResourceVersion
 	r.State, r.Reason = cm.Annotations[StateKey], cm.Annotations[ReasonKey]
@@ -159,8 +179,7 @@ func (j Journal) StartCheck(ctx context.Context, i Intent, token, image string) 
 	if image == "" {
 		return fmt.Errorf("cleanup check image required")
 	}
-	next, err := checkSequence(token)
-	if err != nil {
+	if err := ValidateCheckRequest(token, ""); err != nil {
 		return err
 	}
 	return j.mutate(ctx, i, func(cm *corev1.ConfigMap, r Record) error {
@@ -170,9 +189,8 @@ func (j Journal) StartCheck(ctx context.Context, i Intent, token, image string) 
 		if r.CheckID == token {
 			return nil
 		}
-		previous, _ := checkSequence(r.CheckID)
-		if next <= previous {
-			return fmt.Errorf("cleanup check number must increase")
+		if err := ValidateCheckRequest(token, r.CheckID); err != nil {
+			return err
 		}
 		if r.CheckID != "" && !r.CheckDone {
 			return fmt.Errorf("previous cleanup check is still active")

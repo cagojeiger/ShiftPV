@@ -91,7 +91,8 @@ stateDiagram-v2
 | 항목 | 값·조건 |
 |---|---|
 | Lifecycle 실행 | `mobility.enabled=true` |
-| 관찰 | 1분 주기, pass 10s, 요청별 2s, 최대 32건씩 순환 |
+| 관찰 | 1분 주기, pass 10s, 요청별 5s, 최대 32건씩 순환 |
+| API 예산 | 잘못된 확인 번호는 authority 조회 전에 거부; uninstall polling은 별도 lifecycle admission client 사용 |
 | API 갱신 | 관찰 내용이 바뀔 때 기록 |
 | 완료 기록 보존 | 완료 시각부터 7일; 시각 없는 완료 기록은 첫 관찰부터 |
 | 삭제 조건 | 원 Move 종결 또는 부재, Volume activeMove 없음, 증거 Job 부재, UID·resourceVersion 일치 |
