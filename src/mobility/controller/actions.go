@@ -38,6 +38,8 @@ func (r *Reconciler) execute(ctx context.Context, move *volumeapi.Move, observed
 		return r.commitOwner(ctx, move, observed)
 	case fsm.ActionEnsureCleanup:
 		return r.ensureCleanup(ctx, move, observed)
+	case fsm.ActionConfirmCleanup:
+		return r.acknowledgeCleanup(ctx, *move)
 	case fsm.ActionMarkSucceeded:
 		return r.markSucceeded(ctx, move, observed)
 	case fsm.ActionMarkBlocked:
@@ -219,18 +221,25 @@ func (r *Reconciler) ensureCleanup(ctx context.Context, move *volumeapi.Move, ob
 }
 
 func (r *Reconciler) markSucceeded(ctx context.Context, move *volumeapi.Move, observed observation) error {
+	if !completionAllowed(*move, observed.Volume, observed.VolumeMissing) {
+		return fmt.Errorf("completion requires durable cleanup evidence and matching destination authority")
+	}
 	if err := r.deleteTransferResources(ctx, observed.Names); err != nil {
 		return err
 	}
-	if observed.Volume.Phase == volumeapi.PhaseReady && observed.Volume.ActiveMove == "" {
+	if observed.VolumeMissing || observed.Volume.ActiveMove == "" {
 		return nil
-	}
-	if observed.Volume.Phase != volumeapi.PhaseReady || observed.Volume.ActiveMove != move.Name {
-		return fmt.Errorf("cannot complete volume in phase %q with active move %q", observed.Volume.Phase, observed.Volume.ActiveMove)
 	}
 	next := observed.Volume
 	next.ActiveMove = ""
 	return r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseReady, move.Name, observed.Volume.OwnerNode, next)
+}
+
+func completionAllowed(move volumeapi.Move, state volumeapi.State, missing bool) bool {
+	return move.Status.Phase == string(fsm.PhaseCompleting) && move.Name != "" &&
+		move.Status.DestinationNode != "" && move.Status.DestinationNode != move.Spec.SourceNode &&
+		(missing || (state.Phase == volumeapi.PhaseReady && state.OwnerNode == move.Status.DestinationNode &&
+			(state.ActiveMove == move.Name || state.ActiveMove == "")))
 }
 
 func (r *Reconciler) markBlocked(ctx context.Context, move *volumeapi.Move, observed observation, reason string) error {

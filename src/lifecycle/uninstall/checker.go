@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/lifecycle/cleanup"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 )
 
@@ -24,6 +25,7 @@ type Checker struct {
 	Client           kubernetes.Interface
 	Volumes          VolumeRepository
 	StorageClassName string
+	Namespace        string
 }
 
 type Blocker struct {
@@ -109,6 +111,23 @@ func (c *Checker) Check(ctx context.Context) (Report, error) {
 			Name:   move.Name,
 			Reason: fmt.Sprintf("phase=%s volume=%s", phase, move.Spec.VolumeID),
 		})
+	}
+
+	requests, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: cleanup.Label})
+	if err != nil {
+		return Report{}, fmt.Errorf("list cleanup requests: %w", err)
+	}
+	for index := range requests.Items {
+		request := &requests.Items[index]
+		record, decodeErr := cleanup.Decode(request)
+		if decodeErr == nil && record.Completed {
+			continue
+		}
+		reason := fmt.Sprintf("unacknowledged source cleanup move=%s volume=%s", record.Intent.MoveName, record.Intent.VolumeID)
+		if decodeErr != nil {
+			reason = decodeErr.Error()
+		}
+		report.Blockers = append(report.Blockers, Blocker{Kind: "CleanupRequest", Namespace: request.Namespace, Name: request.Name, Reason: reason})
 	}
 
 	sort.Slice(report.Blockers, func(left, right int) bool {

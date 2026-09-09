@@ -13,7 +13,47 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/lifecycle/cleanup"
 )
+
+func TestCheckRetainsCleanupObligationWithoutParent(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewClientset()
+	j := cleanup.Journal{Client: client, Namespace: "system"}
+	i := cleanup.Intent{MoveName: "deleted-move", MoveUID: "original-uid", VolumeID: "deleted-volume", SourceNode: "a", DestinationNode: "b", PoolPath: "/pool", JobName: "cleanup", Image: "helper"}
+	if _, err := j.Ensure(ctx, i); err != nil {
+		t.Fatal(err)
+	}
+	c := &Checker{Client: client, Volumes: &memoryRepository{}, StorageClassName: "shiftpv", Namespace: "system"}
+	report, err := c.Check(ctx)
+	if err != nil || report.Safe() || len(report.Blockers) != 1 || report.Blockers[0].Kind != "CleanupRequest" {
+		t.Fatalf("orphan obligation lost: %+v %v", report, err)
+	}
+	if err := j.BindJob(ctx, i, "job-uid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Complete(ctx, i, "job-uid"); err != nil {
+		t.Fatal(err)
+	}
+	report, err = c.Check(ctx)
+	if err != nil || !report.Safe() {
+		t.Fatalf("acknowledged request blocks: %+v %v", report, err)
+	}
+	client.PrependReactor("list", "configmaps", func(ktestingAction clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("cleanup inventory unavailable")
+	})
+	if _, err := c.Check(ctx); err == nil {
+		t.Fatal("cleanup inventory failure hidden")
+	}
+}
+
+func TestCheckBlocksCorruptCleanupRequest(t *testing.T) {
+	client := fake.NewClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "broken", Namespace: "system", Labels: map[string]string{cleanup.Label: "source-v1"}}})
+	report, err := (&Checker{Client: client, Volumes: &memoryRepository{}, StorageClassName: "shiftpv", Namespace: "system"}).Check(context.Background())
+	if err != nil || report.Safe() || len(report.Blockers) != 1 || report.Blockers[0].Kind != "CleanupRequest" {
+		t.Fatalf("corrupt request accepted: %+v %v", report, err)
+	}
+}
 
 type memoryRepository struct {
 	volumes    map[string]volumeapi.State
@@ -38,6 +78,16 @@ func TestCheckAllowsEmptyCluster(t *testing.T) {
 	}
 	if !report.Safe() {
 		t.Fatalf("Check() blockers = %#v", report.Blockers)
+	}
+}
+
+func TestCheckBlocksUnfinishedCompletionWithoutVolumeLock(t *testing.T) {
+	checker := &Checker{Client: fake.NewClientset(), StorageClassName: "shiftpv", Volumes: &memoryRepository{
+		moves: []volumeapi.Move{{Name: "finishing", Spec: volumeapi.MoveSpec{VolumeID: "volume"}, Status: volumeapi.MoveStatus{Phase: "Completing"}}},
+	}}
+	report, err := checker.Check(context.Background())
+	if err != nil || report.Safe() || len(report.Blockers) != 1 || report.Blockers[0].Kind != "ShiftPVMove" {
+		t.Fatalf("unfinished completion did not block uninstall: %+v, %v", report, err)
 	}
 }
 

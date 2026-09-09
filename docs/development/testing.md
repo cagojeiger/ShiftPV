@@ -62,6 +62,49 @@ Unit test는 다음 고비용 경계를 포함한다.
 | Metrics | cached scrape 무 I/O, API 오류·freshness, 예약 회계, bounded label, HTTP 장애 분리 |
 | Chart | kubelet root, component 경계, StorageClass, webhook mode |
 
+### Action boundaries
+
+| 계약 | 회귀 테스트 |
+|---|---|
+| 모든 phase의 정상·대기·실패 결정 | `src/mobility/fsm/fsm_test.go` |
+| 관찰·결정·action 오류에서 phase와 activeMove 보존 | `TestMoveErrorsPreservePhaseAndActiveMove` |
+| Action 후 journal 거절·Controller 재생성 시 단일 Job 수렴 | `TestMoveActionSurvivesJournalFailureAndControllerRestart` |
+| Destination publish·cleanup 완료 전 잠금 유지 | `TestMoveCompletionWaitsForPublishAndCleanupEvidence` |
+| 요청 저장 실패 시 파일 작업 차단 | `TestCleanupIntentWriteFailureNeverStartsDiskWork` |
+| 정리 acknowledgement 후 Job 소멸·Move 기록 실패 복구 | `TestCleanupAcknowledgementSurvivesJobLoss` |
+| Pool·Job UID·owner·잠금·publisher 변경 차단 | `TestCleanupRejectsChangedPoolOrJobIncarnation` |
+| 요청 생성·완료 응답 유실 수렴 | `src/lifecycle/cleanup/journal_test.go` |
+| 부모 없는 미완료 요청의 uninstall 차단 | `TestCheckRetainsCleanupObligationWithoutParent` |
+| 정리 확인의 UID·시도 번호·권한·순회·보관 경계 | `src/mobility/controller/cleanup_edges_test.go` |
+| 읽기 전용 확인에서 권한·I/O 오류와 경로 부재 구분 | `src/lifecycle/cleanup/pathcheck/check_test.go` |
+| 최종 잠금 해제 후 journal 실패·Job 소멸·재시작 복구 | `TestMoveCompletionJournalFailureRecoversAfterRestart` |
+| 완료 증거 저장 전 잠금·transfer resource 보존 | `TestCompletionConfirmationPrecedesResourceDeletionAndUnlock` |
+| CAS·journal·삭제 응답 유실과 반복 기록 실패 | `TestCompletionRecoversAcrossAPIFailureBoundaries` |
+| 완료 중 다른 owner·Move 잠금·phase 보존 | `TestCompletionRejectsConflictingAuthority` |
+| 관찰 직후 다른 Move가 잠금을 얻는 경합 | `TestCompletionCASPreservesConcurrentMove` |
+| 잠금 해제 뒤 Volume 삭제·관찰 오류 구분 | `TestCompletionAfterVolumeDeletion`, `TestCompletionDoesNotTreatReadErrorsAsDeletion` |
+| API 수락 후 응답 유실 | `src/mobility/controller/fault_boundary_test.go` |
+| Spec의 phase·action 목록과 코드 enum 일치 | `TestMobilityContractNamesMatchFSM` |
+
+```bash
+go test -race -count=1 ./src/mobility/... ./src/csi/... ./test/docs
+RECOVERY_SCRIPT_IMAGE=shiftpv:dev go test -count=1 ./src/mobility/controller -run 'Test(CleanupSourceScript|RecoveryRetirementScript|RecoveryOwnerVerificationScript)'
+```
+
+두 번째 명령은 준비된 helper image에서 현재 script를 실행한다. Linux에서는 image 지정 없이 실행하고,
+macOS에서 image를 지정하지 않으면 해당 script test는 skip된다. 이는 실제 Kind 이동 검증과 별도다.
+
+`test/e2e/kind/mobility/completion.sh`는 격리 Kind에서 한 Volume의 성공 기록만 admission policy로
+거절한다. 실제 이동·원본 삭제 뒤 cleanup Job 삭제, CSI Volume 삭제, Controller 재시작을 겹치고
+정책 해제 후 `Succeeded` 수렴과 helper 재생성 부재를 확인한다. 정리 요청의 불변성·Move/Job UID·
+경로·완료 기록도 검증한다. Post-commit recovery는 남은 요청이 실제 deletion admission에서
+`CleanupRequest` blocker로 나타나는지 server-side dry-run으로 확인한다.
+
+`test/e2e/kind/mobility/cleanup-lifecycle.sh`는 recovery 뒤 격리 데이터가 있으면 확인을 실패시킨다.
+실패한 시도의 Job 삭제·Controller 재시작·같은 번호 재요청은 재실행하지 않는다. 테스트 소유 데이터를
+Pool 밖으로 옮긴 뒤 증가한 번호로 다시 확인하여 완료 기록·TTL·uninstall 의무 해제를 검증한다.
+최신 destination checksum과 PVC/PV identity는 전 과정에서 유지한다.
+
 ## kind E2E
 
 각 실행은 격리된 cluster, kubeconfig와 host directory를 만든다. 서로 다른 `CLUSTER_NAME`으로

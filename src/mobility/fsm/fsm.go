@@ -18,6 +18,7 @@ const (
 	PhaseReleasingDestination         Phase = "ReleasingDestination"
 	PhaseWaitingForDestinationPublish Phase = "WaitingForDestinationPublish"
 	PhaseCleaningSource               Phase = "CleaningSource"
+	PhaseCompleting                   Phase = "Completing"
 	PhaseSucceeded                    Phase = "Succeeded"
 	PhaseBlocked                      Phase = "Blocked"
 )
@@ -36,6 +37,7 @@ const (
 	ActionEnsurePromotion  Action = "EnsurePromotion"
 	ActionCommitOwner      Action = "CommitOwner"
 	ActionEnsureCleanup    Action = "EnsureCleanup"
+	ActionConfirmCleanup   Action = "ConfirmCleanup"
 	ActionMarkSucceeded    Action = "MarkSucceeded"
 	ActionMarkBlocked      Action = "MarkBlocked"
 )
@@ -66,6 +68,7 @@ type Observation struct {
 	PublishedOnDestination bool
 	CleanupComplete        bool
 	CleanupFailed          bool
+	CompletionReady        bool
 }
 
 type Decision struct {
@@ -80,6 +83,12 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 	}
 	if terminal(current) {
 		return Decision{Next: current, Action: ActionWait}, nil
+	}
+	if current == PhaseCompleting {
+		if observation.CompletionReady {
+			return transition(current, PhaseSucceeded, ActionMarkSucceeded, "")
+		}
+		return transition(current, current, ActionWait, "CompletionAuthorityMismatch")
 	}
 	if observation.SourceAuthorityInvalid {
 		return blocked(current, reasonOr(observation.UnsafeReason, "SourceAuthorityInvalid")), nil
@@ -218,6 +227,9 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		}
 		return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
 	case PhaseWaitingForDestinationPublish:
+		if observation.CleanupFailed {
+			return blocked(current, reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
+		}
 		if observation.DestinationUnavailable {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
@@ -233,7 +245,7 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return blocked(current, reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
 		}
 		if observation.CleanupComplete {
-			return transition(current, PhaseSucceeded, ActionMarkSucceeded, "")
+			return transition(current, PhaseCompleting, ActionConfirmCleanup, "")
 		}
 		return transition(current, current, ActionEnsureCleanup, "")
 	default:
@@ -269,7 +281,8 @@ var allowedTransitions = map[Phase][]Phase{
 	PhaseCommitting:                   {PhaseCommitting, PhaseReleasingDestination, PhaseBlocked},
 	PhaseReleasingDestination:         {PhaseReleasingDestination, PhaseWaitingForDestinationPublish, PhaseBlocked},
 	PhaseWaitingForDestinationPublish: {PhaseWaitingForDestinationPublish, PhaseCleaningSource, PhaseBlocked},
-	PhaseCleaningSource:               {PhaseCleaningSource, PhaseSucceeded, PhaseBlocked},
+	PhaseCleaningSource:               {PhaseCleaningSource, PhaseCompleting, PhaseBlocked},
+	PhaseCompleting:                   {PhaseCompleting, PhaseSucceeded},
 	PhaseSucceeded:                    {PhaseSucceeded},
 	PhaseBlocked:                      {PhaseBlocked},
 }

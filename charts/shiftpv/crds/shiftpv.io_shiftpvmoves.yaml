@@ -68,7 +68,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, WaitingForCapacity, Copying, Promoting, Committing, ReleasingDestination, WaitingForDestinationPublish, CleaningSource, Blocked, Succeeded]
+                  enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, WaitingForCapacity, Copying, Promoting, Committing, ReleasingDestination, WaitingForDestinationPublish, CleaningSource, Completing, Blocked, Succeeded]
                 recoveryPhase:
                   type: string
                   enum: ['', Quiescing, Verifying, Retiring, Resuming, Completing, Recovered]

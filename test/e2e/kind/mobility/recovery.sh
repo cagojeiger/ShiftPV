@@ -56,7 +56,7 @@ recover_source_only() {
 }
 
 recover_after_commit_failure() {
-	local return_move current_pod latest_checksum failed_job destination_mount
+	local return_move current_pod latest_checksum failed_job destination_mount denial
 	# Real rename failure in source cleanup; the volume contents are untouched.
 	kubectl uncordon "${SOURCE_NODE}"
 	kubectl cordon "${DESTINATION_NODE}"
@@ -97,4 +97,11 @@ recover_after_commit_failure() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 	kubectl uncordon "${DESTINATION_NODE}"
 	echo 'post-commit recovery passed: latest destination writes preserved; stale source quarantined'
+	if denial=$(kubectl -n shiftpv-system delete deployment/shiftpv-controller --dry-run=server 2>&1); then
+		echo 'unacknowledged cleanup permitted controller deletion' >&2
+		return 1
+	fi
+	grep -Fq 'CleanupRequest shiftpv-system/shiftpv-cleanup-' <<<"${denial}"
+	echo 'unacknowledged cleanup remains an uninstall dependency after owner recovery'
+	verify_cleanup_lifecycle "${return_move}" "${DESTINATION_NODE}" "${destination_mount}" "${latest_checksum}" "${current_pod}"
 }

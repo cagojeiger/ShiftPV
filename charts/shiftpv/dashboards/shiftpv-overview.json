@@ -334,7 +334,7 @@
       "id": 3,
       "type": "stat",
       "title": "Active moves",
-      "description": "Current linked Moves except Succeeded, including Blocked. Unknown if any returned metadata observer in the selected scope is unavailable or stale. Pool filter does not apply.",
+      "description": "Current linked Moves except Succeeded, including Blocked, plus unfinished Completing journals after unlock. Unknown if any returned metadata observer in the selected scope is unavailable or stale. Pool filter does not apply.",
       "gridPos": {
         "x": 12,
         "y": 1,

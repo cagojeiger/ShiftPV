@@ -10,6 +10,8 @@ PHASE_TIMEOUT_SECONDS=${PHASE_TIMEOUT_SECONDS:-180}
 source "${ROOT_DIR}/test/e2e/kind/mobility/recovery.sh"
 # shellcheck source=test/e2e/kind/mobility/preflight.sh
 source "${ROOT_DIR}/test/e2e/kind/mobility/preflight.sh"
+# shellcheck source=test/e2e/kind/mobility/cleanup-lifecycle.sh
+source "${ROOT_DIR}/test/e2e/kind/mobility/cleanup-lifecycle.sh"
 
 for command in docker kind kubectl helm sed; do
 	command -v "${command}" >/dev/null || {
@@ -168,6 +170,8 @@ docker exec "${COPY_FAULT_NODE}" rm -- "${COPY_FAULT_PATH}"
 
 echo "ShiftPV blocked mobility E2E passed: volume=${BLOCKED_VOLUME} move=${BLOCKED_MOVE} reason=CopyFailed"
 recover_source_only
+
+CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/completion.sh"
 
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/mobility/manifests/wffc-workload.yaml"
 kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=5m

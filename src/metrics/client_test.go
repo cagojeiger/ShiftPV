@@ -44,7 +44,7 @@ func TestObservationClientBudgetAndInventory(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 4 {
+	if calls != 5 {
 		t.Fatalf("snapshot made %d API calls", calls)
 	}
 	if _, err := New().NewController(&rest.Config{Host: ":invalid"}, "system", time.Second, time.Minute); err == nil {

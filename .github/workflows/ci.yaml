@@ -94,10 +94,10 @@ jobs:
         run: |
           if [[ "${COMPONENT}" == "controller" ]]; then
             docker run --rm --entrypoint /bin/sh "shiftpv-controller:ci" \
-              -ec "test -x /shiftpv-controller && test -x /shiftpv-uninstall-guard && test ! -e /shiftpv-node"
+              -ec "test -x /shiftpv-controller && test -x /shiftpv-uninstall-guard && test -x /shiftpv-cleanup-check && test ! -e /shiftpv-node"
           else
             docker run --rm --entrypoint /bin/sh "shiftpv-node:ci" \
-              -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard"
+              -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard && test ! -e /shiftpv-cleanup-check"
           fi
 
   linux-mount:

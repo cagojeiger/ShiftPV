@@ -293,10 +293,11 @@ func TestCleanupFailureReasonIsNotMaskedByEvictedConsumer(t *testing.T) {
 	state.Phase = "Ready"
 	state.PublishedNodes = []string{"destination"}
 	repo.volumes[move.Spec.VolumeID] = state
-	_, _ = client.BatchV1().Jobs("system").Create(context.Background(), &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{Name: namesFor(move.Name).CleanupJob},
-		Status:     batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}},
-	}, metav1.CreateOptions{})
+	assignJobUIDs(client)
+	if err := r.ensureCleanupJob(context.Background(), move, namesFor(move.Name)); err != nil {
+		t.Fatal(err)
+	}
+	finishRecoveryJobs(t, client, batchv1.JobFailed)
 	if err := r.reconcileMove(context.Background(), move); err != nil {
 		t.Fatal(err)
 	}

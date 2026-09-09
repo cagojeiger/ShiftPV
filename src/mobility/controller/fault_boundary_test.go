@@ -202,7 +202,7 @@ func TestCopyResourcesConvergeAfterCreateResponseLost(t *testing.T) {
 func TestMobilityJobsConvergeAfterCreateResponseLost(t *testing.T) {
 	ctx := context.Background()
 	move := volumeapi.Move{
-		Name:   "move-test",
+		Name: "move-test", UID: "move-uid",
 		Spec:   volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
 		Status: volumeapi.MoveStatus{DestinationNode: "destination"},
 	}
@@ -220,7 +220,8 @@ func TestMobilityJobsConvergeAfterCreateResponseLost(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
 			injectAcceptedCreateTimeout(t, client, "jobs", test.jobName)
-			repository := &memoryRepository{pools: []volumeapi.Pool{
+			assignJobUIDs(client)
+			repository := &memoryRepository{volumes: map[string]volumeapi.State{move.Spec.VolumeID: {Phase: "Ready", OwnerNode: "destination", ActiveMove: move.Name, PublishedNodes: []string{"destination"}}}, pools: []volumeapi.Pool{
 				{Name: "source", NodeName: "source", MountPath: "/source-pool"},
 				{Name: "destination", NodeName: "destination", MountPath: "/destination-pool"},
 			}}
@@ -308,7 +309,8 @@ func TestOwnerCommitConvergesAfterCASResponseLost(t *testing.T) {
 func TestCompletionConvergesAfterActiveMoveClearResponseLost(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}}
+	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseCompleting), DestinationNode: "destination"}}
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
 		Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name, PublishedNodes: []string{"destination"},
 	}}}

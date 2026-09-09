@@ -14,7 +14,7 @@ Controller           ── API snapshot ─ 메모리 ── /metrics
 | Target 식별 | ServiceMonitor의 `shiftpv="true"`; dashboard query 범위를 ShiftPV로 한정 |
 | 수집 요청 | 완료된 메모리 snapshot만 반환 |
 | Node | 기존 Pool probe 주기 재사용; 등록 directory를 포함한 filesystem |
-| Controller | 기본 30s마다 Pool·Volume·Move·reservation CM List; 한 pass timeout 10s |
+| Controller | 기본 30s마다 Pool·Volume·Move·reservation CM·cleanup CM List; 한 pass timeout 10s |
 | API 예산 | 전용 client 두 개가 2 QPS / burst 4 limiter를 공유; storage client 예산과 분리 |
 | 저장소 판단 | 기존 admission 검사와 Move journal이 담당 |
 | HTTP | 내부 HTTP `:8080/metrics`; webhook TLS와 별개 |
@@ -36,7 +36,8 @@ Controller           ── API snapshot ─ 메모리 ── /metrics
 | `metrics_snapshot_success` | gauge | source | 최근 관찰 성공 0/1 |
 | `metrics_snapshot_last_success_timestamp_seconds` | gauge | source | 마지막 성공 Unix 시각; 첫 성공 전 0 |
 | `volumes` | gauge | phase | 현재 Volume CR 수 |
-| `moves` | gauge | phase | 현재 Volume의 activeMove로 연결된 Move 수 |
+| `moves` | gauge | phase | 현재 Volume의 activeMove로 연결된 Move와 미완료 Completing 수; 중복 제외 |
+| `cleanup_requests` | gauge | state | Pending·Running·NeedsReview·Completed·Unknown 정리 요청 수 |
 | `mobility_deferred_volumes` | gauge | reason | 완료된 cordon discovery에서 보류된 Volume 수 |
 | `csi_requests_total` | counter | method, code | CSI lifecycle RPC 완료 호출 수; 재시도 포함 |
 | `csi_request_duration_seconds` | histogram | method | 해당 RPC 처리 시간 |
@@ -52,7 +53,8 @@ Controller           ── API snapshot ─ 메모리 ── /metrics
 | Pool 삭제 확인 | 다음 성공 관찰에서 해당 Pool 시계열 제거 |
 | Node Pool 미등록 | filesystem 시계열 제거, success=0, 마지막 성공 시각 유지 |
 | Volume 없는 예약 | 논리 예약으로 계수; 삭제 여부는 별도 운영 판단 |
-| Recovered 이력 | activeMove 연결이 해제된 Move는 현재 Move 수에서 제외 |
+| Recovered 이력 | activeMove 연결이 해제된 종결 Move는 현재 Move 수에서 제외 |
+| 완료 기록 재시도 | Completing은 잠금 해제·Volume 삭제 뒤에도 종결까지 집계 |
 | 잘못된 activeMove 연결 | metadata snapshot 실패로 표시 |
 | mobility 비활성화 | discovery 시계열 미발행 |
 | listener 실패 | 오류 log 기록; CSI process와 readiness 유지 |

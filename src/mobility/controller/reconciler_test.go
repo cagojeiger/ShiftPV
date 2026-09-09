@@ -328,6 +328,7 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 		moves:   []volumeapi.Move{move},
 	}
 	client := fake.NewSimpleClientset(mobilityObjects(volumeID)...)
+	assignJobUIDs(client)
 	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
 
 	observed, err := reconciler.observe(ctx, move)
@@ -433,10 +434,14 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	if hasPlacementHold(updated) || updated.Annotations[placementAnnotationKey] != "owner" {
 		t.Fatalf("placement hold was not released as owner after commit: %#v", updated)
 	}
+	published := repository.volumes[volumeID]
+	published.PublishedNodes = []string{"destination"}
+	repository.volumes[volumeID] = published
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsureCleanup}); err != nil {
 		t.Fatal(err)
 	}
 	observed.Volume = repository.volumes[volumeID]
+	move.Status.Phase = string(fsm.PhaseCompleting)
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionMarkSucceeded}); err != nil {
 		t.Fatal(err)
 	}
