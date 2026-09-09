@@ -20,7 +20,7 @@ func TestCheckRetainsCleanupObligationWithoutParent(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewClientset()
 	j := cleanup.Journal{Client: client, Namespace: "system"}
-	i := cleanup.Intent{MoveName: "deleted-move", MoveUID: "original-uid", VolumeID: "deleted-volume", SourceNode: "a", DestinationNode: "b", PoolPath: "/pool", JobName: "cleanup"}
+	i := cleanup.Intent{MoveName: "deleted-move", MoveUID: "original-uid", VolumeID: "deleted-volume", SourceNode: "a", DestinationNode: "b", PoolPath: "/pool", JobName: "cleanup", Image: "helper"}
 	if _, err := j.Ensure(ctx, i); err != nil {
 		t.Fatal(err)
 	}

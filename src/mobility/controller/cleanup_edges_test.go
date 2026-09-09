@@ -25,7 +25,7 @@ func cleanupReviewFixture(t *testing.T) (*Reconciler, *memoryRepository, *fake.C
 	ctx := context.Background()
 	r, repo, client := cleanupMoveFixture()
 	move := repo.moves[0]
-	i := cleanupIntent(move, repo.pools[0].MountPath)
+	i := cleanupIntent(move, repo.pools[0].MountPath, r.HelperImage)
 	if _, err := r.cleanupJournal().Ensure(ctx, i); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestCleanupSweepRotatesAfterCanceledRequest(t *testing.T) {
 	repo.moves = nil
 	var intents []cleanup.Intent
 	for n := 0; n < 3; n++ {
-		i := cleanup.Intent{MoveName: fmt.Sprint("move-", n), MoveUID: fmt.Sprint("uid-", n), VolumeID: fmt.Sprint("volume-", n), SourceNode: "source", DestinationNode: "destination", PoolPath: "/source-pool", JobName: fmt.Sprint("job-", n)}
+		i := cleanup.Intent{MoveName: fmt.Sprint("move-", n), MoveUID: fmt.Sprint("uid-", n), VolumeID: fmt.Sprint("volume-", n), SourceNode: "source", DestinationNode: "destination", PoolPath: "/source-pool", JobName: fmt.Sprint("job-", n), Image: "helper"}
 		r.cleanupJournal().Ensure(context.Background(), i)
 		intents = append(intents, i)
 	}
@@ -241,7 +241,7 @@ func TestCleanupSweepVisitsAllRecordsAcrossBatchLimit(t *testing.T) {
 	repo.moves = nil
 	var intents []cleanup.Intent
 	for n := range 40 {
-		i := cleanup.Intent{MoveName: fmt.Sprint("move-", n), MoveUID: fmt.Sprint("uid-", n), VolumeID: fmt.Sprint("volume-", n), SourceNode: "source", DestinationNode: "destination", PoolPath: "/source-pool", JobName: fmt.Sprint("job-", n)}
+		i := cleanup.Intent{MoveName: fmt.Sprint("move-", n), MoveUID: fmt.Sprint("uid-", n), VolumeID: fmt.Sprint("volume-", n), SourceNode: "source", DestinationNode: "destination", PoolPath: "/source-pool", JobName: fmt.Sprint("job-", n), Image: "helper"}
 		if _, err := r.cleanupJournal().Ensure(ctx, i); err != nil {
 			t.Fatal(err)
 		}

@@ -16,7 +16,7 @@ func TestCleanupCheckClosesRecoveredObligationWithoutDeletingFiles(t *testing.T)
 	ctx := context.Background()
 	r, repo, client := cleanupMoveFixture()
 	move := repo.moves[0]
-	intent := cleanupIntent(move, repo.pools[0].MountPath)
+	intent := cleanupIntent(move, repo.pools[0].MountPath, r.HelperImage)
 	j := r.cleanupJournal()
 	if _, err := j.Ensure(ctx, intent); err != nil {
 		t.Fatal(err)

@@ -54,7 +54,12 @@ func (r *Reconciler) ensureCleanupJob(ctx context.Context, move volumeapi.Move, 
 	if err != nil {
 		return err
 	}
-	intent := cleanupIntent(move, root)
+	intent := cleanupIntent(move, root, r.HelperImage)
+	if existing, err := r.cleanupJournal().Get(ctx, move.UID); err == nil {
+		intent.Image = existing.Intent.Image
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
 	record, err := r.cleanupJournal().Ensure(ctx, intent)
 	if err != nil || record.Completed {
 		return err
@@ -70,6 +75,7 @@ func (r *Reconciler) ensureCleanupJob(ctx context.Context, move volumeapi.Move, 
 		}
 		// The approved path is immutable even if the Pool changes between reads.
 		job.Spec.Template.Spec.Volumes[0].HostPath.Path = intent.PoolPath
+		job.Spec.Template.Spec.Containers[0].Image = intent.Image
 		job.Spec.TTLSecondsAfterFinished = nil
 		job.Labels["shiftpv.io/move-uid"] = move.UID
 		job, err = r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
@@ -92,8 +98,8 @@ func cleanupEnv(move volumeapi.Move) []corev1.EnvVar {
 	}
 }
 
-func cleanupIntent(move volumeapi.Move, root string) cleanup.Intent {
-	return cleanup.Intent{MoveName: move.Name, MoveUID: move.UID, VolumeID: move.Spec.VolumeID, SourceNode: move.Spec.SourceNode, DestinationNode: move.Status.DestinationNode, PoolPath: root, JobName: namesFor(move.Name).CleanupJob}
+func cleanupIntent(move volumeapi.Move, root, image string) cleanup.Intent {
+	return cleanup.Intent{MoveName: move.Name, MoveUID: move.UID, VolumeID: move.Spec.VolumeID, SourceNode: move.Spec.SourceNode, DestinationNode: move.Status.DestinationNode, PoolPath: root, JobName: namesFor(move.Name).CleanupJob, Image: image}
 }
 
 func (r *Reconciler) cleanupJournal() cleanup.Journal {
@@ -107,6 +113,17 @@ func validateCleanupJob(job *batchv1.Job, record cleanup.Record) error {
 		return fmt.Errorf("cleanup Job identity or storage target changed")
 	}
 	c := pod.Containers[0]
+	if i.Image == "" || c.Image != i.Image || pod.RestartPolicy != corev1.RestartPolicyNever || job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 2 || job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 300 {
+		return fmt.Errorf("cleanup Job image or execution budget changed")
+	}
+	security := &corev1.SecurityContext{AllowPrivilegeEscalation: boolPointer(false), RunAsUser: int64Pointer(0)}
+	if len(pod.InitContainers) != 0 || len(pod.EphemeralContainers) != 0 || pod.HostPID || pod.HostIPC || pod.HostNetwork || (pod.SecurityContext != nil && !reflect.DeepEqual(pod.SecurityContext, &corev1.PodSecurityContext{})) || len(c.EnvFrom) != 0 || len(c.Args) != 0 || c.Lifecycle != nil || c.LivenessProbe != nil || c.ReadinessProbe != nil || c.StartupProbe != nil || len(c.VolumeDevices) != 0 || !reflect.DeepEqual(c.SecurityContext, security) {
+		return fmt.Errorf("cleanup Job security or execution settings changed")
+	}
+	expectedVolume := corev1.Volume{Name: "pool", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: i.PoolPath, Type: hostPathTypePointer(corev1.HostPathDirectory)}}}
+	if !reflect.DeepEqual(pod.Volumes[0], expectedVolume) {
+		return fmt.Errorf("cleanup Job storage settings changed")
+	}
 	if !reflect.DeepEqual(c.Command, []string{"/bin/sh", "-c", cleanupSourceScript}) || !reflect.DeepEqual(c.Env, []corev1.EnvVar{{Name: "MOVE_NAME", Value: i.MoveName}, {Name: "VOLUME_ID", Value: i.VolumeID}}) || !reflect.DeepEqual(c.VolumeMounts, []corev1.VolumeMount{{Name: "pool", MountPath: "/pool"}}) {
 		return fmt.Errorf("cleanup Job action differs from request")
 	}
@@ -128,7 +145,7 @@ func (r *Reconciler) cleanupState(ctx context.Context, move volumeapi.Move) (com
 	if err != nil {
 		return false, false, err
 	}
-	if record.Intent != cleanupIntent(move, record.Intent.PoolPath) {
+	if record.Intent != cleanupIntent(move, record.Intent.PoolPath, record.Intent.Image) {
 		return false, false, fmt.Errorf("cleanup request belongs to a different Move")
 	}
 	if record.Completed {

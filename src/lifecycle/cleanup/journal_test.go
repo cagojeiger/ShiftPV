@@ -14,7 +14,7 @@ import (
 )
 
 func fixture() Intent {
-	return Intent{MoveName: "move-a", MoveUID: "uid-a", VolumeID: "shiftpv-a", SourceNode: "source", DestinationNode: "destination", PoolPath: "/var/lib/shiftpv", JobName: "cleanup-a"}
+	return Intent{MoveName: "move-a", MoveUID: "uid-a", VolumeID: "shiftpv-a", SourceNode: "source", DestinationNode: "destination", PoolPath: "/var/lib/shiftpv", JobName: "cleanup-a", Image: "helper"}
 }
 
 func TestJournalSurvivesRestartAndRejectsChangedIntent(t *testing.T) {
@@ -34,7 +34,7 @@ func TestJournalSurvivesRestartAndRejectsChangedIntent(t *testing.T) {
 	if err != nil || cm.Immutable == nil || !*cm.Immutable || len(cm.OwnerReferences) != 0 {
 		t.Fatalf("intent not durable/immutable: %+v %v", cm, err)
 	}
-	for _, change := range []func(*Intent){func(i *Intent) { i.PoolPath = "/other" }, func(i *Intent) { i.VolumeID = "other" }, func(i *Intent) { i.DestinationNode = "other" }} {
+	for _, change := range []func(*Intent){func(i *Intent) { i.PoolPath = "/other" }, func(i *Intent) { i.VolumeID = "other" }, func(i *Intent) { i.DestinationNode = "other" }, func(i *Intent) { i.Image = "other" }} {
 		changed := intent
 		change(&changed)
 		if _, err := j.Ensure(ctx, changed); err == nil {
@@ -103,6 +103,7 @@ func TestJournalRejectsInvalidOrCorruptRequests(t *testing.T) {
 		func(i *Intent) { i.MoveUID = "" }, func(i *Intent) { i.VolumeID = "../data" },
 		func(i *Intent) { i.MoveName = ".." }, func(i *Intent) { i.PoolPath = "/" },
 		func(i *Intent) { i.PoolPath = "relative" }, func(i *Intent) { i.SourceNode = i.DestinationNode },
+		func(i *Intent) { i.Image = "" },
 	} {
 		i := fixture()
 		change(&i)

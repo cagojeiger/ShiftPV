@@ -23,7 +23,7 @@ Cleanup lifecycle ── 요청 상태 관찰·보존 기간 관리
 ## Request and states
 
 요청은 controller namespace의 `shiftpv.io/cleanup-request=source-v1` ConfigMap이다.
-`data.intent`는 immutable이며 Move 이름·UID, volume ID, source/destination, Pool 경로, 최초 Job 이름을 묶는다.
+`data.intent`는 immutable이며 Move 이름·UID, volume ID, source/destination, Pool 경로, 최초 Job 이름·image를 묶는다.
 
 ```mermaid
 stateDiagram-v2
@@ -50,6 +50,7 @@ stateDiagram-v2
 |---|---|
 | 최초 삭제 | 요청 저장 → 정확한 Job UID 연결 → 성공 확인 → 완료 기록 |
 | 삭제 Job 예산 | backoff 2, active deadline 300s |
+| 삭제 증거 | 저장된 image·UID·경로·명령·보안 설정·실행 예산이 일치할 때 성공 수용 |
 | 연결된 삭제 Job 유실 | `CleanupFailed`로 Blocked; `ResumeOwner` 경로로 서비스 복구 |
 | `ResumeOwner` 완료 | 서비스가 현재 owner에서 재개; 잔여 정리 의무는 별도로 유지 |
 | 확인 요청 | `shiftpv.io/cleanup-check` annotation의 증가하는 양의 정수; uint64 범위 |

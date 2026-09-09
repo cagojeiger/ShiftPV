@@ -454,7 +454,7 @@ func TestCleanupRequestMetricsKeepInvalidEvidenceVisible(t *testing.T) {
 	ctx := context.Background()
 	c, _ := fixture()
 	j := cleanup.Journal{Client: c.Client, Namespace: c.Namespace}
-	i := cleanup.Intent{MoveName: "move-a", MoveUID: "uid-a", VolumeID: "volume-a", SourceNode: "source", DestinationNode: "destination", PoolPath: "/pool", JobName: "job-a"}
+	i := cleanup.Intent{MoveName: "move-a", MoveUID: "uid-a", VolumeID: "volume-a", SourceNode: "source", DestinationNode: "destination", PoolPath: "/pool", JobName: "job-a", Image: "helper"}
 	if _, err := j.Ensure(ctx, i); err != nil {
 		t.Fatal(err)
 	}

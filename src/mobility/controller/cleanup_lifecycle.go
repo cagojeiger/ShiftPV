@@ -125,7 +125,7 @@ func terminalCleanupMove(move volumeapi.Move) bool {
 func (r *Reconciler) cleanupCheckAuthority(ctx context.Context, record cleanup.Record, moves map[string]volumeapi.Move) error {
 	i := record.Intent
 	if move, exists := moves[i.MoveName]; exists {
-		if move.UID != i.MoveUID || !terminalCleanupMove(move) || cleanupIntent(move, i.PoolPath) != i {
+		if move.UID != i.MoveUID || !terminalCleanupMove(move) || cleanupIntent(move, i.PoolPath, i.Image) != i {
 			return fmt.Errorf("cleanup check requires the original Move to be terminal or absent")
 		}
 	}

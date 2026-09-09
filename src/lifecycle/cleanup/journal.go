@@ -30,6 +30,7 @@ type Intent struct {
 	DestinationNode string `json:"destinationNode"`
 	PoolPath        string `json:"poolPath"`
 	JobName         string `json:"jobName"`
+	Image           string `json:"image"`
 }
 
 type Record struct {
@@ -56,7 +57,7 @@ func Name(moveUID string) string {
 }
 
 func (i Intent) Validate() error {
-	if i.MoveUID == "" || i.MoveName == "" || i.VolumeID == "" || i.SourceNode == "" || i.DestinationNode == "" || i.SourceNode == i.DestinationNode || i.JobName == "" || !filepath.IsAbs(i.PoolPath) || filepath.Clean(i.PoolPath) != i.PoolPath || i.PoolPath == "/" {
+	if i.MoveUID == "" || i.MoveName == "" || i.VolumeID == "" || i.SourceNode == "" || i.DestinationNode == "" || i.SourceNode == i.DestinationNode || i.JobName == "" || i.Image == "" || !filepath.IsAbs(i.PoolPath) || filepath.Clean(i.PoolPath) != i.PoolPath || i.PoolPath == "/" {
 		return fmt.Errorf("incomplete or unsafe source cleanup intent")
 	}
 	for _, part := range []string{i.MoveName, i.VolumeID} {
