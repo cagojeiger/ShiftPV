@@ -20,8 +20,8 @@ if ! [[ "${attempts}" =~ ^[1-9][0-9]*$ && "${delay}" =~ ^[0-9]+$ ]]; then
 fi
 
 expected_platforms=$'linux/amd64\nlinux/arm64'
-controller_version=$(<"${repo_root}/versions/controller")
-node_version=$(<"${repo_root}/versions/node")
+controller_version=${SHIFTPV_CONTROLLER_VERSION:-$(<"${repo_root}/versions/controller")}
+node_version=${SHIFTPV_NODE_VERSION:-$(<"${repo_root}/versions/node")}
 controller_image="${registry}/${owner,,}/shiftpv-controller:${controller_version}"
 node_image="${registry}/${owner,,}/shiftpv-node:${node_version}"
 chart_app_version=$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' "${repo_root}/charts/shiftpv/Chart.yaml")
