@@ -11,4 +11,6 @@ provisioner: csi.shiftpv.io
 reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
 allowVolumeExpansion: false
 volumeBindingMode: WaitForFirstConsumer
+parameters:
+  shiftpv.io/capacity-enforcement: none
 {{- end }}

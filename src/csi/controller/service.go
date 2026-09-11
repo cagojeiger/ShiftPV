@@ -23,13 +23,15 @@ import (
 )
 
 const (
-	TopologyKey            = "topology.csi.shiftpv.io/node"
-	NodeContextKey         = "shiftpv.io/node"
-	PVCNameKey             = "csi.storage.k8s.io/pvc/name"
-	PVCNamespaceKey        = "csi.storage.k8s.io/pvc/namespace"
-	PVNameKey              = "csi.storage.k8s.io/pv/name"
-	MobilityAdmissionLabel = "shiftpv.io/admission"
-	mobilityEnabledValue   = "enabled"
+	TopologyKey             = "topology.csi.shiftpv.io/node"
+	NodeContextKey          = "shiftpv.io/node"
+	CapacityEnforcementKey  = "shiftpv.io/capacity-enforcement"
+	PVCNameKey              = "csi.storage.k8s.io/pvc/name"
+	PVCNamespaceKey         = "csi.storage.k8s.io/pvc/namespace"
+	PVNameKey               = "csi.storage.k8s.io/pv/name"
+	MobilityAdmissionLabel  = "shiftpv.io/admission"
+	capacityEnforcementNone = "none"
+	mobilityEnabledValue    = "enabled"
 )
 
 type DirectoryOperator interface {
@@ -444,10 +446,15 @@ func requestedCapacity(capacityRange *csi.CapacityRange) (int64, error) {
 }
 
 func validateParameters(parameters map[string]string) error {
-	for key := range parameters {
+	for key, value := range parameters {
 		switch key {
 		case PVCNameKey, PVCNamespaceKey, PVNameKey:
 			// Added by csi-provisioner --extra-create-metadata, not by the StorageClass.
+		case CapacityEnforcementKey:
+			// Kept as a no-op because StorageClass parameters are immutable.
+			if value != capacityEnforcementNone {
+				return fmt.Errorf("unsupported StorageClass parameter %q value %q", key, value)
+			}
 		default:
 			return fmt.Errorf("unsupported StorageClass parameter %q", key)
 		}

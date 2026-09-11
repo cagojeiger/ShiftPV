@@ -658,6 +658,15 @@ func TestCreateVolumeRejectsChangedSelectedNode(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeAcceptsLegacyCapacityEnforcementParameter(t *testing.T) {
+	service := configuredService(&Service{Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}})
+	req := validCreateRequest("worker-a")
+	req.Parameters[CapacityEnforcementKey] = capacityEnforcementNone
+	if _, err := service.CreateVolume(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCreateVolumeRejectsInvalidRequests(t *testing.T) {
 	tests := map[string]func(*csi.CreateVolumeRequest){
 		"missing name":     func(req *csi.CreateVolumeRequest) { req.Name = "" },
@@ -685,6 +694,9 @@ func TestCreateVolumeRejectsInvalidRequests(t *testing.T) {
 		},
 		"unknown parameter": func(req *csi.CreateVolumeRequest) {
 			req.Parameters["unknown"] = "value"
+		},
+		"unsupported enforcement": func(req *csi.CreateVolumeRequest) {
+			req.Parameters[CapacityEnforcementKey] = "hard"
 		},
 	}
 
