@@ -1,10 +1,11 @@
 name: Release Images
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
+    paths:
+      - versions/controller
+      - versions/node
 
 concurrency:
   group: release-images-main
@@ -15,16 +16,11 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+  RELEASE_SHA: ${{ github.sha }}
 
 jobs:
   resolve:
     name: Resolve image releases
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
@@ -40,9 +36,54 @@ jobs:
       - name: Resolve changed component versions
         id: release
         run: |
-          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          CURRENT_MAIN_SHA="$(git rev-parse refs/remotes/origin/main)" \
-            build/ci/resolve-image-release.sh
+          set -euo pipefail
+          components='[]'
+          builds='[]'
+
+          for component in controller node; do
+            version_file="versions/${component}"
+            if git diff --quiet "${{ github.event.before }}" "${RELEASE_SHA}" -- "${version_file}"; then
+              continue
+            fi
+
+            version="$(tr -d '[:space:]' <"${version_file}")"
+            if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::${version_file} must use numeric major.minor.patch format"
+              exit 1
+            fi
+
+            tag="${component}/v${version}"
+            if tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}" 2>/dev/null)" && \
+              [[ "${tagged_commit}" != "${RELEASE_SHA}" ]]; then
+              echo "::error::tag ${tag} already points to a different commit"
+              exit 1
+            fi
+
+            version_arg="${component^^}_VERSION"
+            component_json="$(jq -cn \
+              --arg component "${component}" --arg version "${version}" --arg version_arg "${version_arg}" --arg tag "${tag}" \
+              '{component: $component, version: $version, version_arg: $version_arg, tag: $tag}')"
+            components="$(jq -cn --argjson items "${components}" --argjson item "${component_json}" '$items + [$item]')"
+
+            for platform_spec in 'linux/amd64|ubuntu-latest|amd64' 'linux/arm64|ubuntu-24.04-arm|arm64'; do
+              IFS='|' read -r platform runner arch <<<"${platform_spec}"
+              build_json="$(jq -cn \
+                --arg component "${component}" --arg version "${version}" --arg version_arg "${version_arg}" \
+                --arg platform "${platform}" --arg runner "${runner}" --arg arch "${arch}" \
+                '{component: $component, version: $version, version_arg: $version_arg, platform: $platform, runner: $runner, arch: $arch}')"
+              builds="$(jq -cn --argjson items "${builds}" --argjson item "${build_json}" '$items + [$item]')"
+            done
+          done
+
+          [[ "$(jq 'length' <<<"${components}")" -gt 0 ]] || {
+            echo "::error::release workflow ran without a version change"
+            exit 1
+          }
+          {
+            echo "should_release=true"
+            echo "components=${components}"
+            echo "builds=${builds}"
+          } >>"${GITHUB_OUTPUT}"
 
   build:
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
