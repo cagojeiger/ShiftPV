@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORK_DIR:?WORK_DIR is required}"
 : "${WORKER_A_POOL:?WORKER_A_POOL is required}"
@@ -9,6 +11,8 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 SOURCE_NODE="${CLUSTER_NAME}-worker"
 DESTINATION_NODE="${CLUSTER_NAME}-worker2"
+SOURCE_MOUNT=/mnt/shiftpv
+DESTINATION_MOUNT=/srv/shiftpv-b
 restore_cluster() {
 	for node in "${SOURCE_NODE}" "${DESTINATION_NODE}"; do
 		docker start "${node}" >/dev/null 2>&1 || true
@@ -192,8 +196,8 @@ assert_blocked_source_authority() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Blocked
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${MOVE_NAME}"
-	test -f "${WORKER_A_POOL}/volumes/${VOLUME_ID}/payload"
-	test ! -e "${WORKER_B_POOL}/volumes/${VOLUME_ID}"
+	assert_node_file "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}/payload"
+	assert_node_absent "${DESTINATION_NODE}" "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}"
 }
 
 recover_source() {
@@ -219,7 +223,7 @@ assert_destination_unavailable_wait() {
 	test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')" = "${expected_phase}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${expected_owner}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${MOVE_NAME}"
-	test -f "${WORKER_A_POOL}/volumes/${VOLUME_ID}/payload"
+	assert_node_file "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}/payload"
 	if [[ "${expected_owner}" == "${SOURCE_NODE}" ]]; then
 		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Moving
 	else
@@ -263,8 +267,8 @@ finish_destination_move() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
-	test ! -e "${WORKER_A_POOL}/volumes/${VOLUME_ID}"
-	test -f "${WORKER_B_POOL}/volumes/${VOLUME_ID}/payload"
+	assert_node_absent "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}"
+	assert_node_file "${DESTINATION_NODE}" "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}/payload"
 	assert_destination_publish_metadata "${namespace}" "${pod}"
 }
 

@@ -67,8 +67,8 @@ shellcheck:
 	shellcheck test/e2e/kind/mobility/completion.sh
 	shellcheck test/e2e/kind/metrics/check.sh
 	shellcheck test/helm/dashboard/run.sh
-	shellcheck build/ci/wait-for-chart-images.sh test/release/fixtures/fake-docker.sh test/release/wait-for-chart-images.sh test/release/validate-artifact-lock.sh test/e2e/kind/run.sh test/e2e/kind/directory-pool.sh test/e2e/kind/pool-capacity.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/mobility/cleanup-lifecycle.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh
-	shellcheck test/e2e/kind/orphan-cleanup.sh
+	shellcheck build/ci/wait-for-chart-images.sh test/release/fixtures/fake-docker.sh test/release/wait-for-chart-images.sh test/release/validate-artifact-lock.sh test/e2e/kind/node-path.sh test/e2e/kind/run.sh test/e2e/kind/directory-pool.sh test/e2e/kind/pool-capacity.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/mobility/cleanup-lifecycle.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh
+	shellcheck test/e2e/kind/node-path.sh test/e2e/kind/orphan-cleanup.sh
 
 actionlint:
 	@if command -v actionlint >/dev/null 2>&1; then \

@@ -179,6 +179,7 @@ jobs:
           mkdir -p .tmp/ci-diagnostics
           kind export logs .tmp/ci-diagnostics/kind --name shiftpv-e2e || true
           kubectl get nodes,pods,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-diagnostics/resources.txt 2>&1 || true
+          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves,shiftpvcleanups -o yaml > .tmp/ci-diagnostics/shiftpv-resources.yaml 2>&1 || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-diagnostics/events.txt 2>&1 || true
 
       - name: Upload failure diagnostics
@@ -337,7 +338,7 @@ jobs:
           mkdir -p .tmp/ci-mobility-node-restart-diagnostics
           kind export logs .tmp/ci-mobility-node-restart-diagnostics/kind --name "${CLUSTER_NAME}" || true
           kubectl get nodes,pods,jobs,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-mobility-node-restart-diagnostics/resources.txt 2>&1 || true
-          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > .tmp/ci-mobility-node-restart-diagnostics/shiftpv-resources.yaml 2>&1 || true
+          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves,shiftpvcleanups -o yaml > .tmp/ci-mobility-node-restart-diagnostics/shiftpv-resources.yaml 2>&1 || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-mobility-node-restart-diagnostics/events.txt 2>&1 || true
 
       - name: Upload failure diagnostics
@@ -416,7 +417,7 @@ jobs:
           kind export logs .tmp/ci-argocd-diagnostics/kind --name shiftpv-argocd-e2e || true
           kubectl get nodes,pods,jobs,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-argocd-diagnostics/resources.txt 2>&1 || true
           kubectl -n argocd get applications -o yaml > .tmp/ci-argocd-diagnostics/applications.yaml 2>&1 || true
-          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > .tmp/ci-argocd-diagnostics/shiftpv-resources.yaml 2>&1 || true
+          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves,shiftpvcleanups -o yaml > .tmp/ci-argocd-diagnostics/shiftpv-resources.yaml 2>&1 || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-argocd-diagnostics/events.txt 2>&1 || true
 
       - name: Upload failure diagnostics

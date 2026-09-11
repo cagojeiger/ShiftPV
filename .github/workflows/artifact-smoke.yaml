@@ -73,7 +73,7 @@ jobs:
           mkdir -p .tmp/ci-artifact-diagnostics
           kind export logs .tmp/ci-artifact-diagnostics/kind --name shiftpv-artifact-e2e || true
           kubectl get nodes,pods,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-artifact-diagnostics/resources.txt 2>&1 || true
-          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > .tmp/ci-artifact-diagnostics/shiftpv-resources.yaml 2>&1 || true
+          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves,shiftpvcleanups -o yaml > .tmp/ci-artifact-diagnostics/shiftpv-resources.yaml 2>&1 || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-artifact-diagnostics/events.txt 2>&1 || true
           cp test/e2e/kind/artifact/versions.env .tmp/ci-artifact-diagnostics/artifact-lock.env
 

@@ -39,9 +39,10 @@ restart_during_recovery() {
 }
 
 recover_source_only() {
-	local source_claim_uid checksum pod
+	local source_claim_uid checksum pod source_mount
 	source_claim_uid=$(kubectl -n shiftpv-mobility-blocked get pvc/source-only -o jsonpath='{.metadata.uid}')
-	checksum=$(shasum -a 256 "${WORKER_A_POOL}/volumes/${BLOCKED_VOLUME}/payload" | awk '{print $1}')
+	source_mount=$(pool_mount_for_node "${BLOCKED_SOURCE_NODE}")
+	checksum=$(node_sha256 "${BLOCKED_SOURCE_NODE}" "${source_mount}/volumes/${BLOCKED_VOLUME}/payload")
 	request_recovery "${BLOCKED_MOVE}"
 	restart_during_recovery "${BLOCKED_MOVE}"
 	kubectl -n shiftpv-mobility-blocked rollout status deployment/source-only --timeout=180s

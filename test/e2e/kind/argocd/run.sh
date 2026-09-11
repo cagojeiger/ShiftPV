@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-argocd-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 ARGOCD_VERSION=${ARGOCD_VERSION:-v3.5.2}
@@ -9,6 +11,8 @@ ARGOCD_MANIFEST_SHA256=${ARGOCD_MANIFEST_SHA256:-9a87f2b3e14c278f12501eb0ef5c395
 IMAGE_REPOSITORY=${IMAGE_REPOSITORY:-shiftpv-argocd-e2e}
 IMAGE_TAG=${IMAGE_TAG:-dev}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
+NODE="${CLUSTER_NAME}-worker"
+POOL_PATH=/mnt/shiftpv
 
 for command in awk curl docker helm kind kubectl sed; do
 	command -v "${command}" >/dev/null || {
@@ -192,7 +196,7 @@ test -n "$(kubectl -n argocd get application shiftpv -o jsonpath='{.metadata.del
 GUARD_LOG=$(kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard)
 grep -Fq VolumeReservation <<<"${GUARD_LOG}"
 grep -Fq "${VOLUME_ID}" <<<"${GUARD_LOG}"
-test -f "${WORKER_POOL}/volumes/${VOLUME_ID}/payload"
+assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
 
 kubectl patch "shiftpvcleanup/${CLEANUP_NAME}" --type merge -p '{"spec":{"approved":true}}'
 kubectl wait --for=jsonpath='{.status.phase}'=Completed "shiftpvcleanup/${CLEANUP_NAME}" --timeout=4m
@@ -212,9 +216,9 @@ if kubectl get validatingwebhookconfiguration shiftpv-lifecycle >/dev/null 2>&1;
 	echo "Argo CD left lifecycle validation after a completed Application deletion" >&2
 	exit 1
 fi
-test ! -e "${WORKER_POOL}/volumes/${VOLUME_ID}"
-test ! -e "${WORKER_POOL}/.shiftpv/placements/placement-${COPY_ID}.json"
-test ! -e "${WORKER_POOL}/.shiftpv/copy-${COPY_ID}.json"
+assert_node_absent "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}"
+assert_node_absent "${NODE}" "${POOL_PATH}/.shiftpv/placements/placement-${COPY_ID}.json"
+assert_node_absent "${NODE}" "${POOL_PATH}/.shiftpv/copy-${COPY_ID}.json"
 if kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null 2>&1; then
 	echo "Argo CD deletion left the settled volume reservation" >&2
 	exit 1

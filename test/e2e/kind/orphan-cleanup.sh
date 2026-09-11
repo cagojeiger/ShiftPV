@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+: "${ROOT_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
+
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORKER_A_POOL:?WORKER_A_POOL is required}"
 
@@ -101,7 +105,7 @@ if [[ -n "$(cleanup_for_volume)" ]]; then
 	echo "orphan cleanup was discovered while Retain PersistentVolume ${PV_NAME} still existed" >&2
 	exit 1
 fi
-test -f "${WORKER_A_POOL}/volumes/${VOLUME_ID}/payload"
+assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
 
 kubectl delete "pv/${PV_NAME}" --wait=true
 deadline=$((SECONDS + 120))
@@ -128,7 +132,7 @@ if kubectl -n shiftpv-system get "job/${CLEANUP_NAME}-effect" >/dev/null 2>&1; t
 	echo "cleanup Job started while the exact orphan copy was mounted" >&2
 	exit 1
 fi
-test -f "${WORKER_A_POOL}/volumes/${VOLUME_ID}/payload"
+assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
 kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
 
 docker exec "${NODE}" umount "${MOUNT_TARGET}"
@@ -140,9 +144,9 @@ test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.recei
 test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.receipt.purged}')" = true
 test -n "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.settledAt}')"
 kubectl -n shiftpv-system wait --for=condition=complete "job/${CLEANUP_NAME}-effect" --timeout=2m
-test ! -e "${WORKER_A_POOL}/volumes/${VOLUME_ID}"
-test ! -e "${WORKER_A_POOL}/.shiftpv/placements/placement-${COPY_ID}.json"
-test ! -e "${WORKER_A_POOL}/.shiftpv/copy-${COPY_ID}.json"
+assert_node_absent "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}"
+assert_node_absent "${NODE}" "${POOL_PATH}/.shiftpv/placements/placement-${COPY_ID}.json"
+assert_node_absent "${NODE}" "${POOL_PATH}/.shiftpv/copy-${COPY_ID}.json"
 if kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null 2>&1; then
 	echo "exact orphan reservation remains after settled cleanup" >&2
 	exit 1

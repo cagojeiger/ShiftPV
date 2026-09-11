@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORK_DIR:?WORK_DIR is required}"
 : "${WORKER_A_POOL:?WORKER_A_POOL is required}"
@@ -9,6 +11,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 SOURCE_NODE="${CLUSTER_NAME}-worker"
 DESTINATION_NODE="${CLUSTER_NAME}-worker2"
+SOURCE_MOUNT=/mnt/shiftpv
 DESTINATION_MOUNT=/srv/shiftpv-b
 MOUNT_STATE=normal
 
@@ -144,11 +147,11 @@ wait_for_success() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 	docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}/payload"
-	test ! -e "${WORKER_A_POOL}/volumes/${VOLUME_ID}"
+	assert_node_absent "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}"
 	local source_copy
 	source_copy=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
 	test -n "${source_copy}"
-	test ! -e "${WORKER_A_POOL}/.shiftpv/retired/${source_copy}"
+	assert_node_absent "${SOURCE_NODE}" "${SOURCE_MOUNT}/.shiftpv/retired/${source_copy}"
 }
 
 delete_workload() {

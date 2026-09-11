@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-mobility-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
@@ -165,8 +167,8 @@ test "$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.reason}'
 assert_move_diagnostics "${BLOCKED_MOVE}" Blocked CopyFailed CopyFailed
 test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.phase}')" = "Blocked"
 test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.ownerNode}')" = "${BLOCKED_SOURCE_NODE}"
-test -f "${WORKER_A_POOL}/volumes/${BLOCKED_VOLUME}/payload"
-test ! -e "${WORKER_B_POOL}/volumes/${BLOCKED_VOLUME}"
+assert_node_file "${BLOCKED_SOURCE_NODE}" "/mnt/shiftpv/volumes/${BLOCKED_VOLUME}/payload"
+assert_node_absent "${CLUSTER_NAME}-worker2" "/srv/shiftpv-b/volumes/${BLOCKED_VOLUME}"
 kubectl uncordon "${BLOCKED_SOURCE_NODE}"
 docker exec "${COPY_FAULT_NODE}" rm -- "${COPY_FAULT_PATH}"
 
@@ -272,18 +274,13 @@ test "$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.spec.volume
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = "Ready"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
-if [[ "${DESTINATION_NODE}" == "${CLUSTER_NAME}-worker" ]]; then
-	DESTINATION_POOL="${WORKER_A_POOL}"
-	SOURCE_POOL="${WORKER_B_POOL}"
-else
-	DESTINATION_POOL="${WORKER_B_POOL}"
-	SOURCE_POOL="${WORKER_A_POOL}"
-fi
-test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
-test ! -e "${SOURCE_POOL}/volumes/${VOLUME_ID}"
+DESTINATION_POOL=$(pool_mount_for_node "${DESTINATION_NODE}")
+SOURCE_POOL=$(pool_mount_for_node "${SOURCE_NODE}")
+assert_node_file "${DESTINATION_NODE}" "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
+assert_node_absent "${SOURCE_NODE}" "${SOURCE_POOL}/volumes/${VOLUME_ID}"
 SOURCE_COPY_ID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
 test -n "${SOURCE_COPY_ID}"
-test ! -e "${SOURCE_POOL}/.shiftpv/retired/${SOURCE_COPY_ID}"
+assert_node_absent "${SOURCE_NODE}" "${SOURCE_POOL}/.shiftpv/retired/${SOURCE_COPY_ID}"
 test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
 
 recover_after_commit_failure
