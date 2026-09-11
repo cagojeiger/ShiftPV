@@ -226,12 +226,15 @@ Upgrade와 rollback은 다음 조건을 유지하는 이동 트리거 동결 창
 | 대상 | 교체 조건 |
 |---|---|
 | Volume | 모든 `activeMove`가 빈 값 |
+| Identity | 모든 Volume에 `status.currentCopy`와 일치하는 node-side identity marker가 존재 |
 | Move | 모두 `Succeeded` 또는 `Blocked` + `recoveryPhase=Recovered` |
 | Cleanup | 모든 `ShiftPVCleanup`이 `Completed`인 상태 |
 | 유지보수 창 | cordon·drain·수동 Move 요청을 동결하여 교체 조건 유지 |
 
 `Completing`은 잠금 해제 뒤에도 남을 수 있는 미완료 journal이다. Move와 Cleanup이 종결된 뒤
 Controller를 교체한다.
+Identity 조건을 충족하지 않는 기존 volume은 자동 채택하지 않는다. workload별 data migration을
+완료한 뒤 이 절차를 시작한다.
 Helm은 설치된 CRD를 보존하므로 새 Controller보다 schema를 먼저 적용한다. `--force-conflicts`는
 최초 Helm field ownership을 명시적으로 인수한다.
 
