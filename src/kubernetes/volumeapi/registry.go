@@ -558,7 +558,9 @@ func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
 	}
 	ready := make([]Pool, 0, len(pools))
 	for _, pool := range pools {
-		if ok, _ := pool.ReadyAt(now, staleAfter); ok && !poolInventoryTruncated(pool) {
+		poolReady, _ := pool.ReadyAt(now, staleAfter)
+		inventoryReady, _ := poolInventoryReadyAt(pool, now, staleAfter)
+		if poolReady && inventoryReady {
 			ready = append(ready, pool)
 		}
 	}
@@ -625,14 +627,27 @@ func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool,
 	if ready, reason := pool.ReadyAt(now, staleAfter); !ready {
 		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, pool.Name, nodeName, reason)
 	}
-	if poolInventoryTruncated(pool) {
-		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: InventoryTruncated", ErrPoolNotReady, pool.Name, nodeName)
+	if ready, reason := poolInventoryReadyAt(pool, now, staleAfter); !ready {
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, pool.Name, nodeName, reason)
 	}
 	return pool, nil
 }
 
-func poolInventoryTruncated(pool Pool) bool {
-	return pool.Status.Inventory != nil && pool.Status.Inventory.Truncated
+func poolInventoryReadyAt(pool Pool, now time.Time, staleAfter time.Duration) (bool, string) {
+	inventory := pool.Status.Inventory
+	if inventory == nil {
+		return false, "InventoryMissing"
+	}
+	if !inventory.Valid {
+		return false, "InventoryInvalid"
+	}
+	if inventory.Truncated {
+		return false, "InventoryTruncated"
+	}
+	if inventory.ObservedAt.IsZero() || now.Before(inventory.ObservedAt.Time) || now.Sub(inventory.ObservedAt.Time) > staleAfter {
+		return false, "InventoryStale"
+	}
+	return true, ""
 }
 
 func (r *Registry) SetPoolStatus(ctx context.Context, name, nodeName string, status PoolStatus) error {

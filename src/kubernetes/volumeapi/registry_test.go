@@ -347,13 +347,23 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 	_ = unstructured.SetNestedSlice(conditionOutdated.Object, conditions, "status", "conditions")
 	pending := pool("pending", "node-pending")
 	delete(pending.Object, "status")
+	missingInventory := pool("missing-inventory", "node-missing-inventory")
+	unstructured.RemoveNestedField(missingInventory.Object, "status", "inventory")
+	invalidInventory := pool("invalid-inventory", "node-invalid-inventory")
+	_ = unstructured.SetNestedMap(invalidInventory.Object, map[string]any{
+		"observedAt": now.Format(time.RFC3339), "valid": false,
+	}, "status", "inventory")
+	staleInventory := pool("stale-inventory", "node-stale-inventory")
+	_ = unstructured.SetNestedMap(staleInventory.Object, map[string]any{
+		"observedAt": now.Add(-4 * time.Minute).Format(time.RFC3339), "valid": true,
+	}, "status", "inventory")
 	truncated := pool("truncated", "node-truncated")
 	_ = unstructured.SetNestedMap(truncated.Object, map[string]any{
 		"observedAt": now.Format(time.RFC3339), "valid": true, "truncated": true,
 	}, "status", "inventory")
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		PoolResource: "ShiftPVPoolList",
-	}, ready, stale, outdated, conditionOutdated, pending, truncated)
+	}, ready, stale, outdated, conditionOutdated, pending, missingInventory, invalidInventory, staleInventory, truncated)
 	registry := &Registry{Client: client, Now: func() time.Time { return now }}
 
 	pools, err := registry.ReadyPools(context.Background())
@@ -364,7 +374,7 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 		t.Fatalf("ready pools = %#v", pools)
 	}
 	nodes, err := registry.PoolNodes(context.Background())
-	if err != nil || len(nodes) != 6 {
+	if err != nil || len(nodes) != 9 {
 		t.Fatalf("registered topology nodes = %#v err=%v", nodes, err)
 	}
 	if _, err := registry.ReadyPoolForNode(context.Background(), "node-stale"); !errors.Is(err, ErrPoolNotReady) {
@@ -372,6 +382,15 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 	}
 	if _, err := registry.ReadyPoolForNode(context.Background(), "node-truncated"); !errors.Is(err, ErrPoolNotReady) || !strings.Contains(err.Error(), "InventoryTruncated") {
 		t.Fatalf("truncated pool error = %v", err)
+	}
+	for node, reason := range map[string]string{
+		"node-missing-inventory": "InventoryMissing",
+		"node-invalid-inventory": "InventoryInvalid",
+		"node-stale-inventory":   "InventoryStale",
+	} {
+		if _, err := registry.ReadyPoolForNode(context.Background(), node); !errors.Is(err, ErrPoolNotReady) || !strings.Contains(err.Error(), reason) {
+			t.Fatalf("%s pool error = %v", reason, err)
+		}
 	}
 }
 
@@ -577,6 +596,9 @@ func pool(name, nodeName string) *unstructured.Unstructured {
 		},
 		"status": map[string]any{
 			"observedGeneration": int64(1), "lastProbeTime": probeTime,
+			"inventory": map[string]any{
+				"observedAt": probeTime, "valid": true,
+			},
 			"conditions": []any{map[string]any{
 				"type": PoolConditionReady, "status": "True", "observedGeneration": int64(1),
 				"lastTransitionTime": probeTime, "reason": "PoolReady", "message": "ready",
