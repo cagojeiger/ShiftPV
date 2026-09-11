@@ -21,14 +21,17 @@ fi
 components='[]'
 builds='[]'
 
-if [[ "${release_sha}" != "${current_main_sha}" ]]; then
-  echo "::notice::CI completed for stale main commit ${release_sha}; current main is ${current_main_sha}"
+if ! git merge-base --is-ancestor "${release_sha}" "${current_main_sha}" 2>/dev/null; then
+  echo "::notice::release commit ${release_sha} is not in current main history ${current_main_sha}"
   {
     echo 'should_release=false'
     echo 'components=[]'
     echo 'builds=[]'
   } >>"${github_output}"
   exit 0
+fi
+if [[ "${release_sha}" != "${current_main_sha}" ]]; then
+  echo "::notice::main advanced to ${current_main_sha}; reconciling release commit ${release_sha}"
 fi
 
 for component in controller node; do
@@ -51,6 +54,19 @@ for component in controller node; do
 
   if [[ "${version_changed}" != true ]]; then
     echo "::notice::${version_file} did not change in ${release_sha}; skipping ${component}"
+    continue
+  fi
+
+  if ! desired_version="$(git show "${current_main_sha}:${version_file}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"; then
+    echo "::error::cannot read ${version_file} from current main ${current_main_sha}"
+    exit 1
+  fi
+  if ! [[ "${desired_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "::error::current main ${version_file} must use numeric major.minor.patch format"
+    exit 1
+  fi
+  if [[ "${version}" != "${desired_version}" ]]; then
+    echo "::notice::${component} v${version} was superseded by current main v${desired_version}; skipping"
     continue
   fi
 

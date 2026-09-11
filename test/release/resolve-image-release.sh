@@ -14,6 +14,7 @@ printf '%s\n' 0.0.9 >"${fixture}/versions/controller"
 printf '%s\n' 0.1.0 >"${fixture}/versions/node"
 git -C "${fixture}" add build versions
 git -C "${fixture}" commit -qm base
+fixture_branch="$(git -C "${fixture}" branch --show-current)"
 base_sha="$(git -C "${fixture}" rev-parse HEAD)"
 git -C "${fixture}" tag node/v0.1.0
 
@@ -48,6 +49,17 @@ unrelated_output="${fixture}/unrelated-output"
 )
 [[ "$(sed -n 's/^should_release=//p' "${unrelated_output}")" == false ]]
 
+advanced_output="${fixture}/advanced-output"
+(
+  cd "${fixture}"
+  RELEASE_SHA="${release_sha}" CURRENT_MAIN_SHA="${unrelated_sha}" GITHUB_OUTPUT="${advanced_output}" \
+    build/ci/resolve-image-release.sh
+)
+[[ "$(sed -n 's/^should_release=//p' "${advanced_output}")" == true ]]
+advanced_components="$(sed -n 's/^components=//p' "${advanced_output}")"
+jq -e 'length == 1 and .[0].component == "controller" and .[0].version == "0.1.0"' \
+  <<<"${advanced_components}" >/dev/null
+
 stale_output="${fixture}/stale-output"
 (
   cd "${fixture}"
@@ -68,6 +80,20 @@ if (
 fi
 
 git -C "${fixture}" tag -d controller/v0.1.0 >/dev/null
+printf '%s\n' 0.1.1 >"${fixture}/versions/controller"
+git -C "${fixture}" add versions/controller
+git -C "${fixture}" commit -qm superseding-release
+superseding_sha="$(git -C "${fixture}" rev-parse HEAD)"
+git -C "${fixture}" checkout -q --detach "${release_sha}"
+superseded_output="${fixture}/superseded-output"
+(
+  cd "${fixture}"
+  RELEASE_SHA="${release_sha}" CURRENT_MAIN_SHA="${superseding_sha}" GITHUB_OUTPUT="${superseded_output}" \
+    build/ci/resolve-image-release.sh
+)
+[[ "$(sed -n 's/^should_release=//p' "${superseded_output}")" == false ]]
+git -C "${fixture}" checkout -q "${fixture_branch}"
+
 printf '%s\n' 0.2.0-rc.1 >"${fixture}/versions/controller"
 git -C "${fixture}" add versions/controller
 git -C "${fixture}" commit -qm invalid-version

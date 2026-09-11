@@ -222,8 +222,9 @@ make image-combined
 기능 PR은 version source를 바꾸지 않는다. 별도 `release:` PR에서 공개할 component의 version source와
 Chart의 기본 image reference를 갱신한다. 병합된 release PR의 `main` CI가 성공하면 변경된 component만
 `linux/amd64`, `linux/arm64` manifest로 공개된다. Chart는 `Chart.yaml`의 `version`이 바뀐 경우에만
-참조 image의 공개를 확인한 뒤 배포된다. 실패한 release는 해당 workflow를 재실행하며, 이후의 무관한
-commit에서는 미공개 version을 대신 배포하지 않는다. Combined image는 Kind 검증용이다.
+참조 image의 공개를 확인한 뒤 배포된다. `main`이 먼저 진행되어도 현재 version과 일치하는 release
+commit을 정확히 배포하고, 더 새 version으로 대체된 release와 `main` 계보에서 이탈한 commit은 건너뛴다.
+Combined image는 Kind 검증용이다.
 
 ## Published artifact smoke
 

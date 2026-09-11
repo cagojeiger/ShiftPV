@@ -13,6 +13,7 @@ cp "${repo_root}/build/ci/resolve-chart-release.sh" "${fixture}/build/ci/"
 printf '%s\n' 'version: 0.0.9' >"${fixture}/charts/shiftpv/Chart.yaml"
 git -C "${fixture}" add build charts
 git -C "${fixture}" commit -qm base
+fixture_branch="$(git -C "${fixture}" branch --show-current)"
 
 printf '%s\n' 'changed chart' >"${fixture}/charts/shiftpv/README.md"
 git -C "${fixture}" add charts
@@ -49,15 +50,6 @@ stale_output="${fixture}/stale-output"
 )
 [[ "$(sed -n 's/^should_release=//p' "${stale_output}")" == false ]]
 
-git -C "${fixture}" tag chart/v0.1.0
-resume_output="${fixture}/resume-output"
-(
-  cd "${fixture}"
-  RELEASE_SHA="${release_sha}" CURRENT_MAIN_SHA="${release_sha}" GITHUB_OUTPUT="${resume_output}" \
-    build/ci/resolve-chart-release.sh
-)
-[[ "$(sed -n 's/^should_release=//p' "${resume_output}")" == true ]]
-
 printf '%s\n' 'unrelated change' >"${fixture}/README.md"
 git -C "${fixture}" add README.md
 git -C "${fixture}" commit -qm unrelated
@@ -70,11 +62,40 @@ skip_output="${fixture}/skip-output"
 )
 [[ "$(sed -n 's/^should_release=//p' "${skip_output}")" == false ]]
 
+advanced_output="${fixture}/advanced-output"
+(
+  cd "${fixture}"
+  RELEASE_SHA="${release_sha}" CURRENT_MAIN_SHA="${unrelated_sha}" GITHUB_OUTPUT="${advanced_output}" \
+    build/ci/resolve-chart-release.sh
+)
+[[ "$(sed -n 's/^should_release=//p' "${advanced_output}")" == true ]]
+[[ "$(sed -n 's/^version=//p' "${advanced_output}")" == 0.1.0 ]]
+
+git -C "${fixture}" tag chart/v0.1.0 "${release_sha}"
+resume_output="${fixture}/resume-output"
+(
+  cd "${fixture}"
+  RELEASE_SHA="${release_sha}" CURRENT_MAIN_SHA="${unrelated_sha}" GITHUB_OUTPUT="${resume_output}" \
+    build/ci/resolve-chart-release.sh
+)
+[[ "$(sed -n 's/^should_release=//p' "${resume_output}")" == true ]]
+
 git -C "${fixture}" tag chart/v0.2.0 "${release_sha}"
 printf '%s\n' 'version: 0.2.0' >"${fixture}/charts/shiftpv/Chart.yaml"
 git -C "${fixture}" add charts/shiftpv/Chart.yaml
 git -C "${fixture}" commit -qm reused-version
 reused_version_sha="$(git -C "${fixture}" rev-parse HEAD)"
+
+git -C "${fixture}" checkout -q --detach "${release_sha}"
+superseded_output="${fixture}/superseded-output"
+(
+  cd "${fixture}"
+  RELEASE_SHA="${release_sha}" CURRENT_MAIN_SHA="${reused_version_sha}" GITHUB_OUTPUT="${superseded_output}" \
+    build/ci/resolve-chart-release.sh
+)
+[[ "$(sed -n 's/^should_release=//p' "${superseded_output}")" == false ]]
+git -C "${fixture}" checkout -q "${fixture_branch}"
+
 conflict_output="${fixture}/conflict-output"
 if (
   cd "${fixture}"
