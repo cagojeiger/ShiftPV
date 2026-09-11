@@ -219,10 +219,10 @@ make image-combined
 | `versions/node` | `ghcr.io/cagojeiger/shiftpv-node:<version>` | `node/v<version>` |
 | `charts/shiftpv/Chart.yaml` | Helm repository package | `chart/v<version>` |
 
-기능 PR은 version source를 바꾸지 않는다. 별도 `release:` PR에서 공개할 component의 version source와
-Chart의 기본 image reference를 갱신한다. CI를 통과한 release PR이 `main`에 병합되면 version source의
-경로가 release workflow를 직접 실행한다. 변경된 component만 `linux/amd64`, `linux/arm64` manifest로
-공개하며, Chart는 참조 image를 확인한 뒤 배포한다. Combined image는 Kind 검증용이다.
+기능 PR은 version source를 바꾸지 않는다. Controller, Node, Chart는 각각 독립된 `release:` PR로
+순서대로 병합한다. Chart PR은 참조할 image가 공개된 뒤 `Chart.yaml`과 기본 image reference를 갱신한다.
+병합된 version source 경로가 release workflow를 직접 실행하며, image는 `linux/amd64`, `linux/arm64`
+manifest로 공개된다. Combined image는 Kind 검증용이다.
 
 ## Published artifact smoke
 
