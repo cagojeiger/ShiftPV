@@ -26,6 +26,19 @@ flowchart LR
 | Argo CD | `./test/e2e/kind/argocd/run.sh` | Application PreDelete와 lifecycle admission |
 | 공개 artifact | `./test/e2e/kind/artifact/run.sh` | 공개 chart SHA와 multi-arch image digest |
 
+## Evidence levels
+
+| 계층 | 증명하는 범위 | 증명하지 않는 범위 |
+|---|---|---|
+| Unit + fake API / fake binder | 상태 전이, 오류 주입, 멱등성, API 객체 계약 | 실제 mount, kube-scheduler, kubelet, filesystem 효과 |
+| Linux integration | 실제 mount namespace, bind/unbind, 권한·경로 경계 | Kubernetes control plane과 scheduling |
+| Isolated Kind | 실제 API server, scheduler, external-provisioner, kubelet/CSI, node-container filesystem 효과 | 홈 운영체제·디스크·네트워크의 장기 특성 |
+| Published artifact Kind | 공개 chart와 digest-pinned multi-arch image의 출처·설치·upgrade | 아직 배포하지 않은 source checkout |
+| Home cluster | 승인된 동일 artifact의 대상 환경 동작과 정리 결과 | 다른 cluster와 영구 disk failure 일반화 |
+
+낮은 계층의 성공을 높은 계층의 성공으로 대체하지 않는다. Home 검증은 공개 artifact와 GitOps
+revision을 고정한 뒤 별도 승인으로 수행하며, 현재 checkout의 unit 성공만으로 배포 완료를 선언하지 않는다.
+
 ## Fast checks
 
 ```bash
@@ -43,7 +56,8 @@ make verify
 
 Coverage artifact는 `.tmp/coverage.out`과 `.tmp/coverage.txt`에 생성된다.
 
-Dashboard의 현재값·관측 유효기간·결측 처리는 `bash test/helm/dashboard/run.sh`로 검증한다.
+Dashboard의 현재값·관측 유효기간·결측 처리와 PrometheusRule의 firing·해제는
+`bash test/helm/dashboard/run.sh`로 검증한다.
 CI의 `verify` job은 `make verify` 다음 단계에서 이 명령을 실행한다. 전용 Prometheus에 합성 정상·실패·지연·첫 관측 전 데이터를
 생성하고 실제 dashboard PromQL 결과를 검사한다. 테스트 container는 종료 시 제거한다.
 
@@ -56,8 +70,9 @@ Unit test는 다음 고비용 경계를 포함한다.
 |---|---|
 | CSI | capacity, topology, parameter, 멱등 create/delete, publish authorization |
 | Pool | directory/write/statfs readiness, freshness, reservation, concurrent admission |
-| Mobility | 전체 phase closure, CAS, API response loss, diagnostics, recovery, source purge |
-| Lifecycle | dependency 검사, quiesce, read-only admission, provisioning drain |
+| Mobility | phase closure, exact copy identity, CAS, API response loss, recovery |
+| Cleanup | immutable intent, exact helper identity, receipt, bounded observation, review-only orphan |
+| Lifecycle | Cleanup 포함 dependency 검사, quiesce, read-only admission, provisioning drain |
 | Certificate | 최초 발급, 갱신, CA 전환, Secret 복구, hot reload |
 | Metrics | cached scrape 무 I/O, API 오류·freshness, 예약 회계, bounded label, HTTP 장애 분리 |
 | Chart | kubelet root, component 경계, StorageClass, webhook mode |
@@ -68,16 +83,20 @@ Unit test는 다음 고비용 경계를 포함한다.
 |---|---|
 | 모든 phase의 정상·대기·실패 결정 | `src/mobility/fsm/fsm_test.go` |
 | 관찰·결정·action 오류에서 phase와 activeMove 보존 | `TestMoveErrorsPreservePhaseAndActiveMove` |
-| Action 후 journal 거절·Controller 재생성 시 단일 Job 수렴 | `TestMoveActionSurvivesJournalFailureAndControllerRestart` |
-| Destination publish·cleanup 완료 전 잠금 유지 | `TestMoveCompletionWaitsForPublishAndCleanupEvidence` |
-| 요청 저장 실패 시 파일 작업 차단 | `TestCleanupIntentWriteFailureNeverStartsDiskWork` |
-| 정리 acknowledgement 후 Job 소멸·Move 기록 실패 복구 | `TestCleanupAcknowledgementSurvivesJobLoss` |
-| Pool·Job UID·owner·잠금·publisher 변경 차단 | `TestCleanupRejectsChangedPoolOrJobIncarnation` |
-| 요청 생성·완료 응답 유실 수렴 | `src/lifecycle/cleanup/journal_test.go` |
-| 부모 없는 미완료 요청의 uninstall 차단 | `TestCheckRetainsCleanupObligationWithoutParent` |
-| 정리 확인의 UID·시도 번호·권한·순회·보관 경계 | `src/mobility/controller/cleanup_edges_test.go` |
-| 읽기 전용 확인에서 권한·I/O 오류와 경로 부재 구분 | `src/lifecycle/cleanup/pathcheck/check_test.go` |
-| 최종 잠금 해제 후 journal 실패·Job 소멸·재시작 복구 | `TestMoveCompletionJournalFailureRecoversAfterRestart` |
+| 생성 의도 → 파일 effect → 완료 순서 | `TestCreateVolumeOrdersDurableIntentEffectAndCompletion` |
+| Move UID별 source/incoming/destination copy 고정 | `TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly` |
+| 이전 Move incarnation의 Secret·ConfigMap·Pod·Service 거부 | `TestTransferResourcesRejectPreviousMoveIncarnation` |
+| helper command와 Job identity 변조 거부 | `TestMoveJobsUseIdentityHelperAndRejectReplacement` |
+| Destination publish·Cleanup 완료 전 잠금 유지 | `TestMoveCompletionWaitsForPublishAndCleanupEvidence` |
+| exact source receipt만 Move 완료 허용 | `TestMoveCleanupSettlesOnlyReceiptForExactSource` |
+| Cleanup spec 불변·UID fencing·terminal 상태 | `src/kubernetes/cleanupapi/store_test.go` |
+| authority 재확인 뒤 inode 고정 retire/purge | `src/node/ownership/reclaim_linux_test.go` |
+| Job·Pool 변경과 영구 실행 실패를 NeedsReview로 수렴 | `src/kubernetes/helperpod/cleanup_test.go` |
+| Pending 재개·receipt settlement·review-only orphan 발견 | `src/lifecycle/cleanupcontroller/reconciler_test.go` |
+| recovered Move의 superseded copy 발견과 cycle당 단일 authority snapshot | `src/lifecycle/cleanupcontroller/reconciler_test.go` |
+| create/incoming stage crash 복구와 unrecorded stage 비채택 | `src/node/ownership/{store,transfer}_test.go` |
+| inventory exact-limit와 overflow admission | `src/node/observation/scanner_test.go`, `src/kubernetes/volumeapi/registry_test.go` |
+| reservation·미완료 Cleanup의 Helm/Argo CD 제거 차단 | `TestCheckReportsEveryShiftPVDependency`, `TestCheckBlocksUnsettledCleanupContract` |
 | 완료 증거 저장 전 잠금·transfer resource 보존 | `TestCompletionConfirmationPrecedesResourceDeletionAndUnlock` |
 | CAS·journal·삭제 응답 유실과 반복 기록 실패 | `TestCompletionRecoversAcrossAPIFailureBoundaries` |
 | 완료 중 다른 owner·Move 잠금·phase 보존 | `TestCompletionRejectsConflictingAuthority` |
@@ -87,23 +106,20 @@ Unit test는 다음 고비용 경계를 포함한다.
 | Spec의 phase·action 목록과 코드 enum 일치 | `TestMobilityContractNamesMatchFSM` |
 
 ```bash
-go test -race -count=1 ./src/mobility/... ./src/csi/... ./test/docs
-RECOVERY_SCRIPT_IMAGE=shiftpv:dev go test -count=1 ./src/mobility/controller -run 'Test(CleanupSourceScript|RecoveryRetirementScript|RecoveryOwnerVerificationScript)'
+go test -race -count=1 ./src/mobility/... ./src/csi/... ./src/kubernetes/cleanupapi ./src/kubernetes/helperpod ./src/lifecycle/cleanupcontroller ./src/node/ownership ./test/docs
 ```
 
-두 번째 명령은 준비된 helper image에서 현재 script를 실행한다. Linux에서는 image 지정 없이 실행하고,
-macOS에서 image를 지정하지 않으면 해당 script test는 skip된다. 이는 실제 Kind 이동 검증과 별도다.
-
 `test/e2e/kind/mobility/completion.sh`는 격리 Kind에서 한 Volume의 성공 기록만 admission policy로
-거절한다. 실제 이동·원본 삭제 뒤 cleanup Job 삭제, CSI Volume 삭제, Controller 재시작을 겹치고
-정책 해제 후 `Succeeded` 수렴과 helper 재생성 부재를 확인한다. 정리 요청의 불변성·Move/Job UID·
-경로·완료 기록도 검증한다. Post-commit recovery는 남은 요청이 실제 deletion admission에서
-`CleanupRequest` blocker로 나타나는지 server-side dry-run으로 확인한다.
+거절한다. 실제 이동·source purge 뒤 cleanup Job 삭제, CSI Volume 삭제, Controller 재시작을 겹치고
+정책 해제 후 `Succeeded` 수렴과 effect 재생성 부재를 확인한다. Cleanup의 Move UID·source copyID·
+executor UID·purge receipt·settledAt도 검증한다.
 
-`test/e2e/kind/mobility/cleanup-lifecycle.sh`는 recovery 뒤 격리 데이터가 있으면 확인을 실패시킨다.
-실패한 시도의 Job 삭제·Controller 재시작·같은 번호 재요청은 재실행하지 않는다. 테스트 소유 데이터를
-Pool 밖으로 옮긴 뒤 증가한 번호로 다시 확인하여 완료 기록·TTL·uninstall 의무 해제를 검증한다.
-최신 destination checksum과 PVC/PV identity는 전 과정에서 유지한다.
+`test/e2e/kind/mobility/cleanup-lifecycle.sh`는 영구 cleanup 실패가 exact copy를 보존하고
+`NeedsReview`에 수렴하는지 확인한다. effect Job 삭제와 Controller 재시작 뒤에도 자동 재실행하지 않으며,
+deletion admission은 volume reservation과 `ShiftPVCleanup`을 uninstall blocker로 보고한다. 현재
+owner checksum과 PVC/PV identity는 전 과정에서 유지한다. Argo CD E2E는 metadata 제거와 orphan
+발견 사이에도 reservation이 Application 삭제를 막고, 승인된 exact cleanup 정산 뒤 같은 PreDelete가
+자동 완료되는지 확인한다.
 
 ## kind E2E
 
@@ -126,6 +142,7 @@ kind control-plane
 | Restart | Controller/Node 교체 뒤 mounted data와 republish checksum 보존 |
 | Filesystem fault | ENOSPC/read-only에서 data 보존과 복구 뒤 수렴 |
 | Lifecycle | mounted/retained dependency 제거 차단과 reinstall 복구 |
+| Orphan cleanup | Retain PV와 실제 mount 중 보존, 명시 승인, unmount 뒤 exact data·marker·reservation 정리 |
 
 집중 실행:
 
@@ -147,7 +164,9 @@ flowchart LR
     PREFLIGHT[selector / affinity / taint / PDB] --> MOVE[cordon Move]
     MOVE --> COPY[copy + checksum]
     COPY --> COMMIT[owner CAS]
-    COMMIT --> PURGE[source final + retired absent]
+    COMMIT --> INTENT[immutable Cleanup]
+    INTENT --> RECEIPT[exact purge receipt]
+    RECEIPT --> SETTLE[Completed]
     MOVE --> RECOVERY[Blocked → ResumeOwner]
 ```
 
@@ -157,7 +176,7 @@ flowchart LR
 | Data | checksum 유지 |
 | Placement | persisted destination에서 replacement 실행 |
 | Authority | destination이 Ready owner, `activeMove`는 빈 값 |
-| Cleanup | destination final 존재, source final/retired 부재 |
+| Cleanup | source copyID 대상 intent/receipt/settlement, source final/retired 부재 |
 | Restart | Copying, Promoting, Committing 중 Controller 교체 수렴 |
 | TLS | Secret key, owner reference, CA bundle, disable/enable 정책 수렴 |
 
@@ -209,7 +228,7 @@ Linux 전용 runner는 `sudo`와 util-linux `unshare`를 사용한다. Private n
 ```bash
 make image
 make image-controller CONTROLLER_VERSION=0.2.0
-make image-node NODE_VERSION=0.1.3
+make image-node NODE_VERSION=0.3.0
 make image-combined
 ```
 

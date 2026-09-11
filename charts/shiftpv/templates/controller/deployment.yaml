@@ -33,14 +33,15 @@ spec:
       {{- end }}
       containers:
         - name: shiftpv-controller
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: "{{ include "shiftpv.controllerImage" . }}"
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           command: ["/shiftpv-controller"]
           args:
             - --endpoint=unix:///run/csi/csi.sock
             - --namespace=$(POD_NAMESPACE)
-            - --helper-image={{ .Values.helperPod.image }}
+            - --helper-image={{ include "shiftpv.helperPodImage" . }}
             - --helper-timeout={{ .Values.helperPod.timeout }}
+            - --helper-service-account={{ include "shiftpv.controllerServiceAccount" . }}
             - --helper-cpu-request={{ .Values.helperPod.resources.requests.cpu }}
             - --helper-memory-request={{ .Values.helperPod.resources.requests.memory }}
             - --helper-cpu-limit={{ .Values.helperPod.resources.limits.cpu }}
@@ -60,7 +61,7 @@ spec:
             - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}
             {{- if .Values.mobility.enabled }}
             - --mobility-interval={{ .Values.mobility.interval }}
-            - --mobility-helper-image={{ .Values.mobility.helperImage }}
+            - --mobility-helper-image={{ include "shiftpv.mobilityHelperImage" . }}
             {{- end }}
             - --v={{ .Values.controller.logLevel }}
           env:

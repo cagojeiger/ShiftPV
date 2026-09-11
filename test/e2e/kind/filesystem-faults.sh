@@ -94,9 +94,10 @@ wait_for_not_ready_event() {
 }
 
 # Overlay the fault worker pool with a byte-sufficient tmpfs and exhaust only
-# its inodes. Pool byte admission passes, then mkdir must still hit ENOSPC.
+# its inodes. The write probe must reject the Pool even though byte statfs alone
+# would pass; the statfs-to-I/O race is covered separately by controller tests.
 docker exec "${FAULT_NODE}" mount \
-	-t tmpfs -o size=128m,nr_inodes=8 shiftpv-enospc "${FAULT_POOL_PATH}"
+	-t tmpfs -o size=128m,nr_inodes=64 shiftpv-enospc "${FAULT_POOL_PATH}"
 MOUNT_STATE=enospc
 docker exec "${FAULT_NODE}" sh -ec '
   mkdir -p /srv/shiftpv-b/volumes

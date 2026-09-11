@@ -20,6 +20,7 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/metrics"
 	shiftmount "github.com/cagojeiger/ShiftPV/src/node/mount"
+	nodeobservation "github.com/cagojeiger/ShiftPV/src/node/observation"
 	poolreadiness "github.com/cagojeiger/ShiftPV/src/pool/readiness"
 )
 
@@ -52,11 +53,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	binder := shiftmount.NewBinder()
 	nodeService := &nodecsi.Service{
 		NodeName:   *nodeName,
 		HostRoot:   *hostRoot,
 		TargetRoot: *targetRoot,
-		Binder:     shiftmount.NewBinder(),
+		Binder:     binder,
 		Volumes:    registry,
 		Pools:      registry,
 	}
@@ -64,6 +66,10 @@ func main() {
 	readinessReconciler := &poolreadiness.Reconciler{
 		NodeName: *nodeName, Pools: registry, Inspector: poolreadiness.NewProbe(*hostRoot), Interval: *poolReadinessInterval,
 	}
+	inventoryScanner := &nodeobservation.Scanner{
+		HostRoot: *hostRoot, TargetRoot: *targetRoot, Installation: registry, Publications: binder, Limit: 256,
+	}
+	readinessReconciler.Inventory = inventoryScanner.Scan
 	var exporter *metrics.Exporter
 	if *metricsAddress != "" {
 		exporter = metrics.New("filesystem")

@@ -135,8 +135,9 @@ func TestPlacementRecreationStaysOnPersistedDestination(t *testing.T) {
 func TestOwnerCommitRequiresLiveReservationOnDestination(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	_, _, destination := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{
-		CandidateNodes: []string{"destination"}, DestinationNode: "destination",
+		CandidateNodes: []string{"destination"}, DestinationNode: "destination", DestinationCopy: &destination,
 	}}
 	repository := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
 		Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name,

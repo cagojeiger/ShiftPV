@@ -12,9 +12,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/lifecycle/cleanup"
 	"github.com/cagojeiger/ShiftPV/src/pool/capacity"
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 type Inventory interface {
@@ -23,9 +24,14 @@ type Inventory interface {
 	ListMoves(context.Context) ([]volumeapi.Move, error)
 }
 
+type CleanupInventory interface {
+	List(context.Context) ([]cleanupapi.Cleanup, error)
+}
+
 type Controller struct {
 	Exporter   *Exporter
 	Inventory  Inventory
+	Cleanups   CleanupInventory
 	Client     kubernetes.Interface
 	Namespace  string
 	Interval   time.Duration
@@ -111,22 +117,22 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 	for _, phase := range movePhases {
 		values = append(values, sample{"moves", float64(counts[phase]), []string{phase}})
 	}
-	requests, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: cleanup.Label})
-	if err != nil {
-		return err
-	}
 	cleanupCounts := map[string]int{}
-	for index := range requests.Items {
-		record, err := cleanup.Decode(&requests.Items[index])
-		state := record.State
+	var cleanupContracts []cleanupapi.Cleanup
+	if c.Cleanups != nil {
+		cleanups, err := c.Cleanups.List(ctx)
 		if err != nil {
-			state = "Unknown"
+			return err
 		}
-		cleanupCounts[state]++
+		cleanupContracts = cleanups
+		for _, request := range cleanups {
+			cleanupCounts[request.Status.Phase]++
+		}
 	}
-	for _, state := range []string{cleanup.Pending, cleanup.Running, cleanup.NeedsReview, cleanup.Completed, "Unknown"} {
+	for _, state := range []string{cleanupapi.PhasePending, cleanupapi.PhaseRunning, cleanupapi.PhaseVerifying, cleanupapi.PhaseNeedsReview, cleanupapi.PhaseCompleted, "Unknown"} {
 		values = append(values, sample{"cleanup_requests", float64(cleanupCounts[state]), []string{state}})
 	}
+	values = append(values, copyObservationSamples(pools, volumes, moves, cleanupContracts)...)
 	c.Exporter.Cache.update("metadata", values, true)
 	return nil
 }
@@ -137,6 +143,14 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 		labels := []string{pool.Name, pool.NodeName}
 		ready, _ := pool.ReadyAt(time.Now(), staleAfter)
 		values = append(values, sample{"pool_ready", boolValue(ready), labels})
+		inventoryValid, inventoryTruncated := false, false
+		if pool.Status.Inventory != nil {
+			inventoryValid, inventoryTruncated = pool.Status.Inventory.Valid, pool.Status.Inventory.Truncated
+		}
+		values = append(values,
+			sample{"pool_inventory_valid", boolValue(inventoryValid), labels},
+			sample{"pool_inventory_truncated", boolValue(inventoryTruncated), labels},
+		)
 		q, err := resource.ParseQuantity(pool.CapacityLimit)
 		limit, exact := q.AsInt64()
 		reserved, accountingErr := capacity.ReservedBytes(reservations, volumes, moves, pool.NodeName)
@@ -161,6 +175,60 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 			}
 		}
 		values = append(values, sample{"pool_capacity_limit_bytes", float64(limit), labels}, sample{"pool_reserved_bytes", float64(reserved), labels}, sample{"pool_unregistered_reserved_bytes", float64(unregistered), labels})
+	}
+	return values
+}
+
+func copyObservationSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, cleanups []cleanupapi.Cleanup) []sample {
+	authority := map[volume.CopyIdentity]string{}
+	for _, state := range volumes {
+		if state.CurrentCopy != nil {
+			authority[*state.CurrentCopy] = "Current"
+		}
+	}
+	for _, move := range moves {
+		state, active := volumes[move.Spec.VolumeID]
+		if !active || state.ActiveMove != move.Name {
+			continue
+		}
+		for _, identity := range []*volume.CopyIdentity{move.Status.SourceCopy, move.Status.IncomingCopy, move.Status.DestinationCopy} {
+			if identity != nil {
+				authority[*identity] = "InFlight"
+			}
+		}
+	}
+	for _, request := range cleanups {
+		if request.Status.Phase != cleanupapi.PhaseCompleted {
+			authority[request.Spec.Target] = "CleanupTarget"
+		}
+	}
+	counts := map[string]int{}
+	for _, pool := range pools {
+		if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.Truncated {
+			counts["NeedsReview"]++
+		}
+		if pool.Status.Inventory == nil {
+			continue
+		}
+		for _, observed := range pool.Status.Inventory.Copies {
+			if observed.Identity == nil || observed.Problem != "" {
+				counts["NeedsReview"]++
+				continue
+			}
+			if !observed.Present {
+				counts["Missing"]++
+				continue
+			}
+			state, exists := authority[*observed.Identity]
+			if !exists {
+				state = "OrphanPreserved"
+			}
+			counts[state]++
+		}
+	}
+	var values []sample
+	for _, state := range []string{"Current", "InFlight", "CleanupTarget", "OrphanPreserved", "Missing", "NeedsReview"} {
+		values = append(values, sample{"copy_observations", float64(counts[state]), []string{state}})
 	}
 	return values
 }

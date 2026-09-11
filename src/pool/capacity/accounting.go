@@ -25,6 +25,9 @@ func ReservedBytes(reservations []corev1.ConfigMap, volumes map[string]volumeapi
 		seen[volumeID] = struct{}{}
 		ownerNode := reservation.Data["nodeName"]
 		if state, exists := volumes[volumeID]; exists {
+			if state.UID == "" || reservation.Data["volumeUID"] != state.UID {
+				return 0, fmt.Errorf("reservation %q does not match the current volume incarnation", reservation.Name)
+			}
 			ownerNode = state.OwnerNode
 		}
 		if ownerNode == "" {

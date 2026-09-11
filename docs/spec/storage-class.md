@@ -21,8 +21,6 @@ provisioner: csi.shiftpv.io
 reclaimPolicy: Retain
 allowVolumeExpansion: false
 volumeBindingMode: WaitForFirstConsumer
-parameters:
-  shiftpv.io/capacity-enforcement: none
 ```
 
 | 필드 | 계약 |
@@ -33,10 +31,9 @@ parameters:
 | Binding | `WaitForFirstConsumer` |
 | Reclaim | `Retain` |
 | Expansion | 현재 제품 범위 밖 |
-| Parameters | 호환성 marker와 external-provisioner metadata |
+| Parameters | external-provisioner metadata만 허용 |
 
-`shiftpv.io/capacity-enforcement: none`은 upgrade 전후 StorageClass identity를 유지하는 호환성
-marker다. 알 수 없는 parameter와 다른 marker 값은 `InvalidArgument`로 닫는다.
+알 수 없는 parameter는 `InvalidArgument`로 닫는다.
 
 ## Capacity admission
 
@@ -58,7 +55,13 @@ flowchart TD
 
 신규 할당은 논리 잔여량과 물리 잔여량을 모두 충족한다. ShiftPV 밖의 writer도 `statfs`에
 반영된다. 개별 volume 사용량은 filesystem 책임이며 Pool limit는 write quota가 아니라 admission
-경계다.
+경계다. `statfs`는 검사 시점의 snapshot이며 공간을 예약하지 않는다. 검사 뒤 외부 writer가 공간을
+소진해 directory 생성이 `ENOSPC`로 실패하면 reservation과 생성 intent를 보존하고 같은 CSI 요청을
+재시도한다.
+
+Pool copy inventory가 256 observations를 넘어 `truncated=true`이면 새 PVC와 이동 destination
+admission을 닫는다. 기존 volume publish와 exact cleanup은 유지하며, inventory가 다시 완전해지면
+신규 배치를 재개한다.
 
 Incoming 예약은 `capacityApproved=true`, destination 일치, Volume의 `activeMove` 일치,
 owner commit 전인 Move에 적용한다. Commit 뒤에는 destination owner 예약으로 한 번만 계산한다.

@@ -91,5 +91,47 @@ spec:
                         minLength: 1
                       message:
                         type: string
+                inventory:
+                  type: object
+                  required: [observedAt, valid]
+                  properties:
+                    observedAt:
+                      type: string
+                      format: date-time
+                    valid:
+                      type: boolean
+                    truncated:
+                      type: boolean
+                    message:
+                      type: string
+                    copies:
+                      type: array
+                      maxItems: 256
+                      items:
+                        type: object
+                        required: [marker, present]
+                        properties:
+                          marker:
+                            type: string
+                          present:
+                            type: boolean
+                          published:
+                            type: boolean
+                          problem:
+                            type: string
+                          identity:
+                            type: object
+                            required: [installationID, poolName, poolUID, volumeID, volumeUID, copyID, nodeName, role]
+                            properties:
+                              installationID: {type: string}
+                              poolName: {type: string}
+                              poolUID: {type: string}
+                              volumeID: {type: string}
+                              volumeUID: {type: string}
+                              copyID: {type: string}
+                              nodeName: {type: string}
+                              role:
+                                type: string
+                                enum: [Serving, Incoming, Retired]
       subresources:
         status: {}

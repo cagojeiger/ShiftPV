@@ -81,19 +81,6 @@ DIRECTORY_POOL_ONLY=1 \
   ./test/e2e/kind/run.sh
 ```
 
-Run only the published `0.1.3` to source-tree chart upgrade with:
-
-```bash
-UPGRADE_ONLY=1 \
-  CLUSTER_NAME=shiftpv-upgrade-focused \
-  ./test/e2e/kind/run.sh
-```
-
-This path proves the old Pool schema and StorageClass can be upgraded by applying
-the new CRDs, adding a limit to every Pool, and then upgrading the release. It
-also verifies that a pre-upgrade volume retains its checksum and that a new PVC
-can be provisioned by the upgraded controller.
-
 The cluster and its temporary host directories are removed on exit. Set
 `KEEP_CLUSTER=1` only while diagnosing a failure.
 

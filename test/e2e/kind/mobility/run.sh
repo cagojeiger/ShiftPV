@@ -148,7 +148,9 @@ for _ in {1..300}; do
 	if [[ -n "${BLOCKED_MOVE}" ]]; then
 		if [[ -z "${COPY_FAULT_PATH:-}" ]]; then
 			COPY_FAULT_NODE="${CLUSTER_NAME}-worker2"
-			COPY_FAULT_PATH="$(pool_mount_for_node "${COPY_FAULT_NODE}")/.shiftpv/incoming/${BLOCKED_MOVE}"
+			BLOCKED_MOVE_UID=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.metadata.uid}')
+			test -n "${BLOCKED_MOVE_UID}"
+			COPY_FAULT_PATH="$(pool_mount_for_node "${COPY_FAULT_NODE}")/.shiftpv/incoming/move-${BLOCKED_MOVE_UID}-incoming"
 			docker exec "${COPY_FAULT_NODE}" mkdir -p -- "$(dirname "${COPY_FAULT_PATH}")"
 			docker exec "${COPY_FAULT_NODE}" test ! -e "${COPY_FAULT_PATH}"
 			docker exec "${COPY_FAULT_NODE}" touch -- "${COPY_FAULT_PATH}"
@@ -279,7 +281,9 @@ else
 fi
 test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
 test ! -e "${SOURCE_POOL}/volumes/${VOLUME_ID}"
-test ! -e "${SOURCE_POOL}/.shiftpv/retired/${MOVE_NAME}"
+SOURCE_COPY_ID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
+test -n "${SOURCE_COPY_ID}"
+test ! -e "${SOURCE_POOL}/.shiftpv/retired/${SOURCE_COPY_ID}"
 test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
 
 recover_after_commit_failure

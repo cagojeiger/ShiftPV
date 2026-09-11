@@ -31,3 +31,4 @@ bytes를 한 번 측정한다. 승인은 Move status에 기록한다.
 
 신규 provisioning과 이동 복사는 논리 overcommit과 관측된 물리 부족을 함께 피한다. 외부 writer의
 미래 소비와 requested bytes를 넘는 개별 volume write는 host filesystem 운영 정책이 담당한다.
+`statfs` 승인은 filesystem block을 독점하지 않으며 이후 실제 I/O 실패가 최종 결과를 결정한다.

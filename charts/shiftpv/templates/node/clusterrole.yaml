@@ -5,6 +5,10 @@ metadata:
   labels:
     {{- include "shiftpv.labels" . | nindent 4 }}
 rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
   - apiGroups: ["shiftpv.io"]
     resources: ["shiftpvpools"]
     verbs: ["get", "list"]
@@ -17,3 +21,6 @@ rules:
   - apiGroups: ["shiftpv.io"]
     resources: ["shiftpvvolumes/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csidrivers"]
+    verbs: ["get"]

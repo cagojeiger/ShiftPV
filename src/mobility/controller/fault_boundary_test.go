@@ -8,11 +8,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 type lostResponseRepository struct {
@@ -117,14 +119,16 @@ func TestPendingMoveCancellationConvergesAfterDeleteResponseLost(t *testing.T) {
 
 func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testing.T) {
 	ctx := context.Background()
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	source, _, _ := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{
 		Name:   "move-test",
 		UID:    "move-uid",
-		Spec:   volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
-		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForCapacity), ClaimNamespace: "workload", CandidateNodes: []string{"destination"}, CapacityApproved: true, SourceBytes: 1},
+		Spec:   volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForCapacity), ClaimNamespace: "workload", CandidateNodes: []string{"destination"}, CapacityApproved: true, SourceBytes: 1, SourceCopy: &source},
 	}
 	inner := &memoryRepository{
-		pools: []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
+		pools: []volumeapi.Pool{{Name: "source-pool", UID: "source-pool-uid", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination-pool", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination-pool"}},
 		moves: []volumeapi.Move{move},
 	}
 	repository := &lostResponseRepository{memoryRepository: inner, statusResponses: 1}
@@ -165,6 +169,7 @@ func TestCopyResourcesConvergeAfterCreateResponseLost(t *testing.T) {
 	ctx := context.Background()
 	move := volumeapi.Move{
 		Name:   "move-test",
+		UID:    "move-uid",
 		Spec:   volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
 		Status: volumeapi.MoveStatus{DestinationNode: "destination"},
 	}
@@ -201,10 +206,12 @@ func TestCopyResourcesConvergeAfterCreateResponseLost(t *testing.T) {
 
 func TestMobilityJobsConvergeAfterCreateResponseLost(t *testing.T) {
 	ctx := context.Background()
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	source, incoming, destination := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{
 		Name: "move-test", UID: "move-uid",
-		Spec:   volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
-		Status: volumeapi.MoveStatus{DestinationNode: "destination"},
+		Spec:   volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{DestinationNode: "destination", SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination, CopyOperationID: "copy-move-uid", PromotionOperationID: "promote-move-uid"},
 	}
 	names := namesFor(move.Name)
 	tests := []struct {
@@ -214,7 +221,6 @@ func TestMobilityJobsConvergeAfterCreateResponseLost(t *testing.T) {
 	}{
 		{name: "copy", jobName: names.CopyJob, ensure: func(r *Reconciler) error { return r.ensureCopyJob(ctx, move, names) }},
 		{name: "promotion", jobName: names.PromotionJob, ensure: func(r *Reconciler) error { return r.ensurePromotionJob(ctx, move, names) }},
-		{name: "cleanup", jobName: names.CleanupJob, ensure: func(r *Reconciler) error { return r.ensureCleanupJob(ctx, move, names) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -250,11 +256,12 @@ func TestVolumeLockConvergesAfterCASResponseLost(t *testing.T) {
 	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}}
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
 		Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"},
-	}}}
+	}}, pools: []volumeapi.Pool{{Name: "source-pool", UID: "source-pool-uid", NodeName: "source"}}}
 	repository := &lostResponseRepository{memoryRepository: inner, stateCASResponses: 1}
 	reconciler := &Reconciler{Repository: repository}
+	state, _ := repository.Get(ctx, volumeID)
 	observed := observation{
-		Volume:         inner.volumes[volumeID],
+		Volume:         state,
 		PV:             &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
 		Claim:          &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "workload"}},
 		Consumer:       &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: "workload", UID: "consumer-uid"}},
@@ -279,8 +286,9 @@ func TestVolumeLockConvergesAfterCASResponseLost(t *testing.T) {
 func TestOwnerCommitConvergesAfterCASResponseLost(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	_, _, destination := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{
-		CandidateNodes: []string{"destination"}, DestinationNode: "destination",
+		CandidateNodes: []string{"destination"}, DestinationNode: "destination", DestinationCopy: &destination,
 	}}
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
 		Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name,
@@ -309,14 +317,36 @@ func TestOwnerCommitConvergesAfterCASResponseLost(t *testing.T) {
 func TestCompletionConvergesAfterActiveMoveClearResponseLost(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	source, _, destination := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
-		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseCompleting), DestinationNode: "destination"}}
+		UID: "move-uid", Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseCompleting), DestinationNode: "destination", SourceCopy: &source, DestinationCopy: &destination}}
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
-		Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name, PublishedNodes: []string{"destination"},
-	}}}
+		UID: destination.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name, PublishedNodes: []string{"destination"}, CurrentCopy: &destination,
+	}}, moves: []volumeapi.Move{move}}
+	cleanups := newTestCleanupStore()
+	preparer := &Reconciler{Repository: inner, Cleanups: cleanups, CleanupOperator: receiptCleanupOperator{}}
+	if err := preparer.ensureCleanupContract(ctx, &move); err != nil {
+		t.Fatal(err)
+	}
 	repository := &lostResponseRepository{memoryRepository: inner, stateCASResponses: 1}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system"}
+	reconciler := &Reconciler{Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", Cleanups: cleanups, CleanupOperator: receiptCleanupOperator{}}
 	observed := observation{Volume: inner.volumes[volumeID], Names: namesFor(move.Name)}
+	for name, current := range map[string]*volume.CopyIdentity{
+		"missing current copy": nil,
+		"different current copy": func() *volume.CopyIdentity {
+			changed := destination
+			changed.CopyID = "different-copy"
+			return &changed
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := observed
+			invalid.Volume.CurrentCopy = current
+			if err := reconciler.markSucceeded(ctx, &move, invalid); err == nil {
+				t.Fatal("completion accepted without exact destination authority")
+			}
+		})
+	}
 
 	if err := reconciler.markSucceeded(ctx, &move, observed); err == nil {
 		t.Fatal("lost completion response was hidden")
@@ -333,20 +363,26 @@ func TestCompletionConvergesAfterActiveMoveClearResponseLost(t *testing.T) {
 
 func TestTransferCleanupConvergesAfterDeleteResponseLost(t *testing.T) {
 	ctx := context.Background()
-	names := namesFor("move-test")
+	move := volumeapi.Move{Name: "move-test", UID: "move-uid"}
+	names := namesFor(move.Name)
+	owned := func(name string) metav1.ObjectMeta {
+		metadata := moveObjectMeta(move, name, "system", transferLabels(names, move))
+		metadata.UID = types.UID(name + "-uid")
+		return metadata
+	}
 	client := fake.NewSimpleClientset(
-		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: names.SourcePod, Namespace: "system"}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: names.SourceService, Namespace: "system"}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: names.Config, Namespace: "system"}},
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: names.Secret, Namespace: "system"}},
+		&corev1.Pod{ObjectMeta: owned(names.SourcePod)},
+		&corev1.Service{ObjectMeta: owned(names.SourceService)},
+		&corev1.ConfigMap{ObjectMeta: owned(names.Config)},
+		&corev1.Secret{ObjectMeta: owned(names.Secret)},
 	)
 	injectAcceptedDeleteTimeout(t, client, "pods", names.SourcePod)
 	reconciler := &Reconciler{Client: client, Namespace: "system"}
 
-	if err := reconciler.deleteTransferResources(ctx, names); err == nil {
+	if err := reconciler.deleteTransferResources(ctx, move, names); err == nil {
 		t.Fatal("lost delete response was hidden")
 	}
-	if err := reconciler.deleteTransferResources(ctx, names); err != nil {
+	if err := reconciler.deleteTransferResources(ctx, move, names); err != nil {
 		t.Fatalf("transfer cleanup retry did not converge: %v", err)
 	}
 	if objects, err := client.CoreV1().Pods("system").List(ctx, metav1.ListOptions{}); err != nil || len(objects.Items) != 0 {
@@ -365,6 +401,9 @@ func injectAcceptedCreateTimeout(t *testing.T, client *fake.Clientset, resource,
 			return false, nil, nil
 		}
 		injected = true
+		if metadata.GetUID() == "" {
+			metadata.SetUID(types.UID(name + "-uid"))
+		}
 		if err := client.Tracker().Create(action.GetResource(), object.DeepCopyObject(), action.GetNamespace()); err != nil {
 			t.Fatalf("inject accepted create: %v", err)
 		}

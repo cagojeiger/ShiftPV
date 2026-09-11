@@ -17,7 +17,7 @@ RUN export GOOS="${TARGETOS:-$(go env GOOS)}" GOARCH="${TARGETARCH:-$(go env GOA
     && CGO_ENABLED=0 go build \
     -trimpath -ldflags="-s -w" \
     -o /out/shiftpv-uninstall-guard ./src/cmd/uninstall-guard
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/shiftpv-cleanup-check ./src/cmd/cleanup-check
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/shiftpv-volume-helper ./src/cmd/volume-helper
 
 FROM build-base AS build-node
 ARG NODE_VERSION=dev
@@ -37,7 +37,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build-controller /out/shiftpv-controller /shiftpv-controller
 COPY --from=build-controller /out/shiftpv-uninstall-guard /shiftpv-uninstall-guard
-COPY --from=build-controller /out/shiftpv-cleanup-check /shiftpv-cleanup-check
+COPY --from=build-controller /out/shiftpv-volume-helper /shiftpv-volume-helper
 USER 65532:65532
 ENTRYPOINT ["/shiftpv-controller"]
 
@@ -57,7 +57,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build-controller /out/shiftpv-controller /shiftpv-controller
 COPY --from=build-controller /out/shiftpv-uninstall-guard /shiftpv-uninstall-guard
-COPY --from=build-controller /out/shiftpv-cleanup-check /shiftpv-cleanup-check
+COPY --from=build-controller /out/shiftpv-volume-helper /shiftpv-volume-helper
 COPY --from=build-node /out/shiftpv-node /shiftpv-node
 USER 65532:65532
 ENTRYPOINT ["/shiftpv-controller"]

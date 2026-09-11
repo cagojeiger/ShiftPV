@@ -1,0 +1,18 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "metrics.prometheusRule.enabled requires metrics.enabled" }}
+{{- end }}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
+{{- fail "metrics.prometheusRule.enabled requires the Prometheus Operator PrometheusRule CRD" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "shiftpv.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels := merge (include "shiftpv.labels" . | fromYaml) .Values.metrics.prometheusRule.additionalLabels }}
+    {{- toYaml $labels | nindent 4 }}
+spec:
+  {{- .Files.Get "alerts/shiftpv-rules.yaml" | nindent 2 }}
+{{- end }}

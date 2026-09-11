@@ -29,5 +29,4 @@ flowchart LR
 | 운영 | [0012](0012-controller-managed-webhook-certificates.md) | Controller가 admission 인증서 관리 | Accepted |
 
 모든 ADR은 `Context → Decision → Alternatives considered → Consequences` 순서를 사용한다.
-파일명은 `NNNN-kebab-title.md` 형식이다. 정식 release 전에는 넓은 경계에서 세부 경계로 번호를
-정돈하고, 정식 release 뒤에는 기존 번호를 고정한 채 새 결정과 대체 결정을 뒤에 추가한다.
+파일명은 `NNNN-kebab-title.md` 형식이며 서비스 경계에서 세부 운영 결정 순으로 정렬한다.

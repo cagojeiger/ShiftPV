@@ -5,7 +5,7 @@
     "metrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "port", "snapshotInterval", "serviceMonitor"],
+      "required": ["enabled", "port", "snapshotInterval", "dashboard", "prometheusRule", "serviceMonitor"],
       "properties": {
         "dashboard": {
           "type": "object",
@@ -18,6 +18,15 @@
         },
         "enabled": {"type": "boolean"},
         "port": {"type": "integer", "minimum": 1024, "maximum": 65535, "not": {"enum": [9808]}},
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "additionalLabels"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "additionalLabels": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        },
         "snapshotInterval": {"type": "string", "pattern": "^[1-9][0-9]*(s|m)$"},
         "serviceMonitor": {
           "type": "object",
@@ -56,7 +65,7 @@
         "enabled": {"type": "boolean"},
         "interval": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
         "webhookPort": {"type": "integer", "minimum": 1024, "maximum": 65535},
-        "helperImage": {"type": "string", "minLength": 1}
+        "helperImage": {"type": "string"}
       }
     },
     "node": {
@@ -84,7 +93,7 @@
       "type": "object",
       "required": ["image", "timeout"],
       "properties": {
-        "image": {"type": "string", "minLength": 1},
+        "image": {"type": "string"},
         "timeout": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
         "resources": {
           "type": "object",

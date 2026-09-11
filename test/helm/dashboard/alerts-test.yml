@@ -1,0 +1,73 @@
+rule_files:
+  - /etc/shiftpv-alerts/shiftpv-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="shiftpv-system",source="metadata"}'
+        values: '0+0x6 1+0x5'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",source="metadata"}'
+        values: '-600+0x6 420+60x5'
+      - series: 'shiftpv_pool_accounting_valid{shiftpv="true",namespace="shiftpv-system",pool="pool-a",node="worker-a"}'
+        values: '0+0x6 1+0x5'
+      - series: 'shiftpv_pool_inventory_valid{shiftpv="true",namespace="shiftpv-system",pool="pool-a",node="worker-a"}'
+        values: '0+0x6 1+0x5'
+      - series: 'shiftpv_pool_inventory_truncated{shiftpv="true",namespace="shiftpv-system",pool="pool-b",node="worker-b"}'
+        values: '1+0x6 0+0x5'
+      - series: 'shiftpv_cleanup_requests{shiftpv="true",namespace="shiftpv-system",state="NeedsReview"}'
+        values: '1+0x6 0+0x5'
+      - series: 'shiftpv_copy_observations{shiftpv="true",namespace="shiftpv-system",state="OrphanPreserved"}'
+        values: '1+0x6 0+0x5'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ShiftPVObservationFailed
+        exp_alerts:
+          - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", source: metadata}
+            exp_annotations: {summary: "ShiftPV observation is failing", description: "The latest completed ShiftPV observation for this source failed for five minutes."}
+      - eval_time: 6m
+        alertname: ShiftPVObservationStale
+        exp_alerts:
+          - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", source: metadata}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "ShiftPV has not completed a successful observation for more than five minutes."}
+      - eval_time: 6m
+        alertname: ShiftPVPoolAccountingInvalid
+        exp_alerts:
+          - exp_labels: {namespace: shiftpv-system, node: worker-a, pool: pool-a, severity: warning, shiftpv: "true"}
+            exp_annotations: {summary: "ShiftPV Pool accounting is invalid", description: "The Pool reservation snapshot cannot be used for capacity decisions."}
+      - eval_time: 6m
+        alertname: ShiftPVPoolInventoryUnsafe
+        exp_alerts:
+          - exp_labels: {namespace: shiftpv-system, node: worker-a, pool: pool-a, severity: warning, shiftpv: "true"}
+            exp_annotations: {summary: "ShiftPV Pool copy inventory is incomplete", description: "The Pool inventory is invalid or exceeded its fixed scan bound, so absence is not proven."}
+          - exp_labels: {namespace: shiftpv-system, node: worker-b, pool: pool-b, severity: warning, shiftpv: "true"}
+            exp_annotations: {summary: "ShiftPV Pool copy inventory is incomplete", description: "The Pool inventory is invalid or exceeded its fixed scan bound, so absence is not proven."}
+      - eval_time: 6m
+        alertname: ShiftPVCleanupNeedsReview
+        exp_alerts:
+          - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", state: NeedsReview}
+            exp_annotations: {summary: "ShiftPV cleanup needs operator review", description: "At least one durable cleanup contract is preserving data pending operator action."}
+      - eval_time: 6m
+        alertname: ShiftPVCopyNeedsReview
+        exp_alerts:
+          - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", state: OrphanPreserved}
+            exp_annotations: {summary: "ShiftPV copy placement needs review", description: "A copy is orphan-preserved, missing from its expected placement, or has an unsafe identity observation."}
+      - eval_time: 8m
+        alertname: ShiftPVObservationFailed
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ShiftPVObservationStale
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ShiftPVPoolAccountingInvalid
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ShiftPVPoolInventoryUnsafe
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ShiftPVCleanupNeedsReview
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ShiftPVCopyNeedsReview
+        exp_alerts: []

@@ -145,12 +145,20 @@ wait_for_success() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 	docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}/payload"
 	test ! -e "${WORKER_A_POOL}/volumes/${VOLUME_ID}"
-	test ! -e "${WORKER_A_POOL}/.shiftpv/retired/${MOVE_NAME}"
+	local source_copy
+	source_copy=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
+	test -n "${source_copy}"
+	test ! -e "${WORKER_A_POOL}/.shiftpv/retired/${source_copy}"
 }
 
 delete_workload() {
 	local namespace=$1
+	kubectl patch "pv/${PV_NAME}" --type=merge \
+		-p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
 	kubectl delete "namespace/${namespace}" --wait=true --timeout=180s
+	kubectl wait --for=delete "pv/${PV_NAME}" --timeout=180s
+	kubectl wait --for=delete "shiftpvvolume/${VOLUME_ID}" --timeout=180s
+	docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}"
 	kubectl uncordon "${SOURCE_NODE}" >/dev/null 2>&1 || true
 }
 
@@ -210,8 +218,11 @@ if [[ -z "${COPY_JOB}" ]] || ! kubectl -n shiftpv-system get "job/${COPY_JOB}" >
 fi
 controller_down
 kubectl -n shiftpv-system wait "job/${COPY_JOB}" --for=condition=complete --timeout=180s
-docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}/.shiftpv-move-id"
-docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}/payload"
+INCOMING_COPY_ID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.incomingCopy.copyID}')
+test -n "${INCOMING_COPY_ID}"
+docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/incoming/${INCOMING_COPY_ID}/payload"
+docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/copy-${INCOMING_COPY_ID}.json"
+docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/placements/placement-${INCOMING_COPY_ID}.json"
 docker exec "${DESTINATION_NODE}" mount -o remount,ro "${DESTINATION_MOUNT}"
 MOUNT_STATE=tmpfs_ro
 if docker exec "${DESTINATION_NODE}" touch "${DESTINATION_MOUNT}/readonly-probe" 2>/dev/null; then
@@ -222,13 +233,13 @@ wait_for_pool_condition worker-b False ReadOnly
 controller_up
 wait_for_move_state Copying DestinationUnavailable
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}/.shiftpv-move-id"
+docker exec "${DESTINATION_NODE}" test -f "${DESTINATION_MOUNT}/.shiftpv/incoming/${INCOMING_COPY_ID}/payload"
 docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}"
 docker exec "${DESTINATION_NODE}" mount -o remount,rw "${DESTINATION_MOUNT}"
 MOUNT_STATE=tmpfs_rw
 wait_for_pool_condition worker-b True PoolReady
 wait_for_success "${READONLY_NAMESPACE}"
-docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incoming/${MOVE_NAME}"
+docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incoming/${INCOMING_COPY_ID}"
 echo "mobility resumed after destination read-only recovery: volume=${VOLUME_ID} move=${MOVE_NAME}"
 delete_workload "${READONLY_NAMESPACE}"
 docker exec "${DESTINATION_NODE}" umount "${DESTINATION_MOUNT}"

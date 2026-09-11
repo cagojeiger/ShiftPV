@@ -24,4 +24,4 @@ flowchart LR
 ```
 
 현재 동작은 Spec, 개발 검증은 Development, 설치와 운영은 Helm guide가 소유한다. 현재 commit의 판정은
-required CI job으로 확인한다. 정식 release 전 사실 교정은 결정의 의미를 유지하며 기존 ADR에 반영한다.
+required CI job으로 확인한다.

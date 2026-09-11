@@ -24,16 +24,14 @@ flowchart LR
 ShiftPV는 배치 요청과 volume transaction을 조정한다. kube-scheduler가 destination을 선택하고,
 workload controller가 replica를 소유한다. Commit 전 source, commit 후 destination이 유일한 owner다.
 
-이동 판단은 외부 I/O와 분리한 FSM이 담당한다. Controller는 관찰·action 실행·journal 기록을
-조정하고, helper는 지시받은 파일 작업의 결과를 제공한다. 재시작 후 영속 상태를 관찰해 진행한다.
-정리 완료 증거는 잠금 해제보다 먼저 기록한다. 파일 작업의 완료와 transaction 종결을 분리해
-API 갱신 사이의 중단에도 완료 기록을 재시도한다.
+이동 판단은 외부 I/O와 분리한 FSM이 담당한다. Controller는 관찰·action·journal을 조정하고,
+node-bound helper는 exact copy identity로 제한된 파일 작업만 실행한다. 재시작은 CR journal을 다시
+관찰해 진행한다.
 
-원본 정리 요청은 Move와 별도 수명을 갖는 영속 기록으로 남긴다. 이동 controller가 삭제 권한과
-완료를 확인하고, helper가 승인된 경로의 파일 작업을 실행한다. 기존 Kubernetes ConfigMap을
-요청 저장소로 사용하며, 요청 분리가 이동 잠금의 조기 해제를 의미하지 않는다.
-정리 요청의 관찰·종결 책임은 같은 controller 안에서 분리한다. 불명확한 잔여 데이터는 운영자에게
-확인 책임을 넘기고, 실제 경로 부재를 읽기 전용으로 검증한 뒤 정리 의무를 종료한다.
+원본 삭제는 Move와 수명이 분리된 immutable `ShiftPVCleanup` 계약으로 실행한다. Node가 bounded
+inventory를 보고하고 Controller가 live authority로 삭제 여부를 판정하며 Helper가 local marker와
+inode를 검증한다. Purged receipt가 정산된 뒤 Move 잠금을 해제한다. Authority가 불명확한 copy는
+삭제하지 않고 `NeedsReview`로 보존한다.
 
 ## Alternatives considered
 
@@ -43,6 +41,7 @@ API 갱신 사이의 중단에도 완료 기록을 재시도한다.
 | custom scheduler/plugin | cluster-wide 구성과 결합도가 커진다. |
 | workload replica/template 직접 변경 | GitOps와 workload controller의 소유권이 겹친다. |
 | helper가 다음 이동 단계까지 결정 | 파일 작업과 authority 판단의 소유권이 겹친다. |
+| 경로와 나이만으로 orphan 삭제 | 다른 설치·Pool·Volume의 데이터를 채택할 수 있다. |
 
 ## Consequences
 

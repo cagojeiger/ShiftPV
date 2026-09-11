@@ -25,6 +25,7 @@ type Reconciler struct {
 	Interval  time.Duration
 	Now       func() time.Time
 	Observe   func(volumeapi.Pool, Result, error)
+	Inventory func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -74,6 +75,10 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	meta.RemoveStatusCondition(&status.Conditions, volumeapi.PoolConditionMounted)
 	for _, condition := range conditions(result, pool.Generation, now) {
 		meta.SetStatusCondition(&status.Conditions, condition)
+	}
+	if r.Inventory != nil {
+		inventory := r.Inventory(ctx, pool, now)
+		status.Inventory = &inventory
 	}
 	return r.Pools.SetPoolStatus(ctx, pool.Name, r.NodeName, status)
 }

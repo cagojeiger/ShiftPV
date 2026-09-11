@@ -46,11 +46,14 @@ var definitions = []struct {
 	{"pool_filesystem_size_bytes", "Total size of the filesystem containing the registered directory.", []string{"pool", "node"}},
 	{"pool_filesystem_available_bytes", "Filesystem bytes available to unprivileged users, including external writers.", []string{"pool", "node"}},
 	{"pool_filesystem_available_inodes", "Free filesystem inodes reported by statfs.", []string{"pool", "node"}},
+	{"pool_inventory_valid", "Whether the latest bounded node storage inventory is trustworthy.", []string{"pool", "node"}},
+	{"pool_inventory_truncated", "Whether the latest node storage inventory exceeded its fixed scan budget.", []string{"pool", "node"}},
 	{"metrics_snapshot_success", "Whether the latest observation completed successfully.", []string{"source"}},
 	{"metrics_snapshot_last_success_timestamp_seconds", "Unix time of the last successful observation, zero before first success.", []string{"source"}},
 	{"volumes", "Current Volume objects by phase.", []string{"phase"}},
 	{"moves", "Moves referenced by a live Volume activeMove plus unfinished Completing journals, by phase.", []string{"phase"}},
-	{"cleanup_requests", "Durable source cleanup requests by observed lifecycle state; Unknown means invalid metadata.", []string{"state"}},
+	{"cleanup_requests", "Durable cleanup intents by observed lifecycle state; Unknown means invalid metadata.", []string{"state"}},
+	{"copy_observations", "Node-observed copy placements classified against API authority.", []string{"state"}},
 	{"mobility_deferred_volumes", "Volumes deferred during the last completed cordon discovery.", []string{"reason"}},
 }
 

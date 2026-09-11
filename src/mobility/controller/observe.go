@@ -48,7 +48,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		result.FSM.CompletionReady = completionAllowed(move, state, false)
 		return result, nil
 	}
-	result.FSM.OwnerCommitted = result.DestinationNode != "" && state.Phase == volumeapi.PhaseReady && state.OwnerNode == result.DestinationNode && state.ActiveMove == move.Name
+	result.FSM.OwnerCommitted = hasCommittedDestinationAuthority(move, state, false)
 
 	pools, err := r.Repository.Pools(ctx)
 	if err != nil {

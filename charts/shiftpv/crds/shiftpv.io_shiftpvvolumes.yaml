@@ -41,7 +41,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: [Ready, Moving, Blocked]
+                  enum: [Pending, Ready, Deleting, Moving, Blocked]
                 ownerNode:
                   type: string
                 activeMove:
@@ -51,5 +51,30 @@ spec:
                   items:
                     type: string
                   x-kubernetes-list-type: set
+                creationOperationID:
+                  type: string
+                deletionOperationID:
+                  type: string
+                currentCopy:
+                  type: object
+                  required: [installationID, poolName, poolUID, volumeID, volumeUID, copyID, nodeName, role]
+                  properties:
+                    installationID:
+                      type: string
+                    poolName:
+                      type: string
+                    poolUID:
+                      type: string
+                    volumeID:
+                      type: string
+                    volumeUID:
+                      type: string
+                    copyID:
+                      type: string
+                    nodeName:
+                      type: string
+                    role:
+                      type: string
+                      enum: [Serving, Incoming, Retired]
       subresources:
         status: {}

@@ -1,102 +1,150 @@
-# Source cleanup
+# Cleanup and GC Contract
 
-## Responsibility
+ShiftPV GC는 임의의 directory를 지우는 수집기가 아니다. Node가 copy를 관찰하고 Controller가
+삭제 권한을 판정하며, 승인된 exact copy만 Helper Job이 정리하는 보수적 수명주기다.
 
-```text
-Move controller ── 승인된 삭제 요청 ── source cleanup Job
-      │                                    │
-      └── 완료 증거 저장 ←──────────────────┘
-               │
-       Completing → 이동 잠금 해제
+## Closed loop
 
-Cleanup lifecycle ── 요청 상태 관찰·보존 기간 관리
-      └── 운영자 확인 요청 → read-only path check → 완료 증거
+```mermaid
+flowchart LR
+    O[Node observation] --> D[Controller disposition]
+    D --> I[ShiftPVCleanup intent]
+    I --> E[Helper effect]
+    E --> R[Durable receipt]
+    R --> S[Settlement]
+    D --> P[Preserve + NeedsReview]
 ```
 
-| 담당 | 계약 |
+| 단계 | 책임 | 영속 증거 |
+|---|---|---|
+| Observation | Node Plugin | `ShiftPVPool.status.inventory` |
+| Disposition | Controller | live PV, Volume, Move, Pool, cluster identity와 mount observation |
+| Intent | Controller | immutable `ShiftPVCleanup.spec` |
+| Effect | node-bound Helper Job | local cleanup intent와 retired copy |
+| Receipt | Helper | local receipt + `ShiftPVCleanup.status.receipt` |
+| Settlement | Controller | `Completed`, `settledAt` |
+
+## Exact copy identity
+
+삭제 대상은 path 문자열이 아니라 다음 필드 전체로 식별한다.
+
+| Field | Authority |
 |---|---|
-| Move | source/destination authority, 최초 삭제 실행과 이동 잠금 |
-| Cleanup lifecycle | 기존 controller 안에서 정리 요청 수명주기 조정 |
-| `shiftpv-cleanup-check` | 정해진 경로의 `lstat` 결과 확인; 파일 변경 없이 종료 |
-| Uninstall guard | 미완료·손상된 요청이 있으면 구성 유지 |
+| `installationID` | `kube-system` Namespace UID 기반 cluster incarnation |
+| `poolName`, `poolUID` | 등록된 `ShiftPVPool` incarnation |
+| `volumeID`, `volumeUID` | CSI handle과 `ShiftPVVolume` incarnation |
+| `copyID` | copy incarnation |
+| `nodeName`, `role` | 물리 위치와 `Serving` / `Incoming` / `Retired` 역할 |
 
-## Request and states
+Node control marker는 copy identity와 directory의 device/inode를 함께 기록한다. Helper는 Pool lock을
+잡은 뒤 API authority와 marker를 작업 전후에 다시 확인한다. Symlink, inode 교체, Pool 재등록,
+설치 재생성, executor 교체는 삭제 권한으로 인정하지 않는다.
 
-요청은 controller namespace의 `shiftpv.io/cleanup-request=source-v1` ConfigMap이다.
-`data.intent`는 immutable이며 Move 이름·UID, volume ID, source/destination, Pool 경로, 최초 Job 이름·image를 묶는다.
+```text
+<Pool>/
+├── volumes/<volumeID>/
+└── .shiftpv/
+    ├── pool.json
+    ├── incoming/<copyID>/
+    ├── retired/<copyID>/
+    ├── copy-<copyID>.json
+    ├── placements/placement-<copyID>.json
+    └── operation-{cleanup,receipt}-<operationID>.json
+```
+
+## Cleanup resource
+
+`ShiftPVCleanup`은 cluster-scoped다. 대상·사유·권한·예약 identity는 immutable이며 `approved`만
+`false`에서 `true`로 한 번 변경할 수 있다.
+
+| Spec | 의미 |
+|---|---|
+| `operationID` | 재시도 전체에서 유지되는 효과 ID |
+| `target` | exact copy identity |
+| `reason` | `MoveSource`, `VolumeDelete`, `OrphanReclaim` |
+| `authority` | 삭제를 허가한 `ShiftPVMove`, `ShiftPVVolume`, cluster `Namespace` identity |
+| `reservationUID` | orphan 발견 시 관찰한 exact reservation UID; 없으면 빈 값 |
+| `approved` | Helper 실행 허용 여부 |
 
 ```mermaid
 stateDiagram-v2
     [*] --> Pending
-    Pending --> Running: Move가 정리 Job 실행
-    Running --> Completed: 동일 Job 성공 + 영속 확인
-    Pending --> NeedsReview: 부모 또는 실행 증거 유실
-    Running --> NeedsReview: 실패 또는 권한·식별자 불일치
-    NeedsReview --> Running: 증가한 확인 번호 + 안전 조건 충족
-    Completed --> [*]: 보존 기간 및 종료 조건 충족
+    Pending --> Running: exact Job UID bind
+    Running --> Verifying: retired + purged receipt
+    Verifying --> Completed: receipt settlement
+    Pending --> NeedsReview: unapproved or identity mismatch
+    Running --> NeedsReview: terminal executor failure
+    Verifying --> NeedsReview: incomplete evidence
+    Completed --> Completed
+    Completed --> NeedsReview: exact copy reappeared
+    NeedsReview --> NeedsReview
+    NeedsReview --> Pending: approved + exact authority safe
 ```
 
-| 상태 | 의미 |
+| Phase | Controller 동작 |
 |---|---|
-| `Pending` | Move의 정리 실행 대기 |
-| `Running` | 삭제 또는 읽기 전용 확인 진행 |
-| `NeedsReview` | 서비스 복구·경로 점검·새 확인 요청 필요 |
-| `Completed` | 실제 삭제 성공 또는 읽기 전용 부재 검증을 영속 기록 |
-| `Unknown` | 손상된 요청을 metrics에서 표시; 요청과 uninstall 차단 유지 |
+| `Pending` | 승인된 요청의 결정적 Helper Job 생성 |
+| `Running` | 같은 Job UID의 receipt 대기 |
+| `Verifying` | operation, executor, retired, purged 증거 확인 |
+| `Completed` | 파일 효과 종결; 재실행 없음, 동일 exact copy 재관측 시 review fence 복구 |
+| `NeedsReview` | 데이터 보존; 사유와 조치 표시, 실행 전 orphan은 조건을 재평가 |
 
-## Execution and recovery
+API timeout과 일시적인 조회 실패는 현재 phase에서 재시도한다. Pool/Job/executor identity 변경,
+Job의 terminal failure, receipt 없는 성공은 `NeedsReview`로 수렴한다.
+정산된 exact copy가 filesystem rollback 같은 외부 효과로 다시 관측되면 기존 receipt를 보존한 채
+`CopyReappeared` review fence를 연다. 이전 삭제 권한은 재사용하지 않으며 자동 재삭제하지 않는다.
 
-| 경계 | 동작 |
-|---|---|
-| 최초 삭제 | 요청 저장 → 정확한 Job UID 연결 → 성공 확인 → 완료 기록 |
-| 삭제 Job 예산 | backoff 2, active deadline 300s |
-| 삭제 증거 | 저장된 image·UID·경로·명령·보안 설정·실행 예산이 일치할 때 성공 수용 |
-| 연결된 삭제 Job 유실 | `CleanupFailed`로 Blocked; `ResumeOwner` 경로로 서비스 복구 |
-| `ResumeOwner` 완료 | 서비스가 현재 owner에서 재개; 잔여 정리 의무는 별도로 유지 |
-| 확인 요청 | `shiftpv.io/cleanup-check` annotation의 증가하는 양의 정수; uint64 범위 |
-| 요청 멱등성 | 진행 중 번호와 Job UID·image 고정; 같은 번호나 과거 번호로 실패한 확인 재실행 차단 |
-| 확인 Job 예산 | read-only mount, root filesystem read-only, capabilities 없음; backoff 0, active deadline 300s |
-| 확인 실패·Job 유실 | `NeedsReview` 유지; 원인 해소 후 더 큰 번호로 요청 |
-| 완료 기록 실패 | Job 증거 보존·API 재시도; 기록 성공 뒤 Job TTL 600s |
+## Approval rules
 
-확인 시작과 결과 수용 시 다음 조건을 함께 확인한다.
+| Reason | `approved` | 실행 전 live authority |
+|---|---:|---|
+| `VolumeDelete` | true | Volume이 동일 operation으로 `Deleting`에 고정되고 publication 없음, current copy 일치 |
+| `MoveSource` | true | destination owner commit·publish 완료, source unpublish, Move UID·copy 일치 |
+| `OrphanReclaim` | false → true | target이 current/in-flight copy가 아니고 Pool/inventory가 fresh·valid하며 실제 mount가 없고 reservation identity가 일치 |
 
-| 대상 | 조건 |
-|---|---|
-| 원 Move | 동일 UID의 Succeeded 또는 Blocked/Recovered; API로 확인된 부재 허용 |
-| Volume | active Move 없음, Ready인 유효 owner가 source 이외의 node; source publication 없음; API NotFound 허용 |
-| Source | Ready Node와 Ready Pool, 등록 경로가 immutable intent와 일치 |
-| 기존 helper | 원 Move와 recovery Job·Pod 종료; 최초 cleanup Job 부재 |
-| 확인 증거 | 정확한 Job UID·요청 번호·image·실행 명령·경로·읽기 전용 설정 |
+Orphan은 자동 승인하지 않는다. 운영자가 `approved=true`로 바꾸면 Controller가 live authority를 다시
+판정한다. 아직 mounted 상태거나 PV/Volume/Move가 나타나면 같은 요청을 `NeedsReview`로 보존하고,
+조건이 안전해지면 실행 전 요청만 `Pending`으로 되돌려 같은 operation을 시작한다. 이미 executor가
+결합된 `NeedsReview`는 자동 재개하지 않고 immutable executor·receipt를 운영 증거로 유지한다.
 
-고정된 확인 경로:
+PV는 volume handle만 참조하므로 그 자체로 physical copy를 식별하지 못한다. 동일 Volume의
+`currentCopy`가 target과 다른 유효한 identity를 가리키면 target은 superseded copy로 판정한다.
+`currentCopy`가 없거나 모순되면 PV 유무와 관계없이 보존한다. `Recovered` Move는 권한을 반납하고,
+아직 진행 중인 Move가 target을 참조하면 삭제를 차단한다.
 
 ```text
-<Pool>/
-├── volumes/<volumeID>
-└── .shiftpv/
-    ├── retired/<moveName>
-    ├── incoming/<moveName>
-    └── aborted/
-        ├── <moveName>-final
-        └── <moveName>-incoming
+observe without write
+  → preserve as unapproved
+  → operator approves exact identity
+  → re-evaluate live authority
+  → retire and purge
+  → release exact reservation
+  → settle receipt
 ```
 
-각 상위 경로의 directory·symlink 여부를 확인하고, `ENOENT`만 부재로 인정한다.
-권한 오류·I/O 오류·symlink·남은 경로는 확인 실패다. 경로 수는 고정이며 재귀 용량 조사는 수행하지 않는다.
-현재 등록된 filesystem에 대한 부재 확인이며, 운영자가 교체·분리한 과거 디스크의 폐기는 운영자 책임이다.
+## Bounded observation
 
-## Observation and retention
-
-| 항목 | 값·조건 |
+| 항목 | 계약 |
 |---|---|
-| Lifecycle 실행 | `mobility.enabled=true` |
-| 관찰 | 1분 주기, pass 10s, 요청별 5s, 최대 32건씩 순환 |
-| API 예산 | 잘못된 확인 번호는 authority 조회 전에 거부; uninstall polling은 별도 lifecycle admission client 사용 |
-| API 갱신 | 관찰 내용이 바뀔 때 기록 |
-| 완료 기록 보존 | 완료 시각부터 7일; 시각 없는 완료 기록은 첫 관찰부터 |
-| 삭제 조건 | 원 Move 종결 또는 부재, Volume activeMove 없음, 증거 Job 부재, UID·resourceVersion 일치 |
-| 미완료·손상 요청 | 기간과 무관하게 보존 |
-| 지표 | `shiftpv_cleanup_requests{state}`; 실제 상태 반영은 lifecycle 및 metrics 관찰 주기의 영향 |
+| 범위 | 등록된 각 Pool의 ShiftPV control marker와 관리 directory |
+| 상한 | Pool당 최대 256 observations |
+| 초과 | `inventory.truncated=true`; 누락을 부재 증거로 사용하지 않고 Pool을 신규 provisioning·이동 대상에서 제외 |
+| 손상 marker·unrecorded path | `problem`으로 보고하고 보존 |
+| 실제 kubelet publication | `published=true`; orphan 실행 차단 |
+| API owner 없는 valid copy | unapproved `OrphanReclaim` + `NeedsReview` |
+| 외부 directory | ShiftPV marker가 없으면 삭제 대상으로 채택하지 않음 |
 
-상세 운영 명령은 [Helm guide](../../charts/shiftpv/README.md#cleanup-review)가 소유한다.
+256은 관찰과 신규 배치의 운영 상한이다. 정확히 256개는 완전하게 관찰할 수 있지만 257번째 copy 또는
+unrecorded path가 확인되면 새 할당을 닫는다. 기존 exact cleanup은 계속 실행할 수 있어 상한 아래로
+수렴할 수 있다. tail이 계속 가려지면 Pool 분리 또는 수동 검토가 필요하다.
+
+## Removal boundary
+
+Volume reservation과 `Pending`, `Running`, `Verifying`, `NeedsReview` cleanup은 uninstall
+dependency다. Exact cleanup의 `Completed` 정산 뒤 reservation이 해제되어야 정리 의무가 해소된다.
+완료된 대상이 다시 관측되면 `NeedsReview`로 돌아가 제거를 다시 차단한다.
+Helm pre-delete와 Argo CD lifecycle admission은 같은 판정을 사용한다.
+
+관측 지표는 [`metrics.md`](metrics.md), 전체 이동 순서는
+[`volume-mobility.md`](volume-mobility.md), 운영 명령은
+[Helm guide](../../charts/shiftpv/README.md)가 소유한다.

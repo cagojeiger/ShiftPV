@@ -9,9 +9,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/lifecycle/cleanup"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	"github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
 const DriverName = "csi.shiftpv.io"
@@ -21,11 +22,16 @@ type VolumeRepository interface {
 	ListMoves(context.Context) ([]volumeapi.Move, error)
 }
 
+type CleanupRepository interface {
+	List(context.Context) ([]cleanupapi.Cleanup, error)
+}
+
 type Checker struct {
 	Client           kubernetes.Interface
 	Volumes          VolumeRepository
 	StorageClassName string
 	Namespace        string
+	Cleanups         CleanupRepository
 }
 
 type Blocker struct {
@@ -44,11 +50,14 @@ func (r Report) Safe() bool {
 }
 
 func (c *Checker) Check(ctx context.Context) (Report, error) {
-	if c == nil || c.Client == nil || c.Volumes == nil {
+	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
 		return Report{}, fmt.Errorf("uninstall checker is not configured")
 	}
 	if strings.TrimSpace(c.StorageClassName) == "" {
 		return Report{}, fmt.Errorf("ShiftPV StorageClass name is required")
+	}
+	if strings.TrimSpace(c.Namespace) == "" {
+		return Report{}, fmt.Errorf("ShiftPV namespace is required")
 	}
 
 	report := Report{}
@@ -82,6 +91,26 @@ func (c *Checker) Check(ctx context.Context) (Report, error) {
 		report.Blockers = append(report.Blockers, Blocker{Kind: "PersistentVolumeClaim", Namespace: claim.Namespace, Name: claim.Name, Reason: reason})
 	}
 
+	reservations, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: capacity.ReservationSelector})
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPV volume reservations: %w", err)
+	}
+	for _, reservation := range reservations.Items {
+		reasonParts := []string{"volume=" + reservation.Data["volumeID"]}
+		if reservation.Data["volumeUID"] != "" {
+			reasonParts = append(reasonParts, "volumeUID="+reservation.Data["volumeUID"])
+		}
+		if reservation.Data["nodeName"] != "" {
+			reasonParts = append(reasonParts, "node="+reservation.Data["nodeName"])
+		}
+		report.Blockers = append(report.Blockers, Blocker{
+			Kind:      "VolumeReservation",
+			Namespace: reservation.Namespace,
+			Name:      reservation.Name,
+			Reason:    strings.Join(reasonParts, " "),
+		})
+	}
+
 	volumes, err := c.Volumes.ListVolumes(ctx)
 	if err != nil {
 		return Report{}, fmt.Errorf("list ShiftPVVolumes: %w", err)
@@ -112,22 +141,16 @@ func (c *Checker) Check(ctx context.Context) (Report, error) {
 			Reason: fmt.Sprintf("phase=%s volume=%s", phase, move.Spec.VolumeID),
 		})
 	}
-
-	requests, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: cleanup.Label})
+	requests, err := c.Cleanups.List(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("list cleanup requests: %w", err)
+		return Report{}, fmt.Errorf("list ShiftPVCleanups: %w", err)
 	}
-	for index := range requests.Items {
-		request := &requests.Items[index]
-		record, decodeErr := cleanup.Decode(request)
-		if decodeErr == nil && record.Completed {
+	for _, request := range requests {
+		if request.Status.Phase == cleanupapi.PhaseCompleted {
 			continue
 		}
-		reason := fmt.Sprintf("unacknowledged source cleanup move=%s volume=%s", record.Intent.MoveName, record.Intent.VolumeID)
-		if decodeErr != nil {
-			reason = decodeErr.Error()
-		}
-		report.Blockers = append(report.Blockers, Blocker{Kind: "CleanupRequest", Namespace: request.Namespace, Name: request.Name, Reason: reason})
+		reason := fmt.Sprintf("phase=%s operation=%s volume=%s", request.Status.Phase, request.Spec.OperationID, request.Spec.Target.VolumeID)
+		report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVCleanup", Name: request.Name, Reason: reason})
 	}
 
 	sort.Slice(report.Blockers, func(left, right int) bool {

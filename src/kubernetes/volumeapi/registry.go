@@ -17,6 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
+
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 var (
@@ -42,20 +44,72 @@ const (
 )
 
 const (
-	PhaseReady   = "Ready"
-	PhaseMoving  = "Moving"
-	PhaseBlocked = "Blocked"
+	PhasePending  = "Pending"
+	PhaseReady    = "Ready"
+	PhaseDeleting = "Deleting"
+	PhaseMoving   = "Moving"
+	PhaseBlocked  = "Blocked"
 )
 
 type State struct {
-	Phase          string
-	OwnerNode      string
-	ActiveMove     string
-	PublishedNodes []string
+	UID                 string
+	Phase               string
+	OwnerNode           string
+	ActiveMove          string
+	PublishedNodes      []string
+	CreationOperationID string
+	DeletionOperationID string
+	CurrentCopy         *volume.CopyIdentity
+}
+
+type CopyAuthority int
+
+const (
+	CopyAuthorityNone CopyAuthority = iota
+	CopyAuthorityCurrent
+	CopyAuthoritySuperseded
+	CopyAuthorityUncertain
+)
+
+// ClassifyCopyAuthority determines whether the exact physical copy is still
+// owned by a live volume incarnation. A different, internally consistent
+// current copy proves that the target has been superseded; incomplete or
+// contradictory state remains fail-closed.
+func ClassifyCopyAuthority(states map[string]State, target volume.CopyIdentity) CopyAuthority {
+	matched := 0
+	for volumeID, state := range states {
+		if state.CurrentCopy != nil && *state.CurrentCopy == target {
+			return CopyAuthorityCurrent
+		}
+		if volumeID != target.VolumeID && state.UID != target.VolumeUID {
+			continue
+		}
+		matched++
+		if state.CurrentCopy == nil || state.CurrentCopy.Validate() != nil ||
+			state.CurrentCopy.VolumeID != volumeID || state.CurrentCopy.VolumeUID != state.UID {
+			return CopyAuthorityUncertain
+		}
+	}
+	if matched == 0 {
+		return CopyAuthorityNone
+	}
+	if matched == 1 {
+		return CopyAuthoritySuperseded
+	}
+	return CopyAuthorityUncertain
+}
+
+func CreationOperationID(volumeUID string) (string, error) {
+	operationID := "create-" + volumeUID
+	if !volume.ValidIdentityToken(volumeUID) || !volume.ValidIdentityToken(operationID) {
+		return "", fmt.Errorf("invalid volume creation operation identity")
+	}
+	return operationID, nil
 }
 
 type Pool struct {
 	Name          string
+	UID           string
 	NodeName      string
 	MountPath     string
 	CapacityLimit string
@@ -67,6 +121,23 @@ type PoolStatus struct {
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	LastProbeTime      metav1.Time        `json:"lastProbeTime,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	Inventory          *PoolInventory     `json:"inventory,omitempty"`
+}
+
+type PoolInventory struct {
+	ObservedAt metav1.Time       `json:"observedAt"`
+	Valid      bool              `json:"valid"`
+	Truncated  bool              `json:"truncated,omitempty"`
+	Message    string            `json:"message,omitempty"`
+	Copies     []CopyObservation `json:"copies,omitempty"`
+}
+
+type CopyObservation struct {
+	Marker    string               `json:"marker"`
+	Identity  *volume.CopyIdentity `json:"identity,omitempty"`
+	Present   bool                 `json:"present"`
+	Published bool                 `json:"published,omitempty"`
+	Problem   string               `json:"problem,omitempty"`
 }
 
 type MoveSpec struct {
@@ -97,6 +168,12 @@ type MoveStatus struct {
 	CopyJobName          string
 	PromotionJobName     string
 	CleanupJobName       string
+	CopyOperationID      string
+	PromotionOperationID string
+	CleanupName          string
+	SourceCopy           *volume.CopyIdentity
+	IncomingCopy         *volume.CopyIdentity
+	DestinationCopy      *volume.CopyIdentity
 	RecoveryPhase        string
 	RecoveryOwner        string
 	RecoveryReason       string
@@ -154,6 +231,148 @@ func (r *Registry) Ensure(ctx context.Context, volumeID, ownerNode string) error
 	return r.SetState(ctx, volumeID, State{Phase: PhaseReady, OwnerNode: ownerNode})
 }
 
+// BeginCreate persists the exact copy identity before node-local filesystem work.
+func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) (State, error) {
+	if err := r.validate(); err != nil {
+		return State{}, err
+	}
+	installationID, err := r.InstallationID(ctx)
+	if err != nil {
+		return State{}, err
+	}
+	pool, err := r.ReadyPoolForNode(ctx, ownerNode)
+	if err != nil {
+		return State{}, err
+	}
+	resource := r.Client.Resource(VolumeResource)
+	object, err := resource.Get(ctx, volumeID, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		object, err = resource.Create(ctx, &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "shiftpv.io/v1alpha1",
+			"kind":       "ShiftPVVolume",
+			"metadata":   map[string]any{"name": volumeID},
+			"spec":       map[string]any{"volumeID": volumeID},
+		}}, metav1.CreateOptions{})
+	}
+	if err != nil {
+		return State{}, fmt.Errorf("begin ShiftPVVolume creation: %w", err)
+	}
+	if object.GetUID() == "" || pool.UID == "" {
+		return State{}, fmt.Errorf("%w: Kubernetes object identity is missing", ErrStateConflict)
+	}
+	operationID, err := CreationOperationID(string(object.GetUID()))
+	if err != nil {
+		return State{}, fmt.Errorf("%w: %v", ErrStateConflict, err)
+	}
+	copy := volume.CopyIdentity{
+		InstallationID: installationID,
+		PoolName:       pool.Name,
+		PoolUID:        pool.UID,
+		VolumeID:       volumeID,
+		VolumeUID:      string(object.GetUID()),
+		CopyID:         "initial-" + string(object.GetUID()),
+		NodeName:       ownerNode,
+		Role:           volume.RoleServing,
+	}
+	if err := copy.Validate(); err != nil {
+		return State{}, fmt.Errorf("build creation identity: %w", err)
+	}
+	state, err := stateFrom(object)
+	if err != nil {
+		return State{}, err
+	}
+	if state.Phase == "" {
+		next := State{
+			UID:                 string(object.GetUID()),
+			Phase:               PhasePending,
+			OwnerNode:           ownerNode,
+			CreationOperationID: operationID,
+			CurrentCopy:         &copy,
+		}
+		if err := r.mutateState(ctx, volumeID, func(current State) (State, error) {
+			if current.Phase != "" {
+				return current, nil
+			}
+			return next, nil
+		}); err != nil {
+			return State{}, err
+		}
+		state, err = r.Get(ctx, volumeID)
+		if err != nil {
+			return State{}, err
+		}
+	}
+	if state.UID != string(object.GetUID()) || state.OwnerNode != ownerNode || state.CurrentCopy == nil ||
+		*state.CurrentCopy != copy || state.CreationOperationID != operationID ||
+		(state.Phase != PhasePending && state.Phase != PhaseReady) {
+		return State{}, fmt.Errorf("%w: volume creation identity changed", ErrStateConflict)
+	}
+	return state, nil
+}
+
+func (r *Registry) CompleteCreate(ctx context.Context, volumeID, uid string, copy volume.CopyIdentity) error {
+	operationID, err := CreationOperationID(uid)
+	if err != nil {
+		return ErrStateConflict
+	}
+	return r.mutateState(ctx, volumeID, func(current State) (State, error) {
+		if uid == "" || current.UID != uid || current.CurrentCopy == nil || *current.CurrentCopy != copy ||
+			current.CreationOperationID != operationID || current.OwnerNode != copy.NodeName {
+			return State{}, ErrStateConflict
+		}
+		if current.Phase == PhaseReady {
+			return current, nil
+		}
+		if current.Phase != PhasePending {
+			return State{}, ErrStateConflict
+		}
+		current.Phase = PhaseReady
+		return current, nil
+	})
+}
+
+// BeginDelete fences new publications before an approved filesystem cleanup
+// can be created. The deletion operation is durable and idempotent across
+// controller restarts.
+func (r *Registry) BeginDelete(ctx context.Context, volumeID, uid string, copy volume.CopyIdentity) (State, error) {
+	operationID := "delete-" + uid
+	if uid == "" || copy.Validate() != nil || copy.VolumeID != volumeID || copy.VolumeUID != uid {
+		return State{}, ErrStateConflict
+	}
+	err := r.mutateState(ctx, volumeID, func(current State) (State, error) {
+		if current.UID != uid || current.OwnerNode != copy.NodeName || current.CurrentCopy == nil || *current.CurrentCopy != copy ||
+			current.ActiveMove != "" || len(current.PublishedNodes) != 0 {
+			return State{}, ErrStateConflict
+		}
+		switch current.Phase {
+		case PhaseReady:
+			if current.DeletionOperationID != "" {
+				return State{}, ErrStateConflict
+			}
+			current.Phase = PhaseDeleting
+			current.DeletionOperationID = operationID
+		case PhaseDeleting:
+			if current.DeletionOperationID != operationID {
+				return State{}, ErrStateConflict
+			}
+		default:
+			return State{}, ErrStateConflict
+		}
+		return current, nil
+	})
+	if err != nil {
+		return State{}, err
+	}
+	state, err := r.Get(ctx, volumeID)
+	if err != nil {
+		return State{}, err
+	}
+	if state.Phase != PhaseDeleting || state.DeletionOperationID != operationID || state.UID != uid || state.CurrentCopy == nil || *state.CurrentCopy != copy {
+		return State{}, ErrStateConflict
+	}
+	return state, nil
+}
+
 func (r *Registry) Get(ctx context.Context, volumeID string) (State, error) {
 	object, err := r.getVolume(ctx, volumeID)
 	if err != nil {
@@ -181,11 +400,15 @@ func (r *Registry) ListVolumes(ctx context.Context) (map[string]State, error) {
 	return result, nil
 }
 
-func (r *Registry) Delete(ctx context.Context, volumeID string) error {
+func (r *Registry) Delete(ctx context.Context, volumeID, uid string) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	err := r.Client.Resource(VolumeResource).Delete(ctx, volumeID, metav1.DeleteOptions{})
+	if uid == "" {
+		return fmt.Errorf("ShiftPVVolume UID is required for deletion")
+	}
+	precondition := types.UID(uid)
+	err := r.Client.Resource(VolumeResource).Delete(ctx, volumeID, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &precondition}})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ShiftPVVolume: %w", err)
 	}
@@ -217,6 +440,54 @@ func (r *Registry) CompareAndSetState(ctx context.Context, volumeID, expectedPha
 
 func (r *Registry) SetPublished(ctx context.Context, volumeID, nodeName string, published bool) error {
 	return r.mutateState(ctx, volumeID, func(state State) (State, error) {
+		nodes := make(map[string]struct{}, len(state.PublishedNodes)+1)
+		for _, node := range state.PublishedNodes {
+			nodes[node] = struct{}{}
+		}
+		if published {
+			nodes[nodeName] = struct{}{}
+		} else {
+			delete(nodes, nodeName)
+		}
+		state.PublishedNodes = state.PublishedNodes[:0]
+		for node := range nodes {
+			state.PublishedNodes = append(state.PublishedNodes, node)
+		}
+		sort.Strings(state.PublishedNodes)
+		return state, nil
+	})
+}
+
+func (r *Registry) BeginPublish(ctx context.Context, volumeID, nodeName string, copy volume.CopyIdentity) error {
+	return r.mutateState(ctx, volumeID, func(state State) (State, error) {
+		if state.Phase != PhaseReady || state.OwnerNode != nodeName || state.CurrentCopy == nil || *state.CurrentCopy != copy {
+			return State{}, fmt.Errorf("%w: volume is not publishable by this copy", ErrStateConflict)
+		}
+		nodes := make(map[string]struct{}, len(state.PublishedNodes)+1)
+		for _, node := range state.PublishedNodes {
+			nodes[node] = struct{}{}
+		}
+		nodes[nodeName] = struct{}{}
+		state.PublishedNodes = state.PublishedNodes[:0]
+		for node := range nodes {
+			state.PublishedNodes = append(state.PublishedNodes, node)
+		}
+		sort.Strings(state.PublishedNodes)
+		return state, nil
+	})
+}
+
+// ReconcilePublished changes publication state only for the exact live copy.
+// It is used after inspecting real mount references under the node-local lock.
+func (r *Registry) ReconcilePublished(ctx context.Context, volumeID, nodeName string, copy volume.CopyIdentity, published bool) error {
+	return r.mutateState(ctx, volumeID, func(state State) (State, error) {
+		if copy.Validate() != nil || copy.Role != volume.RoleServing || copy.VolumeID != volumeID || copy.NodeName != nodeName ||
+			state.UID != copy.VolumeUID || state.OwnerNode != nodeName || state.CurrentCopy == nil || *state.CurrentCopy != copy {
+			return State{}, fmt.Errorf("%w: publication copy identity changed", ErrStateConflict)
+		}
+		if published && state.Phase != PhaseReady {
+			return State{}, fmt.Errorf("%w: volume is not publishable", ErrStateConflict)
+		}
 		nodes := make(map[string]struct{}, len(state.PublishedNodes)+1)
 		for _, node := range state.PublishedNodes {
 			nodes[node] = struct{}{}
@@ -287,7 +558,7 @@ func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
 	}
 	ready := make([]Pool, 0, len(pools))
 	for _, pool := range pools {
-		if ok, _ := pool.ReadyAt(now, staleAfter); ok {
+		if ok, _ := pool.ReadyAt(now, staleAfter); ok && !poolInventoryTruncated(pool) {
 			ready = append(ready, pool)
 		}
 	}
@@ -354,7 +625,14 @@ func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool,
 	if ready, reason := pool.ReadyAt(now, staleAfter); !ready {
 		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, pool.Name, nodeName, reason)
 	}
+	if poolInventoryTruncated(pool) {
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: InventoryTruncated", ErrPoolNotReady, pool.Name, nodeName)
+	}
 	return pool, nil
+}
+
+func poolInventoryTruncated(pool Pool) bool {
+	return pool.Status.Inventory != nil && pool.Status.Inventory.Truncated
 }
 
 func (r *Registry) SetPoolStatus(ctx context.Context, name, nodeName string, status PoolStatus) error {
@@ -418,7 +696,7 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 	mountPath, _, _ := unstructured.NestedString(object.Object, "spec", "mountPath")
 	capacityLimit, _, _ := unstructured.NestedString(object.Object, "spec", "capacity", "limit")
 	return Pool{
-		Name: object.GetName(), NodeName: nodeName, MountPath: filepath.Clean(mountPath),
+		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, MountPath: filepath.Clean(mountPath),
 		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), Status: status,
 	}, nil
 }
@@ -497,6 +775,13 @@ func (r *Registry) SetMoveStatus(ctx context.Context, name string, status MoveSt
 		if err != nil {
 			return fmt.Errorf("get ShiftPVMove for status update: %w", err)
 		}
+		current, err := moveStatusFrom(object)
+		if err != nil {
+			return err
+		}
+		if err := preserveMoveIdentity(current, status); err != nil {
+			return err
+		}
 		setMoveStatus(object, status)
 		if _, err := resource.UpdateStatus(ctx, object, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update ShiftPVMove status: %w", err)
@@ -522,6 +807,15 @@ func (r *Registry) mutateState(ctx context.Context, volumeID string, mutate func
 		next, err := mutate(current)
 		if err != nil {
 			return err
+		}
+		if next.CreationOperationID == "" {
+			next.CreationOperationID = current.CreationOperationID
+		}
+		if next.DeletionOperationID == "" {
+			next.DeletionOperationID = current.DeletionOperationID
+		}
+		if next.CurrentCopy == nil {
+			next.CurrentCopy = current.CurrentCopy
 		}
 		setState(object, next)
 		if _, err := resource.UpdateStatus(ctx, object, metav1.UpdateOptions{}); err != nil {
@@ -557,13 +851,43 @@ func stateFrom(object *unstructured.Unstructured) (State, error) {
 	if err != nil {
 		return State{}, fmt.Errorf("decode publishedNodes: %w", err)
 	}
-	return State{Phase: phase, OwnerNode: ownerNode, ActiveMove: activeMove, PublishedNodes: publishedNodes}, nil
+	creationOperationID, _, _ := unstructured.NestedString(object.Object, "status", "creationOperationID")
+	deletionOperationID, _, _ := unstructured.NestedString(object.Object, "status", "deletionOperationID")
+	var currentCopy *volume.CopyIdentity
+	if data, found, nestedErr := unstructured.NestedMap(object.Object, "status", "currentCopy"); nestedErr != nil {
+		return State{}, nestedErr
+	} else if found {
+		var copy volume.CopyIdentity
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(data, &copy); err != nil {
+			return State{}, fmt.Errorf("decode current copy: %w", err)
+		}
+		if err := copy.Validate(); err != nil {
+			return State{}, err
+		}
+		currentCopy = &copy
+	}
+	return State{
+		UID: string(object.GetUID()), Phase: phase, OwnerNode: ownerNode, ActiveMove: activeMove,
+		PublishedNodes: publishedNodes, CreationOperationID: creationOperationID, DeletionOperationID: deletionOperationID, CurrentCopy: currentCopy,
+	}, nil
 }
 
 func setState(object *unstructured.Unstructured, state State) {
 	object.Object["status"] = map[string]any{
 		"phase": state.Phase, "ownerNode": state.OwnerNode, "activeMove": state.ActiveMove,
 		"publishedNodes": stringSliceToAny(state.PublishedNodes),
+	}
+	status := object.Object["status"].(map[string]any)
+	if state.CreationOperationID != "" {
+		status["creationOperationID"] = state.CreationOperationID
+	}
+	if state.DeletionOperationID != "" {
+		status["deletionOperationID"] = state.DeletionOperationID
+	}
+	if state.CurrentCopy != nil {
+		if encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(state.CurrentCopy); err == nil {
+			status["currentCopy"] = encoded
+		}
 	}
 }
 
@@ -590,6 +914,32 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 	evictionRequested, _, _ := unstructured.NestedBool(object.Object, "status", "evictionRequested")
 	sourceBytes, _, _ := unstructured.NestedInt64(object.Object, "status", "sourceBytes")
 	capacityApproved, _, _ := unstructured.NestedBool(object.Object, "status", "capacityApproved")
+	readCopy := func(name string) (*volume.CopyIdentity, error) {
+		data, found, nestedErr := unstructured.NestedMap(object.Object, "status", name)
+		if nestedErr != nil || !found {
+			return nil, nestedErr
+		}
+		var identity volume.CopyIdentity
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(data, &identity); err != nil {
+			return nil, err
+		}
+		if err := identity.Validate(); err != nil {
+			return nil, err
+		}
+		return &identity, nil
+	}
+	sourceCopy, err := readCopy("sourceCopy")
+	if err != nil {
+		return MoveStatus{}, fmt.Errorf("decode sourceCopy: %w", err)
+	}
+	incomingCopy, err := readCopy("incomingCopy")
+	if err != nil {
+		return MoveStatus{}, fmt.Errorf("decode incomingCopy: %w", err)
+	}
+	destinationCopy, err := readCopy("destinationCopy")
+	if err != nil {
+		return MoveStatus{}, fmt.Errorf("decode destinationCopy: %w", err)
+	}
 	return MoveStatus{
 		Phase: read("phase"), Reason: read("reason"), Message: read("message"),
 		LastTransitionTime: read("lastTransitionTime"), LastProgressTime: read("lastProgressTime"),
@@ -599,6 +949,8 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		DestinationNode: read("destinationNode"), SourceBytes: sourceBytes, CapacityApproved: capacityApproved,
 		CapacityReason: read("capacityReason"), CandidateNodes: candidates, EvictionRequested: evictionRequested,
 		CopyJobName: read("copyJobName"), PromotionJobName: read("promotionJobName"), CleanupJobName: read("cleanupJobName"),
+		CopyOperationID: read("copyOperationID"), PromotionOperationID: read("promotionOperationID"), CleanupName: read("cleanupName"),
+		SourceCopy: sourceCopy, IncomingCopy: incomingCopy, DestinationCopy: destinationCopy,
 		RecoveryPhase: read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
 		RecoveryReason: read("recoveryReason"), RecoveryMessage: read("recoveryMessage"),
 	}, nil
@@ -616,9 +968,43 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 		"candidateNodes":    stringSliceToAny(status.CandidateNodes),
 		"evictionRequested": status.EvictionRequested, "copyJobName": status.CopyJobName,
 		"promotionJobName": status.PromotionJobName, "cleanupJobName": status.CleanupJobName,
+		"copyOperationID": status.CopyOperationID, "promotionOperationID": status.PromotionOperationID, "cleanupName": status.CleanupName,
 		"recoveryPhase": status.RecoveryPhase, "recoveryOwner": status.RecoveryOwner,
 		"recoveryReason": status.RecoveryReason, "recoveryMessage": status.RecoveryMessage,
 	}
+	encoded := object.Object["status"].(map[string]any)
+	for name, identity := range map[string]*volume.CopyIdentity{"sourceCopy": status.SourceCopy, "incomingCopy": status.IncomingCopy, "destinationCopy": status.DestinationCopy} {
+		if identity == nil {
+			continue
+		}
+		if value, err := runtime.DefaultUnstructuredConverter.ToUnstructured(identity); err == nil {
+			encoded[name] = value
+		}
+	}
+}
+
+func preserveMoveIdentity(current, next MoveStatus) error {
+	for _, item := range []struct {
+		name          string
+		current, next *volume.CopyIdentity
+	}{
+		{"sourceCopy", current.SourceCopy, next.SourceCopy},
+		{"incomingCopy", current.IncomingCopy, next.IncomingCopy},
+		{"destinationCopy", current.DestinationCopy, next.DestinationCopy},
+	} {
+		if item.current != nil && (item.next == nil || *item.current != *item.next) {
+			return fmt.Errorf("%w: Move %s is immutable", ErrStateConflict, item.name)
+		}
+	}
+	for _, item := range []struct{ name, current, next string }{
+		{"copyOperationID", current.CopyOperationID, next.CopyOperationID},
+		{"promotionOperationID", current.PromotionOperationID, next.PromotionOperationID},
+	} {
+		if item.current != "" && item.current != item.next {
+			return fmt.Errorf("%w: Move %s is immutable", ErrStateConflict, item.name)
+		}
+	}
+	return nil
 }
 
 func stringSliceToAny(values []string) []any {

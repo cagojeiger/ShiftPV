@@ -40,7 +40,7 @@ vet:
 	go vet ./...
 
 build:
-	go build ./src/cmd/controller ./src/cmd/node ./src/cmd/uninstall-guard ./src/cmd/cleanup-check
+	go build ./src/cmd/controller ./src/cmd/node ./src/cmd/uninstall-guard ./src/cmd/volume-helper
 
 image: image-controller image-node
 
@@ -67,7 +67,8 @@ shellcheck:
 	shellcheck test/e2e/kind/mobility/completion.sh
 	shellcheck test/e2e/kind/metrics/check.sh
 	shellcheck test/helm/dashboard/run.sh
-	shellcheck build/ci/wait-for-chart-images.sh test/release/fixtures/fake-docker.sh test/release/wait-for-chart-images.sh test/release/validate-artifact-lock.sh test/e2e/kind/run.sh test/e2e/kind/upgrade.sh test/e2e/kind/directory-pool.sh test/e2e/kind/pool-capacity.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/mobility/cleanup-lifecycle.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh
+	shellcheck build/ci/wait-for-chart-images.sh test/release/fixtures/fake-docker.sh test/release/wait-for-chart-images.sh test/release/validate-artifact-lock.sh test/e2e/kind/run.sh test/e2e/kind/directory-pool.sh test/e2e/kind/pool-capacity.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/mobility/cleanup-lifecycle.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh
+	shellcheck test/e2e/kind/orphan-cleanup.sh
 
 actionlint:
 	@if command -v actionlint >/dev/null 2>&1; then \
@@ -94,6 +95,7 @@ helm-template:
 		--set mobility.helperImage=helper:test)"; \
 		printf '%s\n' "$$rendered" | grep -q 'image: "controller:test"'; \
 		printf '%s\n' "$$rendered" | grep -q 'image: "node:test"'; \
+		printf '%s\n' "$$rendered" | grep -q -- '--helper-image=controller:test'; \
 		printf '%s\n' "$$rendered" | grep -q '"helm.sh/hook": pre-delete'; \
 		! printf '%s\n' "$$rendered" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
 		printf '%s\n' "$$rendered" | grep -q 'command: \["/shiftpv-uninstall-guard"\]'; \
@@ -110,6 +112,11 @@ helm-template:
 		! printf '%s\n' "$$rendered" | grep -q '^kind: ValidatingWebhookConfiguration$$'; \
 		! printf '%s\n' "$$rendered" | grep -q '^kind: Secret$$'; \
 		printf '%s\n' "$$rendered" | grep -q 'mountPropagation: HostToContainer'
+	@set -e; helpers="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
+		--set controller.image.repository=controller --set controller.image.tag=test \
+		--set helperPod.image=create-helper:test --set mobility.helperImage=move-helper:test)"; \
+		printf '%s\n' "$$helpers" | grep -q -- '--helper-image=create-helper:test'; \
+		printf '%s\n' "$$helpers" | grep -q -- '--mobility-helper-image=move-helper:test'
 	@set -e; argocd="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 --set lifecycle.uninstallMode=argocd)"; \
 		printf '%s\n' "$$argocd" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
 		! printf '%s\n' "$$argocd" | grep -q '"helm.sh/hook": pre-delete'

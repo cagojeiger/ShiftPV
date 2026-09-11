@@ -56,8 +56,11 @@ recover_source_only() {
 }
 
 recover_after_commit_failure() {
-	local return_move current_pod latest_checksum failed_job destination_mount denial
-	# Real rename failure in source cleanup; the volume contents are untouched.
+	local return_move current_pod latest_checksum failed_job destination_mount source_copy cleanup_name
+	# The current owner becomes the return Move source. An exact retired-copy
+	# collision makes the approved cleanup fail without touching that source.
+	source_copy=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
+	test -n "${source_copy}"
 	kubectl uncordon "${SOURCE_NODE}"
 	kubectl cordon "${DESTINATION_NODE}"
 	return_move=""
@@ -68,7 +71,7 @@ recover_after_commit_failure() {
 	done
 	test -n "${return_move}"
 	destination_mount=$(pool_mount_for_node "${DESTINATION_NODE}")
-	local fault_path="${destination_mount}/.shiftpv/retired/${return_move}"
+	local fault_path="${destination_mount}/.shiftpv/retired/${source_copy}"
 	docker exec "${DESTINATION_NODE}" mkdir -p -- "$(dirname "${fault_path}")"
 	docker exec "${DESTINATION_NODE}" test ! -e "${fault_path}"
 	docker exec "${DESTINATION_NODE}" touch -- "${fault_path}"
@@ -76,7 +79,11 @@ recover_after_commit_failure() {
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.spec.sourceNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.reason}')" = "CleanupFailed"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	failed_job=$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanupJobName}')
+	cleanup_name=$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanupName}')
+	test -n "${cleanup_name}"
+	test "$(kubectl get "shiftpvcleanup/${cleanup_name}" -o jsonpath='{.status.phase}')" = NeedsReview
+	failed_job=$(kubectl get "shiftpvcleanup/${cleanup_name}" -o jsonpath='{.status.executor.jobName}')
+	test -n "${failed_job}"
 	kubectl -n shiftpv-system logs "job/${failed_job}" >"${WORK_DIR}/cleanup-failure.txt" 2>&1
 	kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=180s
 	current_pod=$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.name}')
@@ -92,16 +99,12 @@ recover_after_commit_failure() {
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	docker exec "${DESTINATION_NODE}" test -f "${destination_mount}/.shiftpv/aborted/${return_move}-final/payload"
-	docker exec "${DESTINATION_NODE}" test ! -e "${destination_mount}/volumes/${VOLUME_ID}"
+	# ResumeOwner restores API authority only. A non-owner copy with an
+	# unsettled cleanup contract remains byte-for-byte preserved for review.
+	docker exec "${DESTINATION_NODE}" test -f "${destination_mount}/volumes/${VOLUME_ID}/payload"
+	test "$(docker exec "${DESTINATION_NODE}" sha256sum "${destination_mount}/volumes/${VOLUME_ID}/payload" | awk '{print $1}')" = "${CHECKSUM_BEFORE}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 	kubectl uncordon "${DESTINATION_NODE}"
-	echo 'post-commit recovery passed: latest destination writes preserved; stale source quarantined'
-	if denial=$(kubectl -n shiftpv-system delete deployment/shiftpv-controller --dry-run=server 2>&1); then
-		echo 'unacknowledged cleanup permitted controller deletion' >&2
-		return 1
-	fi
-	grep -Fq 'CleanupRequest shiftpv-system/shiftpv-cleanup-' <<<"${denial}"
-	echo 'unacknowledged cleanup remains an uninstall dependency after owner recovery'
+	echo 'post-commit recovery passed: current owner writes preserved; non-owner copy retained for review'
 	verify_cleanup_lifecycle "${return_move}" "${DESTINATION_NODE}" "${destination_mount}" "${latest_checksum}" "${current_pod}"
 }

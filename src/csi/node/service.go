@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -10,11 +11,13 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/utils/keymutex"
 
 	controllercsi "github.com/cagojeiger/ShiftPV/src/csi/controller"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	shiftmount "github.com/cagojeiger/ShiftPV/src/node/mount"
+	"github.com/cagojeiger/ShiftPV/src/node/ownership"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -26,7 +29,8 @@ type Binder interface {
 
 type VolumeRegistry interface {
 	Get(context.Context, string) (volumeapi.State, error)
-	SetPublished(context.Context, string, string, bool) error
+	BeginPublish(context.Context, string, string, volume.CopyIdentity) error
+	ReconcilePublished(context.Context, string, string, volume.CopyIdentity, bool) error
 }
 
 type PoolRegistry interface {
@@ -64,17 +68,14 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	}
 	unlock := s.lockPublication(req.GetVolumeId())
 	defer unlock()
-	ownerNode := req.GetVolumeContext()[controllercsi.NodeContextKey]
-	if s.Volumes != nil {
-		state, err := s.Volumes.Get(ctx, req.GetVolumeId())
-		if err != nil {
-			return nil, status.Errorf(codes.Unavailable, "read volume state: %v", err)
-		}
-		if state.Phase != volumeapi.PhaseReady {
-			return nil, status.Errorf(codes.FailedPrecondition, "volume state is %q", state.Phase)
-		}
-		ownerNode = state.OwnerNode
+	state, err := s.Volumes.Get(ctx, req.GetVolumeId())
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "read volume state: %v", err)
 	}
+	if state.Phase != volumeapi.PhaseReady {
+		return nil, status.Errorf(codes.FailedPrecondition, "volume state is %q", state.Phase)
+	}
+	ownerNode := state.OwnerNode
 	if ownerNode == "" {
 		return nil, status.Error(codes.FailedPrecondition, "volume context has no owner node")
 	}
@@ -89,13 +90,44 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := s.Binder.Publish(source, req.GetTargetPath()); err != nil {
-		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
+	if state.CurrentCopy == nil {
+		return nil, status.Error(codes.FailedPrecondition, "identified volume state is required for publish")
 	}
-	if s.Volumes != nil {
-		if err := s.Volumes.SetPublished(ctx, req.GetVolumeId(), s.NodeName, true); err != nil {
-			return nil, status.Errorf(codes.Unavailable, "record published volume: %v", err)
+	copy := *state.CurrentCopy
+	if copy.NodeName != s.NodeName || copy.Role != volume.RoleServing {
+		return nil, status.Error(codes.FailedPrecondition, "serving copy identity does not match this node")
+	}
+	err = ownership.WithLock(ctx, poolRoot, ownership.PoolIdentity{InstallationID: copy.InstallationID, PoolUID: copy.PoolUID}, req.GetVolumeId(), func(store *ownership.Store) error {
+		fresh, getErr := s.Volumes.Get(ctx, req.GetVolumeId())
+		if getErr != nil || fresh.CurrentCopy == nil || *fresh.CurrentCopy != copy || fresh.Phase != volumeapi.PhaseReady || fresh.OwnerNode != s.NodeName {
+			return fmt.Errorf("volume publish authority changed: %w", errors.Join(getErr, volumeapi.ErrStateConflict))
 		}
+		if verifyErr := store.VerifyServing(copy); verifyErr != nil {
+			return verifyErr
+		}
+		if publishErr := s.Volumes.BeginPublish(ctx, req.GetVolumeId(), s.NodeName, copy); publishErr != nil {
+			return publishErr
+		}
+		if publishErr := s.Binder.Publish(source, req.GetTargetPath()); publishErr != nil {
+			stillPublished, inspectErr := s.Binder.HasPublishedTarget(source, s.TargetRoot)
+			if inspectErr != nil {
+				return errors.Join(publishErr, inspectErr)
+			}
+			if reconcileErr := s.Volumes.ReconcilePublished(ctx, req.GetVolumeId(), s.NodeName, copy, stillPublished); reconcileErr != nil {
+				return errors.Join(publishErr, reconcileErr)
+			}
+			return publishErr
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, volumeapi.ErrStateConflict) || errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview) {
+			return nil, status.Errorf(codes.FailedPrecondition, "publish identified volume: %v", err)
+		}
+		if errors.Is(err, ownership.ErrBusy) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+			return nil, status.Errorf(codes.Unavailable, "publish identified volume: %v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "publish identified volume: %v", err)
 	}
 	return &csi.NodePublishVolumeResponse{}, nil
 }
@@ -115,25 +147,50 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	}
 	unlock := s.lockPublication(req.GetVolumeId())
 	defer unlock()
-	if err := s.Binder.Unpublish(req.GetTargetPath()); err != nil {
-		return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
+	state, err := s.Volumes.Get(ctx, req.GetVolumeId())
+	if apierrors.IsNotFound(err) {
+		if err := s.Binder.Unpublish(req.GetTargetPath()); err != nil {
+			return nil, status.Errorf(codes.Internal, "unpublish absent volume: %v", err)
+		}
+		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
-	if s.Volumes != nil {
-		poolRoot, err := s.poolRoot(ctx)
-		if err != nil {
-			return nil, status.Errorf(codes.Unavailable, "resolve node pool after unpublish: %v", err)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "read volume state before unpublish: %v", err)
+	}
+	if state.CurrentCopy == nil || state.CurrentCopy.Role != volume.RoleServing || state.CurrentCopy.NodeName != s.NodeName {
+		return nil, status.Error(codes.FailedPrecondition, "identified serving copy is required for unpublish")
+	}
+	copy := *state.CurrentCopy
+	poolRoot, err := s.poolRoot(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "resolve node pool before unpublish: %v", err)
+	}
+	source, err := volume.Path(poolRoot, req.GetVolumeId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	err = ownership.WithLock(ctx, poolRoot, ownership.PoolIdentity{InstallationID: copy.InstallationID, PoolUID: copy.PoolUID}, req.GetVolumeId(), func(*ownership.Store) error {
+		fresh, getErr := s.Volumes.Get(ctx, req.GetVolumeId())
+		if getErr != nil || fresh.UID != state.UID || fresh.CurrentCopy == nil || *fresh.CurrentCopy != copy || fresh.OwnerNode != s.NodeName {
+			return fmt.Errorf("volume unpublish authority changed: %w", errors.Join(getErr, volumeapi.ErrStateConflict))
 		}
-		source, err := volume.Path(poolRoot, req.GetVolumeId())
-		if err != nil {
-			return nil, status.Error(codes.InvalidArgument, err.Error())
+		if unpublishErr := s.Binder.Unpublish(req.GetTargetPath()); unpublishErr != nil {
+			return fmt.Errorf("unmount target: %w", unpublishErr)
 		}
-		stillPublished, err := s.Binder.HasPublishedTarget(source, s.TargetRoot)
-		if err != nil {
-			return nil, status.Errorf(codes.Unavailable, "inspect remaining published targets: %v", err)
+		stillPublished, inspectErr := s.Binder.HasPublishedTarget(source, s.TargetRoot)
+		if inspectErr != nil {
+			return inspectErr
 		}
-		if err := s.Volumes.SetPublished(ctx, req.GetVolumeId(), s.NodeName, stillPublished); err != nil {
-			return nil, status.Errorf(codes.Unavailable, "record unpublished volume: %v", err)
+		return s.Volumes.ReconcilePublished(ctx, req.GetVolumeId(), s.NodeName, copy, stillPublished)
+	})
+	if err != nil {
+		if errors.Is(err, volumeapi.ErrStateConflict) || errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview) {
+			return nil, status.Errorf(codes.FailedPrecondition, "unpublish identified volume: %v", err)
 		}
+		if apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+			return nil, status.Errorf(codes.Unavailable, "unpublish identified volume: %v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "unpublish identified volume: %v", err)
 	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
@@ -155,7 +212,7 @@ func (s *Service) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesR
 }
 
 func (s *Service) validate() error {
-	if s.NodeName == "" || s.HostRoot == "" || s.Pools == nil || s.TargetRoot == "" || s.Binder == nil {
+	if s.NodeName == "" || s.HostRoot == "" || s.Pools == nil || s.TargetRoot == "" || s.Binder == nil || s.Volumes == nil {
 		return fmt.Errorf("node service is not configured")
 	}
 	return nil

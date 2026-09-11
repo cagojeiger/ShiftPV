@@ -2,7 +2,7 @@
 
 - 상태: Accepted
 - 날짜: 2026-09-03
-- 상세 계약: [volume mobility](../spec/volume-mobility.md#non-disruptive-preflight)
+- 상세 계약: [volume mobility](../spec/volume-mobility.md#preflight-and-placement)
 
 ## Context
 

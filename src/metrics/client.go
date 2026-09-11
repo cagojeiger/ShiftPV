@@ -8,6 +8,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 )
 
@@ -31,5 +32,5 @@ func (e *Exporter) NewController(config *rest.Config, namespace string, interval
 	if err != nil {
 		return nil, err
 	}
-	return &Controller{Exporter: e, Client: client, Inventory: &volumeapi.Registry{Client: dynamicClient}, Namespace: namespace, Interval: interval, StaleAfter: staleAfter}, nil
+	return &Controller{Exporter: e, Client: client, Inventory: &volumeapi.Registry{Client: dynamicClient}, Cleanups: &cleanupapi.Store{Client: dynamicClient}, Namespace: namespace, Interval: interval, StaleAfter: staleAfter}, nil
 }

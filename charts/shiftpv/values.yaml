@@ -10,6 +10,9 @@ metrics:
     enabled: false
     labels:
       grafana_dashboard: "1"
+  prometheusRule:
+    enabled: false
+    additionalLabels: {}
   serviceMonitor:
     enabled: false
     interval: 30s
@@ -29,7 +32,9 @@ mobility:
   enabled: true
   interval: 30s
   webhookPort: 9443
-  helperImage: ghcr.io/cagojeiger/shiftpv-controller:0.1.11
+  # Empty uses controller.image. Override only for a compatible image that
+  # contains /shiftpv-volume-helper.
+  helperImage: ""
 
 node:
   # This must match the kubelet state root on every selected node.
@@ -45,7 +50,9 @@ node:
   resources: {}
 
 helperPod:
-  image: busybox:1.37
+  # Empty uses controller.image. Override only for a compatible image that
+  # contains /shiftpv-volume-helper.
+  image: ""
   timeout: 2m
   resources:
     requests:

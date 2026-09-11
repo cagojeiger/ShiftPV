@@ -28,9 +28,11 @@ import (
 	controllercsi "github.com/cagojeiger/ShiftPV/src/csi/controller"
 	"github.com/cagojeiger/ShiftPV/src/csi/identity"
 	csiserver "github.com/cagojeiger/ShiftPV/src/csi/server"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	lifecycleadmission "github.com/cagojeiger/ShiftPV/src/lifecycle/admission"
+	cleanupcontroller "github.com/cagojeiger/ShiftPV/src/lifecycle/cleanupcontroller"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
 	"github.com/cagojeiger/ShiftPV/src/metrics"
 	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
@@ -51,6 +53,7 @@ func main() {
 		helperMemoryRequest     = flag.String("helper-memory-request", "16Mi", "helper Pod memory request")
 		helperCPULimit          = flag.String("helper-cpu-limit", "100m", "helper Pod CPU limit")
 		helperMemoryLimit       = flag.String("helper-memory-limit", "64Mi", "helper Pod memory limit")
+		helperServiceAccount    = flag.String("helper-service-account", "", "service account used by identity-aware helper Pods")
 		poolReadinessStaleAfter = flag.Duration("pool-readiness-stale-after", 3*time.Minute, "maximum age of a successful node Pool readiness probe")
 		mobilityEnabled         = flag.Bool("mobility-enabled", true, "run the automatic cordon mobility reconciler and admission webhook")
 		mobilityInterval        = flag.Duration("mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
@@ -95,6 +98,7 @@ func main() {
 		klog.Fatalf("create lifecycle admission dynamic Kubernetes client: %v", err)
 	}
 	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter}
+	cleanupStore := &cleanupapi.Store{Client: dynamicClient}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	var exporter *metrics.Exporter
@@ -120,7 +124,8 @@ func main() {
 		klog.Fatalf("bootstrap uninstall quiesce gate: %v", err)
 	}
 	operator := &helperpod.Runner{
-		Client: client, Namespace: *namespace, Pools: volumeRegistry, Image: *helperImage, Timeout: *helperWait,
+		Client: client, Namespace: *namespace, ServiceAccountName: *helperServiceAccount, Pools: volumeRegistry, Image: *helperImage, Timeout: *helperWait,
+		PoolReadinessStaleAfter: *poolReadinessStaleAfter,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU: mustQuantity("helper CPU request", *helperCPURequest), corev1.ResourceMemory: mustQuantity("helper memory request", *helperMemoryRequest),
@@ -131,14 +136,19 @@ func main() {
 		},
 	}
 	poolLocks := &poolcapacity.Locker{}
+	cleanupReconciler := &cleanupcontroller.Reconciler{
+		Store: cleanupStore, Operator: operator, Client: client, Namespace: *namespace, Inventory: volumeRegistry, Interval: 30 * time.Second,
+	}
 	controllerService := &controllercsi.Service{
 		Client: client, Namespace: *namespace, Operator: operator, Volumes: volumeRegistry,
 		CapacityPools: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
+		Cleanups: cleanupStore, CleanupOperator: operator,
 	}
 	identityService := &identity.Service{Version: version}
 
-	errCh := make(chan error, 5)
+	errCh := make(chan error, 6)
 	go func() { errCh <- quiesceGate.Run(ctx) }()
+	go func() { errCh <- cleanupReconciler.Run(ctx) }()
 	go func() {
 		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {
 			csi.RegisterIdentityServer(server, identityService)
@@ -182,7 +192,7 @@ func main() {
 		eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
 		eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
 		wake := mobilitycontroller.WatchEvents(ctx, client, dynamicClient, *namespace)
-		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, Interval: *mobilityInterval, Recorder: eventRecorder, Wake: wake}
+		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, ServiceAccountName: *helperServiceAccount, Cleanups: cleanupStore, CleanupOperator: operator, Interval: *mobilityInterval, Recorder: eventRecorder, Wake: wake}
 		if exporter != nil {
 			exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
 			reconciler.ObserveDiscovery = exporter.ObserveDiscovery
@@ -192,7 +202,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", &admission.Handler{Client: client, Volumes: volumeRegistry})
 	mux.Handle("/validate-delete", &lifecycleadmission.Handler{Checker: &uninstallcheck.Checker{
-		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, StorageClassName: *storageClassName, Namespace: *namespace,
+		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassName: *storageClassName, Namespace: *namespace,
 	}, Permit: &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}})
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
 	webhookServer = &http.Server{Addr: *webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}

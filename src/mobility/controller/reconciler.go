@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
@@ -39,19 +40,22 @@ type CapacityProbe interface {
 }
 
 type Reconciler struct {
-	Client           kubernetes.Interface
-	Repository       Repository
-	CapacityProbe    CapacityProbe
-	PoolLocks        *poolcapacity.Locker
-	Namespace        string
-	HelperImage      string
+	Client             kubernetes.Interface
+	Repository         Repository
+	CapacityProbe      CapacityProbe
+	PoolLocks          *poolcapacity.Locker
+	Namespace          string
+	HelperImage        string
+	ServiceAccountName string
+	Cleanups           *cleanupapi.Store
+	CleanupOperator    interface {
+		Reclaim(context.Context, cleanupapi.Cleanup, *cleanupapi.Store) (cleanupapi.Cleanup, error)
+	}
 	Interval         time.Duration
 	Now              func() time.Time
 	Recorder         record.EventRecorder
 	Wake             <-chan struct{}
 	ObserveDiscovery func(map[string]int, error)
-	lastCleanupScan  time.Time
-	cleanupCursor    string
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -81,18 +85,14 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	cleanupErr := r.reconcileCleanupLifecycle(ctx)
 	if err := r.discoverMoves(ctx); err != nil {
-		return errors.Join(cleanupErr, err)
+		return err
 	}
 	moves, err := r.Repository.ListMoves(ctx)
 	if err != nil {
-		return errors.Join(cleanupErr, err)
+		return err
 	}
 	var reconcileErrors []error
-	if cleanupErr != nil {
-		reconcileErrors = append(reconcileErrors, cleanupErr)
-	}
 	for _, move := range moves {
 		phase := fsm.Phase(move.Status.Phase)
 		if phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase != recoveryRecovered {

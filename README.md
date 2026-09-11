@@ -31,15 +31,17 @@ path participate in lifecycle and movement only.
 | Mobility | Healthy cordoned-node cold migration with authenticated rsync |
 | Authority | One owner node, one active Move, CSI publish guard |
 | Recovery | Restart-safe reconcile and explicit `ResumeOwner` |
+| Cleanup / GC | Exact-copy intent, node receipt, conservative orphan preservation |
 | Lifecycle | `Retain` PVs and guarded Helm/Argo CD uninstall |
 | Delivery | Helm repository and multi-architecture images |
 
-The Kubernetes API is represented by three cluster-scoped resources:
+The Kubernetes API is represented by four cluster-scoped resources:
 
 ```text
 ShiftPVPool    node + Pool directory + capacity + readiness
-ShiftPVVolume volume handle + owner + publish state + active Move
+ShiftPVVolume volume handle + owner + publish/delete fence + active Move
 ShiftPVMove   one movement transaction + phase + diagnosis + recovery
+ShiftPVCleanup exact copy target + approval + executor + receipt
 ```
 
 ## Runtime model
@@ -51,7 +53,8 @@ ShiftPVMove   one movement transaction + phase + diagnosis + recovery
 └── .shiftpv/
     ├── incoming/          verified destination staging
     ├── retired/           source purge staging
-    └── aborted/           recovery quarantine
+    ├── copy markers       installation/Pool/Volume/copy identity
+    └── operation markers  local intent and receipt
 ```
 
 Pool paths may differ by node and may be ordinary root-filesystem directories or

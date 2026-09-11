@@ -290,7 +290,12 @@ fi
 docker exec "${POOL_B_NODE}" grep -Fx \
 	'ShiftPV ordinary directory mobility' "${POOL_B_PATH}/volumes/${MOBILITY_VOLUME}/payload"
 docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/volumes/${MOBILITY_VOLUME}"
-docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/.shiftpv/retired/${MOVE_NAME}"
+SOURCE_COPY_ID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
+CLEANUP_NAME=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanupName}')
+test -n "${SOURCE_COPY_ID}"
+test -n "${CLEANUP_NAME}"
+docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/.shiftpv/retired/${SOURCE_COPY_ID}"
+test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.phase}')" = Completed
 
 kubectl uncordon "${POOL_A_NODE}"
 kubectl -n "${MOBILITY_NAMESPACE}" delete deployment/writer --wait=true

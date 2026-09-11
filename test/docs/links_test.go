@@ -11,6 +11,7 @@ import (
 )
 
 var markdownLink = regexp.MustCompile(`\]\(([^)]+)\)`)
+var markdownHeading = regexp.MustCompile(`(?m)^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$`)
 var adrHeading = regexp.MustCompile(`(?m)^## (.+)$`)
 var adrFile = regexp.MustCompile(`^([0-9]{4})-.+\.md$`)
 var adrIndexLink = regexp.MustCompile(`(?m)^\| [^|]+ \| \[([0-9]{4})\]\((([0-9]{4})-[^)]+\.md)\) \|`)
@@ -44,20 +45,53 @@ func TestLocalMarkdownLinksResolve(t *testing.T) {
 		}
 		for _, match := range markdownLink.FindAllStringSubmatch(string(content), -1) {
 			target := strings.Trim(match[1], "<>")
-			if strings.HasPrefix(target, "#") || strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "mailto:") {
+			if strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "mailto:") {
 				continue
 			}
-			target = strings.SplitN(target, "#", 2)[0]
-			if target == "" {
-				continue
+			parts := strings.SplitN(target, "#", 2)
+			fileTarget := parts[0]
+			resolved := path
+			if fileTarget != "" {
+				resolved = filepath.Clean(filepath.Join(filepath.Dir(path), filepath.FromSlash(fileTarget)))
 			}
-			resolved := filepath.Clean(filepath.Join(filepath.Dir(path), filepath.FromSlash(target)))
 			if _, err := os.Stat(resolved); err != nil {
 				relative, _ := filepath.Rel(root, path)
 				t.Errorf("%s: link %q does not resolve: %v", relative, match[1], err)
+				continue
+			}
+			if len(parts) == 2 && parts[1] != "" && strings.EqualFold(filepath.Ext(resolved), ".md") {
+				linked, err := os.ReadFile(resolved)
+				if err != nil {
+					t.Errorf("read linked Markdown %s: %v", resolved, err)
+					continue
+				}
+				anchors := map[string]bool{}
+				for _, heading := range markdownHeading.FindAllStringSubmatch(string(linked), -1) {
+					anchors[markdownAnchor(heading[1])] = true
+				}
+				if !anchors[parts[1]] {
+					relative, _ := filepath.Rel(root, path)
+					t.Errorf("%s: link %q has no matching heading", relative, match[1])
+				}
 			}
 		}
 	}
+}
+
+func markdownAnchor(heading string) string {
+	heading = strings.ToLower(strings.TrimSpace(heading))
+	return strings.Map(func(character rune) rune {
+		switch {
+		case character == ' ':
+			return '-'
+		case character == '-' || character == '_':
+			return character
+		case character >= '0' && character <= '9', character >= 'a' && character <= 'z', character >= '가' && character <= '힣':
+			return character
+		default:
+			return -1
+		}
+	}, heading)
 }
 
 func TestADRHeadingsAreConsistent(t *testing.T) {

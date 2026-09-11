@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
 )
@@ -47,6 +48,7 @@ func main() {
 	checker := &uninstallcheck.Checker{
 		Client:           client,
 		Volumes:          &volumeapi.Registry{Client: dynamicClient},
+		Cleanups:         &cleanupapi.Store{Client: dynamicClient},
 		StorageClassName: *storageClassName,
 		Namespace:        *permitNamespace,
 	}
@@ -62,7 +64,7 @@ func main() {
 	if runErr != nil {
 		deny("quiesce and inspect ShiftPV dependencies", runErr)
 	}
-	fmt.Println("ShiftPV uninstall allowed: provisioning is quiesced and no dependent PV, PVC, Volume, or active Move exists")
+	fmt.Println("ShiftPV uninstall allowed: provisioning is quiesced and no dependent PV, PVC, reservation, Volume, active Move, or unsettled Cleanup exists")
 }
 
 func runWithRetry(ctx context.Context, checker *uninstallcheck.Checker, permit *uninstallcheck.PermitStore, validationWebhook string, attemptTimeout, retryInterval time.Duration) error {

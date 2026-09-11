@@ -19,8 +19,10 @@ flowchart LR
 ```
 
 Helm pre-delete guard와 Kubernetes API deletion validation이 같은 dependency 정책을 집행한다.
-부모 Move가 사라져도 미완료 정리 요청은 독립적인 storage dependency로 남는다.
-서비스 복구와 잔여 데이터 정리의 완료를 구분하고, 검증된 정리 완료만 dependency를 해소한다.
+부모 Move나 Volume이 사라져도 미완료 `ShiftPVCleanup`은 독립적인 storage dependency로 남는다.
+Volume reservation도 orphan 발견과 exact cleanup 정산 사이의 공백을 닫는 dependency로 남는다.
+`Pending`, `Running`, `Verifying`, `NeedsReview`는 구성을 유지하며 receipt가 정산된 `Completed`만
+dependency를 해소한다.
 Emergency bypass는 운영자가 보존 데이터와 복구 책임을 명시적으로 인수하는 별도 절차다.
 
 ## Alternatives considered

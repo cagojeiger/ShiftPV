@@ -10,9 +10,12 @@ cleanup() {
 trap cleanup EXIT
 
 docker run --rm -d --name "${CONTAINER_NAME}" -p 127.0.0.1::9090 \
+  -v "${ROOT_DIR}/charts/shiftpv/alerts:/etc/shiftpv-alerts:ro" \
   -v "${ROOT_DIR}/test/helm/dashboard:/etc/prometheus:ro" "${IMAGE}" \
   --config.file=/etc/prometheus/prometheus.yaml --storage.tsdb.path=/prometheus >/dev/null
 docker exec "${CONTAINER_NAME}" promtool check rules /etc/prometheus/preview-rules.json
+docker exec "${CONTAINER_NAME}" promtool check rules /etc/shiftpv-alerts/shiftpv-rules.yaml
+docker exec "${CONTAINER_NAME}" promtool test rules /etc/prometheus/alerts-test.yml
 endpoint="http://$(docker port "${CONTAINER_NAME}" 9090/tcp)"
 ready=0
 for _ in {1..60}; do

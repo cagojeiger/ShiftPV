@@ -36,5 +36,5 @@ rules:
     resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["shiftpv.io"]
-    resources: ["shiftpvpools", "shiftpvvolumes", "shiftpvvolumes/status", "shiftpvmoves", "shiftpvmoves/status"]
+    resources: ["shiftpvpools", "shiftpvvolumes", "shiftpvvolumes/status", "shiftpvmoves", "shiftpvmoves/status", "shiftpvcleanups", "shiftpvcleanups/status"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]

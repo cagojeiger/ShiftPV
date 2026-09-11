@@ -120,6 +120,28 @@ spec:
                   type: string
                 cleanupJobName:
                   type: string
+                cleanupName:
+                  type: string
+                copyOperationID:
+                  type: string
+                promotionOperationID:
+                  type: string
+                sourceCopy: &copyIdentity
+                  type: object
+                  required: [installationID, poolName, poolUID, volumeID, volumeUID, copyID, nodeName, role]
+                  properties:
+                    installationID: {type: string}
+                    poolName: {type: string}
+                    poolUID: {type: string}
+                    volumeID: {type: string}
+                    volumeUID: {type: string}
+                    copyID: {type: string}
+                    nodeName: {type: string}
+                    role:
+                      type: string
+                      enum: [Serving, Incoming, Retired]
+                incomingCopy: *copyIdentity
+                destinationCopy: *copyIdentity
                 candidateNodes:
                   type: array
                   items:

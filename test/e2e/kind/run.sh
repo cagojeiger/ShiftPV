@@ -72,13 +72,6 @@ docker build \
   "${ROOT_DIR}"
 kind load docker-image shiftpv:dev --name "${CLUSTER_NAME}"
 
-if [[ "${UPGRADE_ONLY:-0}" == "1" ]]; then
-	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
-		"${ROOT_DIR}/test/e2e/kind/upgrade.sh"
-	echo "ShiftPV focused chart upgrade E2E passed"
-	exit 0
-fi
-
 install_shiftpv() {
 	local default_class=${1:-true}
 	helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
@@ -117,6 +110,11 @@ run_directory_pool() {
 		"${ROOT_DIR}/test/e2e/kind/directory-pool.sh"
 }
 
+run_orphan_cleanup() {
+	CLUSTER_NAME="${CLUSTER_NAME}" WORKER_A_POOL="${WORKER_A_POOL}" \
+		"${ROOT_DIR}/test/e2e/kind/orphan-cleanup.sh"
+}
+
 install_shiftpv true
 
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/metrics/prometheus.yaml"
@@ -132,6 +130,7 @@ if [[ "${DIRECTORY_POOL_ONLY:-0}" == "1" ]]; then
 fi
 
 run_pool_capacity
+run_orphan_cleanup
 
 if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
 	echo "ShiftPV focused Pool capacity E2E passed"

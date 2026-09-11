@@ -16,11 +16,16 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
 )
 
 type emptyVolumeRepository struct{}
+
+type emptyCleanupRepository struct{}
+
+func (emptyCleanupRepository) List(context.Context) ([]cleanupapi.Cleanup, error) { return nil, nil }
 
 func (emptyVolumeRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
 	return map[string]volumeapi.State{}, nil
@@ -36,7 +41,7 @@ func TestRunCompletesQuiescedTeardown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	if err := run(ctx, checker, store, "shiftpv-lifecycle"); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -58,7 +63,7 @@ func TestRunCancelsQuiesceWhenDependenciesExist(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	err := run(ctx, checker, store, "shiftpv-lifecycle")
 	if err == nil || !strings.Contains(err.Error(), "PersistentVolume pv-data") {
 		t.Fatalf("run error = %v", err)
@@ -78,7 +83,7 @@ func TestRunCancelsQuiesceWhenValidationRemovalFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	err := run(ctx, checker, store, "shiftpv-lifecycle")
 	if err == nil || !strings.Contains(err.Error(), "injected validation delete failure") {
 		t.Fatalf("run error = %v", err)
@@ -115,7 +120,7 @@ func TestRunWithRetryCompletesAfterBlockerIsRemoved(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 
 	if err := runWithRetry(ctx, checker, store, "shiftpv-lifecycle", time.Second, time.Millisecond); err != nil {
 		t.Fatalf("runWithRetry: %v", err)
@@ -131,7 +136,7 @@ func TestRunWithRetryCompletesAfterBlockerIsRemoved(t *testing.T) {
 func TestRunWithRetryValidatesDurationsAndStops(t *testing.T) {
 	client := uninstallClient()
 	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	if err := runWithRetry(context.Background(), checker, store, "shiftpv-lifecycle", 0, time.Millisecond); err == nil {
 		t.Fatal("zero attempt timeout was accepted")
 	}

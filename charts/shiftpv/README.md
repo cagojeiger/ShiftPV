@@ -52,6 +52,10 @@ metrics:
   enabled: true
   port: 8080
   snapshotInterval: 30s
+  prometheusRule:
+    enabled: true
+    additionalLabels:
+      release: kube-prometheus-stack
   serviceMonitor:
     enabled: true
     interval: 30s
@@ -62,9 +66,10 @@ metrics:
 
 | 설정 | 동작 |
 |---|---|
-| 기본값 | metrics와 ServiceMonitor 모두 false |
+| 기본값 | metrics, ServiceMonitor, PrometheusRule 모두 false |
 | metrics 활성화 | Controller/Node 내부 HTTP endpoint와 ClusterIP Service 두 개 |
 | ServiceMonitor 활성화 | 설치된 Prometheus Operator CRD 사용; `additionalLabels`를 Prometheus selector에 맞춤 |
+| PrometheusRule 활성화 | 관측 실패·stale, Pool accounting/inventory, Cleanup/copy review 경보 |
 | Node 관측 주기 | 기존 `poolReadiness.interval` 사용 |
 | API 관측 주기 | `snapshotInterval`; timeout 10s |
 | 접근 | monitoring namespace에서 metrics port로 접근 허용; 외부 공개와 별개 |
@@ -105,7 +110,8 @@ Pool 선택은 `Pool comparison` 구역에만 적용되며 나머지 구역은 �
 상단 observation 상태는 오래된 관측을 `Attention`으로 표시한다. 추이에서는 유효하지 않은 구간이
 끊어진다. 빈 이동 표는 해당 항목 0건 또는 관측 불가일 수 있으므로 상단 관측 상태를 함께 본다.
 CSI 호출 전 빈 그래프는 `No data`다. 발견된 target 상태는 기대 target 전체가 존재한다는 보증과 구분한다.
-Grafana는 관측 화면이며 알림 규칙과 PVC별 실제 사용량 측정은 별도 기능이다.
+Grafana는 관측 화면이며 PVC별 실제 사용량은 측정하지 않는다. 선택형 PrometheusRule은 같은 지표의
+지속 장애만 알리고, 파일 사용량 quota나 application I/O 상태를 추론하지 않는다.
 
 ## Register Pools
 
@@ -134,6 +140,7 @@ kubectl wait --for=condition=Ready shiftpvpool/storage-worker-a --timeout=2m
 | Write | 임시 create, sync, cleanup 성공 |
 | Capacity | filesystem `statfs` 성공 |
 | Freshness | 마지막 probe가 `poolReadiness.staleAfter` 안에 있음 |
+| Inventory | 최대 256 observations가 완전함; `truncated=false` |
 | Ownership | node마다 Pool 하나, path는 immutable |
 | Security | Pool CR 변경 권한은 storage operator에 한정 |
 
@@ -142,7 +149,7 @@ kubectl wait --for=condition=Ready shiftpvpool/storage-worker-a --timeout=2m
 directory는 ShiftPV 관점에서 일반 directory와 같은 입력이다.
 
 Chart와 Controller는 Pool directory를 생성하지 않는다. Missing, non-directory, root(`/`), read-only,
-permission failure, stale probe는 신규 provisioning과 이동 후보에서 제외되며 기존 owner authority는
+permission failure, stale probe, truncated inventory는 신규 provisioning과 이동 후보에서 제외되며 기존 owner authority는
 유지된다. `storageClass.defaultClass=true`는 새 PVC의 default 선택만 바꾸고 기존 hostPath PV는 유지한다.
 
 ## Configure
@@ -155,12 +162,13 @@ permission failure, stale probe는 신규 provisioning과 이동 후보에서 �
 | `node.kubeletRootDir` | kubelet state root | `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | 참여 node | empty |
 | `node.resources` | Node Plugin resource 정책 | `{}` |
-| `helperPod.*` | `sh`, `stat`, `du`, `awk`, `mkdir`, `rm`을 제공하는 helper | BusyBox, `2m` |
+| `helperPod.image` | create/delete/GC helper image; empty면 controller image 사용 | empty |
+| `helperPod.timeout`, `helperPod.resources` | helper 실행 제한 | `2m`, 최소 requests/limits |
 | `poolReadiness.interval` | node-local probe 주기 | `1m` |
 | `poolReadiness.staleAfter` | Controller freshness window | `3m` |
 | `mobility.enabled`, `mobility.webhookPort` | cordon mobility와 admission endpoint | `true`, `9443` |
 | `mobility.interval` | event watch를 보완하는 safety interval | `30s` |
-| `mobility.helperImage` | rsync transfer image | controller image |
+| `mobility.helperImage` | copy/promote helper image; empty면 controller image 사용 | empty |
 | `lifecycle.uninstallMode` | Helm 또는 Argo CD 제거 owner | `helm` |
 | `storageClass.create`, `storageClass.name` | StorageClass 생성과 이름 | `true`, `shiftpv` |
 | `storageClass.defaultClass` | default-class annotation | `false` |
@@ -181,12 +189,12 @@ kubectl label namespace my-workload shiftpv.io/admission=enabled
 | 일반 | 최초 owner만 | mobility webhook과 독립 |
 
 Controller는 replica 하나와 `Recreate` strategy로 실행한다. 기존 node cordon을 관찰하고
-[mobility preflight](../../docs/spec/volume-mobility.md#non-disruptive-preflight)를 거쳐 각 transaction을
+[mobility preflight](../../docs/spec/volume-mobility.md#preflight-and-placement)를 거쳐 각 transaction을
 `ShiftPVMove`에 기록한다.
 
 ShiftPV는 Node를 cordon하지 않는다. Cordon은 cluster-wide maintenance 신호이므로 운영자가 다른
 workload 영향과 maintenance window를 확인한다. Blocked 이동은 현재 owner를 검증하는
-[ResumeOwner 절차](../../docs/spec/volume-mobility.md#explicit-owner-recovery)로 복구한다.
+[ResumeOwner 절차](../../docs/spec/volume-mobility.md#blocked-recovery)로 복구한다.
 
 ### Webhook certificates
 
@@ -219,11 +227,11 @@ Upgrade와 rollback은 다음 조건을 유지하는 이동 트리거 동결 창
 |---|---|
 | Volume | 모든 `activeMove`가 빈 값 |
 | Move | 모두 `Succeeded` 또는 `Blocked` + `recoveryPhase=Recovered` |
-| Cleanup | 실행 중인 확인 Job이 종결되고 미완료 정리 의무가 해소된 상태 |
+| Cleanup | 모든 `ShiftPVCleanup`이 `Completed`인 상태 |
 | 유지보수 창 | cordon·drain·수동 Move 요청을 동결하여 교체 조건 유지 |
 
-`Completing`은 잠금 해제 뒤에도 남을 수 있는 미완료 journal이다. 이전 Controller가 만든 Move와
-cleanup Job은 해당 Controller에서 종결한 뒤 교체한다.
+`Completing`은 잠금 해제 뒤에도 남을 수 있는 미완료 journal이다. Move와 Cleanup이 종결된 뒤
+Controller를 교체한다.
 Helm은 설치된 CRD를 보존하므로 새 Controller보다 schema를 먼저 적용한다. `--force-conflicts`는
 최초 Helm field ownership을 명시적으로 인수한다.
 
@@ -242,14 +250,7 @@ helm show crds shiftpv/shiftpv --version "${TARGET_CHART_VERSION}" | \
     --force-conflicts -f -
 ```
 
-Chart 0.1.3 이하에서 upgrade할 때는 CRD 적용 뒤 모든 Pool에 `spec.capacity.limit`를 추가한다.
-
-```bash
-kubectl patch shiftpvpool <pool-name> --type=merge \
-  -p '{"spec":{"capacity":{"limit":"500Gi"}}}'
-```
-
-Pool schema가 완성되면 runtime을 갱신한다.
+CRD 적용 뒤 runtime을 갱신한다.
 
 ```bash
 helm upgrade shiftpv shiftpv/shiftpv \
@@ -267,6 +268,7 @@ Local checkout도 같은 순서로 `shiftpv/shiftpv --version "${TARGET_CHART_VE
 kubectl get shiftpvpools
 kubectl get shiftpvvolumes
 kubectl get shiftpvmoves
+kubectl get shiftpvcleanups
 kubectl get shiftpvmove <move-name> -o yaml
 kubectl get events -n default \
   --field-selector involvedObject.kind=ShiftPVMove,involvedObject.name=<move-name>
@@ -280,8 +282,10 @@ truth이며 timestamp는 관측과 알림을 위한 값이다.
 | Pool health | `ShiftPVPool.status.conditions` |
 | Volume authority | `ShiftPVVolume.status.ownerNode` |
 | Move 진행과 운영 행동 | `ShiftPVMove.status` |
+| Copy inventory | `ShiftPVPool.status.inventory` |
+| 삭제 intent와 receipt | `ShiftPVCleanup.status` |
 | 알림 | Kubernetes Events |
-| Blocked owner 복구 | [ResumeOwner 절차](../../docs/spec/volume-mobility.md#explicit-owner-recovery) |
+| Blocked owner 복구 | [ResumeOwner 절차](../../docs/spec/volume-mobility.md#blocked-recovery) |
 
 복구 완료는 Move의 `recoveryPhase=Recovered`와 Volume의 `Ready`, 빈 `activeMove`로 판정한다.
 Move의 원래 `phase=Blocked`와 실패 reason은 유지된다.
@@ -298,7 +302,7 @@ reclaim policy를 `Delete`로 바꿔 CSI에 위임한다. [Kubernetes reclaim po
 | 3. I/O 중지 | GitOps 원본에서 workload 중지, Pod 종료와 빈 `publishedNodes` 확인 |
 | 4. 경로 확인 | 현재 `ownerNode`의 Ready Pool과 `mountPath/volumes/<volume-id>` 확인, 필요한 data 백업 |
 | 5. 폐기 | 아래 명령으로 PV policy 변경, Bound PVC 삭제 |
-| 6. 완료 확인 | PV, owner directory, reservation ConfigMap, Volume CR 부재 |
+| 6. 완료 확인 | Volume이 `Deleting`으로 publication을 차단한 뒤 Cleanup `Completed`; PV, owner directory, reservation ConfigMap, Volume CR 부재 |
 
 확정한 PV 이름과 ShiftPV release namespace를 사용한다.
 
@@ -330,39 +334,47 @@ kubectl -n "${DRIVER_NAMESPACE}" wait --for=delete "configmap/${VOLUME_ID}" --ti
 kubectl wait --for=delete "shiftpvvolume/${VOLUME_ID}" --timeout=5m
 ```
 
-CSI는 owner directory → reservation → Volume CR 순서로 정리한다. Pool과 release는 완료까지 유지하고,
-PV finalizer는 Kubernetes/provisioner가 정리한다. Timeout이면 PV Event와 Controller/helper log의 원인을
-해소해 재시도를 기다린다. Recovery의 `.shiftpv/aborted/` quarantine은 별도 운영자 검토·폐기 대상이다.
+CSI는 immutable Cleanup intent → exact copy purge → receipt settlement → reservation → Volume CR 순서로
+정리한다. Pool과 release는 완료까지 유지하고 PV finalizer는 Kubernetes/provisioner가 정리한다.
+Timeout이면 Cleanup status, PV Event와 Controller/helper log를 함께 확인한다.
 
 ## Cleanup review
 
-정리 확인 요청은 `mobility.enabled=true`에서 처리한다.
-Controller와 `mobility.helperImage`는 `/shiftpv-cleanup-check` 실행 파일을 포함한 같은 구현 버전으로 배포한다.
-이 실행 파일은 controller image에 포함되며, node image의 역할은 유지한다.
-
-정리 의무는 service recovery와 별도로 확인한다. `NeedsReview` 요청은 경로·로그를 점검한 뒤
-읽기 전용 검증으로 종료한다. [계약과 확인 대상 경로](../../docs/spec/source-cleanup.md)를 기준으로
-보존 데이터의 필요성을 판단하고, 운영자가 승인한 잔여 데이터만 별도로 정리한다.
+Cleanup reconciler는 mobility 설정과 독립적으로 실행된다. Node inventory가 exact copy와 실제 kubelet
+publication을 관찰하고 Controller가 live API authority와 비교한다. 승인된 VolumeDelete/MoveSource는
+helper가 실행하며, orphan과 불명확한 identity는 `NeedsReview`로 보존한다.
 
 ```bash
-kubectl -n shiftpv-system get cm -l shiftpv.io/cleanup-request \
-  -o custom-columns='NAME:.metadata.name,STATE:.metadata.annotations.shiftpv\.io/cleanup-state,REASON:.metadata.annotations.shiftpv\.io/cleanup-reason,CHECK:.metadata.annotations.shiftpv\.io/cleanup-check-id'
-kubectl -n shiftpv-system get cm <request-name> -o jsonpath='{.data.intent}'
-# 필요한 경우 먼저 해당 Blocked Move의 ResumeOwner를 완료한다.
-# 확인 번호는 이전 cleanup-check-id보다 큰 양의 정수로 지정한다.
-kubectl -n shiftpv-system annotate cm <request-name> shiftpv.io/cleanup-check=1 --overwrite
-kubectl -n shiftpv-system get cm <request-name> -w
+kubectl get shiftpvcleanups \
+  -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,REASON:.status.reason,NODE:.spec.target.nodeName,VOLUME:.spec.target.volumeID,COPY:.spec.target.copyID'
+kubectl get shiftpvcleanup <cleanup-name> -o yaml
+kubectl get shiftpvpool <pool-name> -o jsonpath='{.status.inventory}'
+kubectl -n shiftpv-system logs job/<cleanup-name>-effect
 ```
 
 | 결과 | 다음 동작 |
 |---|---|
-| `Completed` | 정리 의무 종료; 완료 증거는 7일 보존 조건 적용 |
-| `NeedsReview` | reason 및 확인 Job 로그 점검, 원인 해소 후 증가한 번호로 확인 |
-| `Running` | 같은 번호로 대기; 재시작에도 동일 Job UID·image 유지 |
-| `Unknown` 지표 | 요청의 손상·불일치 점검; 원래 증거 복구 |
+| `Pending` | 승인 intent와 Controller 상태 확인 |
+| `Running` | status의 exact Job UID와 helper log 확인 |
+| `Verifying` | receipt 정산 재시도 관찰 |
+| `Completed` | 파일 효과와 정리 의무 종결; 동일 exact copy 재관측 시 `NeedsReview` 복구 |
+| `NeedsReview` | data 보존; Pool/Volume/Move/copy identity를 운영자가 조사 |
 
-검증 Job은 파일을 읽기 전용으로 확인한다. 기존 데이터 삭제나 완료 annotation의 직접 수정은
-이 검증 절차와 별개의 운영 권한이며, 정상 처리에서는 controller가 완료 증거를 기록한다.
+Cleanup 대상·권한·예약 identity는 immutable이고 `approved`만 `false → true`로 변경할 수 있다. Orphan을
+승인하기 전에 target이 current/in-flight copy가 아닌지, Pool inventory의 fresh/valid 상태,
+`published=false`, 대상 `reservationUID`를 확인한다. 살아 있는 PV가 있으면 유효한 `currentCopy`가
+target과 다른 exact copy임을 확인한다.
+
+```bash
+kubectl get shiftpvcleanup <cleanup-name> -o yaml
+kubectl patch shiftpvcleanup <cleanup-name> --type merge -p '{"spec":{"approved":true}}'
+```
+
+승인 뒤에도 live 조건이 안전하지 않으면 data를 유지한 채 `NeedsReview` 사유만 갱신한다. 조건이
+해소되면 아직 executor가 없는 요청은 같은 operation으로 자동 재개한다. executor가 이미 결합된
+`NeedsReview`는 자동 재실행하지 않는다. Controller가 기록한 purged receipt만 `Completed`로 정산된다.
+정산 뒤 동일 exact copy가 다시 나타나면 `CopyReappeared`로 보존하고 이전 삭제 권한은 재사용하지 않는다.
+완료되지 않은 Cleanup은 Helm과 Argo CD uninstall을 차단한다.
 
 ## Uninstall and recovery
 
@@ -394,6 +406,7 @@ sequenceDiagram
 |---|---|
 | 설정된 class를 사용하는 PVC | 해소 |
 | ShiftPV PV | 해소 |
+| controller namespace의 volume reservation | exact cleanup 뒤 해제 |
 | `ShiftPVVolume` | 해소 |
 | non-terminal `ShiftPVMove` | 해소 |
 | controller namespace의 정리 요청 | 완료 acknowledgement 확인; 미완료·손상된 기록은 보존·확인 |
@@ -408,7 +421,7 @@ DELETE 또는 dry-run DELETE 자체가 제거 permit을 만들지 않는다.
 ```text
 Move 수렴 또는 owner 복구
   → GitOps/workload 중지
-  → retained volume 폐기와 data/state 부재 확인
+  → retained volume의 exact cleanup과 reservation 해제 확인
   → helm uninstall 또는 전용 Argo CD Application 삭제
 ```
 
@@ -418,6 +431,14 @@ Data 폐기는 [Retained volume 절차](#retire-a-retained-volume)를 따른다.
 
 ```bash
 kubectl -n <namespace> logs job/<release>-uninstall-guard
+```
+
+Helm은 pre-delete hook을 시작하기 전에 release를 `uninstalling`으로 기록한다. Guard가 차단한 release를
+계속 운영하거나 upgrade하려면 차단 직전 revision을 hook 없이 복구한다.
+
+```bash
+helm history <release> --namespace <namespace>
+helm rollback <release> <blocked-revision> --namespace <namespace> --no-hooks --wait
 ```
 
 5분 동안 유지되는 quiescing/granted 상태는 현재 `CSIDriver` UID에 결합된다. 재설치는 새 UID와

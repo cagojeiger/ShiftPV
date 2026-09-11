@@ -46,15 +46,16 @@ PDB 제거 후에는 같은 volume의 자동 이동 성공과 checksum 유지까
    `Succeeded`까지 이어 가는지 확인한다.
 6. replacement Pod가 destination에서 Running인지, PVC UID/PV/volume handle/checksum이
    같은지, dynamic owner가 destination인지 확인한다.
-7. destination final payload가 있고 source final과 임시 retired 경로가 모두 없는지 확인한다.
+7. destination final payload가 있고 source final과 source `copyID`의 retired 경로가 모두 없는지 확인한다.
 
 ## Post-commit failure and owner recovery
 
-다시 반대 방향으로 이동시킨다. 테스트 전용 source pool의 `.shiftpv/retired/<move>`에 충돌 파일을
-만들어 cleanup 격리를 실제 실패시킨다. commit 이후 destination에서 새로운 payload를
-기록하고 복구를 요청한다. 복구 중 Controller 재시작 후에도 최신 destination 데이터,
-PVC/PV identity와 owner가 유지돼야 한다. 오래된 source는 aborted 경로에 보존 격리하며
-source owner로 rollback하면 실패다. 자세한 실행 절차는 `recovery.sh`를 따른다.
+다시 반대 방향으로 이동시킨다. 테스트 전용 source pool의 `.shiftpv/retired/<source-copy-id>`에
+충돌 파일을 만들어 exact cleanup을 실제 실패시킨다. commit 이후 새 owner에 payload를 기록하고
+복구를 요청한다. 복구 중 Controller 재시작 후에도 최신 owner 데이터, PVC/PV identity와 owner가
+유지돼야 한다. 미완료 cleanup의 non-owner copy는 원래 경로에 보존되고 `ShiftPVCleanup`은
+`NeedsReview`로 수렴한다. Controller를 다시 재시작해도 effect Job을 재생하지 않으며 uninstall
+admission은 이 의무를 blocker로 보고한다. 자세한 실행 절차는 `recovery.sh`를 따른다.
 
 합격 시 다음 두 메시지를 출력한다.
 

@@ -2,7 +2,7 @@
 
 - 상태: Accepted
 - 날짜: 2026-09-04
-- 상세 계약: [volume mobility](../spec/volume-mobility.md#operator-diagnostics)
+- 상세 계약: [volume mobility](../spec/volume-mobility.md#reconcile-loop)
 
 ## Context
 
