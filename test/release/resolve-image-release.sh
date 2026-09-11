@@ -36,6 +36,18 @@ jq -e 'length == 1 and .[0].component == "controller" and .[0].version == "0.1.0
   <<<"${components}" >/dev/null
 jq -e 'length == 2 and all(.[]; .component == "controller")' <<<"${builds}" >/dev/null
 
+printf '%s\n' 'unrelated change' >"${fixture}/README.md"
+git -C "${fixture}" add README.md
+git -C "${fixture}" commit -qm unrelated
+unrelated_sha="$(git -C "${fixture}" rev-parse HEAD)"
+unrelated_output="${fixture}/unrelated-output"
+(
+  cd "${fixture}"
+  RELEASE_SHA="${unrelated_sha}" CURRENT_MAIN_SHA="${unrelated_sha}" GITHUB_OUTPUT="${unrelated_output}" \
+    build/ci/resolve-image-release.sh
+)
+[[ "$(sed -n 's/^should_release=//p' "${unrelated_output}")" == false ]]
+
 stale_output="${fixture}/stale-output"
 (
   cd "${fixture}"

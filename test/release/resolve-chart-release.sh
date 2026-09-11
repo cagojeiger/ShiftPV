@@ -14,6 +14,18 @@ printf '%s\n' 'version: 0.0.9' >"${fixture}/charts/shiftpv/Chart.yaml"
 git -C "${fixture}" add build charts
 git -C "${fixture}" commit -qm base
 
+printf '%s\n' 'changed chart' >"${fixture}/charts/shiftpv/README.md"
+git -C "${fixture}" add charts
+git -C "${fixture}" commit -qm chart-content
+content_sha="$(git -C "${fixture}" rev-parse HEAD)"
+content_output="${fixture}/content-output"
+(
+  cd "${fixture}"
+  RELEASE_SHA="${content_sha}" CURRENT_MAIN_SHA="${content_sha}" GITHUB_OUTPUT="${content_output}" \
+    build/ci/resolve-chart-release.sh
+)
+[[ "$(sed -n 's/^should_release=//p' "${content_output}")" == false ]]
+
 printf '%s\n' 'version: 0.1.0' >"${fixture}/charts/shiftpv/Chart.yaml"
 git -C "${fixture}" add charts
 git -C "${fixture}" commit -qm chart-release
@@ -58,17 +70,18 @@ skip_output="${fixture}/skip-output"
 )
 [[ "$(sed -n 's/^should_release=//p' "${skip_output}")" == false ]]
 
-printf '%s\n' 'changed chart' >"${fixture}/charts/shiftpv/README.md"
-git -C "${fixture}" add charts
-git -C "${fixture}" commit -qm changed-chart
-changed_chart_sha="$(git -C "${fixture}" rev-parse HEAD)"
+git -C "${fixture}" tag chart/v0.2.0 "${release_sha}"
+printf '%s\n' 'version: 0.2.0' >"${fixture}/charts/shiftpv/Chart.yaml"
+git -C "${fixture}" add charts/shiftpv/Chart.yaml
+git -C "${fixture}" commit -qm reused-version
+reused_version_sha="$(git -C "${fixture}" rev-parse HEAD)"
 conflict_output="${fixture}/conflict-output"
 if (
   cd "${fixture}"
-  RELEASE_SHA="${changed_chart_sha}" CURRENT_MAIN_SHA="${changed_chart_sha}" GITHUB_OUTPUT="${conflict_output}" \
+  RELEASE_SHA="${reused_version_sha}" CURRENT_MAIN_SHA="${reused_version_sha}" GITHUB_OUTPUT="${conflict_output}" \
     build/ci/resolve-chart-release.sh
 ); then
-  echo "expected changed chart content without a version bump to reject publication" >&2
+  echo "expected a reused chart version to reject publication" >&2
   exit 1
 fi
 

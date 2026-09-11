@@ -31,20 +31,30 @@ if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
+version_changed=false
+if git rev-parse "${release_sha}^1" >/dev/null 2>&1; then
+  previous_version="$(git show "${release_sha}^1:${chart_file}" 2>/dev/null | awk '$1 == "version:" {print $2; exit}' || true)"
+  if [[ "${version}" != "${previous_version}" ]]; then
+    version_changed=true
+  fi
+else
+  version_changed=true
+fi
+
+if [[ "${version_changed}" != true ]]; then
+  echo "::notice::${chart_file} version did not change in ${release_sha}; skipping chart"
+  echo 'should_release=false' >>"${github_output}"
+  exit 0
+fi
+
 tag="chart/v${version}"
 if tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}" 2>/dev/null)"; then
   if [[ "${tagged_commit}" == "${release_sha}" ]]; then
     echo "::notice::tag ${tag} already points to this commit; resuming publication"
-  elif git diff --quiet "${tagged_commit}" "${release_sha}" -- charts/shiftpv; then
-    echo "::notice::charts/shiftpv did not change since ${tag}; skipping chart release"
-    echo 'should_release=false' >>"${github_output}"
-    exit 0
   else
-    echo "::error::charts/shiftpv changed after ${tag}; bump the chart version before merging" >&2
+    echo "::error::tag ${tag} already points to a different commit; bump ${chart_file} before merging" >&2
     exit 1
   fi
-else
-  echo "::notice::tag ${tag} does not exist; publishing the chart"
 fi
 
 {

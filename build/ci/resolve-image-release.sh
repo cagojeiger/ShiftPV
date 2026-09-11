@@ -49,26 +49,18 @@ for component in controller node; do
     version_changed=true
   fi
 
-  release_component=false
+  if [[ "${version_changed}" != true ]]; then
+    echo "::notice::${version_file} did not change in ${release_sha}; skipping ${component}"
+    continue
+  fi
+
   if tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}" 2>/dev/null)"; then
     if [[ "${tagged_commit}" == "${release_sha}" ]]; then
       echo "::notice::tag ${tag} already points to this commit; resuming release"
-      release_component=true
-    elif [[ "${version_changed}" == true ]]; then
+    else
       echo "::error::tag ${tag} already points to a different commit; bump ${version_file} before merging"
       exit 1
-    else
-      echo "::notice::${version_file} did not change and tag ${tag} already exists; skipping ${component}"
     fi
-  elif [[ "${version_changed}" == true ]]; then
-    release_component=true
-  else
-    echo "::notice::tag ${tag} does not exist; releasing ${component} to recover the unpublished version"
-    release_component=true
-  fi
-
-  if [[ "${release_component}" != true ]]; then
-    continue
   fi
 
   version_arg="${component^^}_VERSION"
