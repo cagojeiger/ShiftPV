@@ -58,8 +58,8 @@ recover_source_only() {
 
 recover_after_commit_failure() {
 	local return_move current_pod latest_checksum failed_job destination_mount source_copy cleanup_name
-	# The current owner becomes the return Move source. An exact retired-copy
-	# collision makes the approved cleanup fail without touching that source.
+	# The current owner becomes the return Move source. The test helper fails the
+	# approved cleanup before filesystem mutation without invalidating inventory.
 	source_copy=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
 	test -n "${source_copy}"
 	kubectl uncordon "${SOURCE_NODE}"
@@ -72,8 +72,7 @@ recover_after_commit_failure() {
 	done
 	test -n "${return_move}"
 	destination_mount=$(pool_mount_for_node "${DESTINATION_NODE}")
-	local fault_path="${destination_mount}/.shiftpv/retired/${source_copy}"
-	docker exec "${DESTINATION_NODE}" mkdir -p -- "$(dirname "${fault_path}")"
+	local fault_path="${destination_mount}/.shiftpv-e2e-fail-cleanup"
 	docker exec "${DESTINATION_NODE}" test ! -e "${fault_path}"
 	docker exec "${DESTINATION_NODE}" touch -- "${fault_path}"
 	kubectl wait "shiftpvmove/${return_move}" --for=jsonpath='{.status.phase}'=Blocked --timeout=480s
@@ -86,6 +85,7 @@ recover_after_commit_failure() {
 	failed_job=$(kubectl get "shiftpvcleanup/${cleanup_name}" -o jsonpath='{.status.executor.jobName}')
 	test -n "${failed_job}"
 	kubectl -n shiftpv-system logs "job/${failed_job}" >"${WORK_DIR}/cleanup-failure.txt" 2>&1
+	grep -Fq 'injected cleanup failure before filesystem mutation' "${WORK_DIR}/cleanup-failure.txt"
 	kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=180s
 	current_pod=$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.name}')
 	# New writes on the committed destination must survive recovery.
