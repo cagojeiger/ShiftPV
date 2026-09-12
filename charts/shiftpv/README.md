@@ -365,8 +365,9 @@ kubectl -n shiftpv-system logs job/<cleanup-name>-effect
 
 Cleanup 대상·권한·예약 identity는 immutable이고 `approved`만 `false → true`로 변경할 수 있다. Orphan을
 승인하기 전에 target이 current/in-flight copy가 아닌지, Pool inventory의 fresh/valid 상태,
-`published=false`, 대상 `reservationUID`를 확인한다. 살아 있는 PV가 있으면 유효한 `currentCopy`가
-target과 다른 exact copy임을 확인한다.
+`published=false`를 확인한다. cleanup이 orphan reservation도 회수할 때만 exact `reservationUID`를
+가진다. 살아 있는 Volume의 reservation은 cleanup 대상에서 제외하며, 유효한 `currentCopy`가 target과
+다른 exact copy임을 확인한다.
 
 ```bash
 kubectl get shiftpvcleanup <cleanup-name> -o yaml
