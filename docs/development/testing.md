@@ -94,7 +94,7 @@ Unit test는 다음 고비용 경계를 포함한다.
 | Job·Pool 변경과 영구 실행 실패를 NeedsReview로 수렴 | `src/kubernetes/helperpod/cleanup_test.go` |
 | Pending 재개·receipt settlement·review-only orphan 발견 | `src/lifecycle/cleanupcontroller/reconciler_test.go` |
 | recovered Move의 superseded copy 발견과 cycle당 단일 authority snapshot | `src/lifecycle/cleanupcontroller/reconciler_test.go` |
-| create/incoming stage crash 복구와 unrecorded stage 비채택 | `src/node/ownership/{store,transfer}_test.go` |
+| create/copy/promotion marker 경계 crash 복구와 active Move 외 unrecorded path 비채택 | `src/node/ownership/{store,transfer}_test.go`, `src/kubernetes/volumeapi/registry_test.go`, `src/mobility/controller/reconciler_test.go` |
 | inventory exact-limit와 overflow admission | `src/node/observation/scanner_test.go`, `src/kubernetes/volumeapi/registry_test.go` |
 | reservation·미완료 Cleanup의 Helm/Argo CD 제거 차단 | `TestCheckReportsEveryShiftPVDependency`, `TestCheckBlocksUnsettledCleanupContract` |
 | 완료 증거 저장 전 잠금·transfer resource 보존 | `TestCompletionConfirmationPrecedesResourceDeletionAndUnlock` |

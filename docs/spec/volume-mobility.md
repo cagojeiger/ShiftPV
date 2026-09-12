@@ -207,6 +207,10 @@ Transfer Secret, ConfigMap, source Pod, Service, copy Job과 promotion Job은 de
 Move UID owner reference를 사용한다. 기존 이름의 다른 Move incarnation은 재사용하거나 삭제하지 않는다.
 Source daemon은 현재 CSIDriver, Pool, Volume, Move, local Serving marker를 확인한 뒤 read-only rsync를 연다.
 Destination helper는 API authority를 작업 전후 확인하고 volume lock 아래 copy/promotion을 실행한다.
+Helper가 directory 생성 또는 atomic rename 뒤 placement marker 기록 전에 중단되면 Controller는 활성 Move의
+정확한 incoming/serving 경로만 같은 action으로 재진입시킨다. Move·Volume·Pool·copy·operation identity와
+fresh bounded inventory가 모두 일치해야 하며, 완료된 Job은 정상 inventory가 다시 관찰된 뒤에만 다음
+authority phase로 진행한다.
 
 Move capacity admission은 requested bytes의 논리 reservation과 source apparent bytes 대비 destination
 filesystem available bytes를 함께 검사한다. 이는 copy admission이며 개별 PVC write quota나 filesystem
