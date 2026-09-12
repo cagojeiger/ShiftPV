@@ -455,7 +455,7 @@ func (r *Registry) SetState(ctx context.Context, volumeID string, state State) e
 
 func (r *Registry) CompareAndSetState(ctx context.Context, volumeID, expectedPhase, expectedActiveMove, expectedOwner string, next State) error {
 	return r.mutateState(ctx, volumeID, func(current State) (State, error) {
-		if current.Phase != expectedPhase || current.ActiveMove != expectedActiveMove || current.OwnerNode != expectedOwner {
+		if next.UID == "" || current.UID != next.UID || current.Phase != expectedPhase || current.ActiveMove != expectedActiveMove || current.OwnerNode != expectedOwner {
 			return State{}, fmt.Errorf("%w: volume %q is phase=%q activeMove=%q owner=%q", ErrStateConflict, volumeID, current.Phase, current.ActiveMove, current.OwnerNode)
 		}
 		// Node publication is independently maintained by the CSI node service.

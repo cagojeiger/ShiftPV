@@ -232,7 +232,7 @@ func TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly(t *testing.T) 
 		move.Status.DestinationCopy == nil || move.Status.DestinationCopy.Role != volume.RoleServing || move.Status.CopyOperationID == "" || move.Status.PromotionOperationID == "" {
 		t.Fatalf("move identities=%#v", move.Status)
 	}
-	observed := observation{Volume: repository.volumes[volumeID], DestinationNode: "destination"}
+	observed := observation{Volume: identifiedTestState(volumeID, repository.volumes[volumeID], repository.pools), DestinationNode: "destination"}
 	if err := reconciler.commitOwner(context.Background(), &move, observed); err == nil {
 		// A live placement reservation is intentionally required before the CAS.
 		t.Fatal("owner commit bypassed placement authority")

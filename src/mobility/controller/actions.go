@@ -69,6 +69,7 @@ func (r *Reconciler) lockVolume(ctx context.Context, move *volumeapi.Move, obser
 	}
 	if !observed.FSM.VolumeLocked {
 		next := volumeapi.State{
+			UID:            observed.Volume.UID,
 			Phase:          volumeapi.PhaseMoving,
 			OwnerNode:      move.Spec.SourceNode,
 			ActiveMove:     move.Name,
@@ -225,7 +226,7 @@ func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, obse
 	if move.Status.DestinationCopy == nil || move.Status.DestinationCopy.Role != volume.RoleServing || move.Status.DestinationCopy.NodeName != destination {
 		return fmt.Errorf("destination serving-copy identity is missing")
 	}
-	next := volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: destination, ActiveMove: move.Name, PublishedNodes: append([]string(nil), observed.Volume.PublishedNodes...)}
+	next := volumeapi.State{UID: observed.Volume.UID, Phase: volumeapi.PhaseReady, OwnerNode: destination, ActiveMove: move.Name, PublishedNodes: append([]string(nil), observed.Volume.PublishedNodes...)}
 	var destinationCopy volume.CopyIdentity
 	if move.Status.DestinationCopy != nil {
 		destinationCopy = *move.Status.DestinationCopy

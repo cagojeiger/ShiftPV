@@ -63,13 +63,10 @@ func (m *memoryRepository) Get(_ context.Context, id string) (volumeapi.State, e
 }
 func (m *memoryRepository) CompareAndSetState(_ context.Context, id, phase, active, owner string, next volumeapi.State) error {
 	current := identifiedTestState(id, m.volumes[id], m.pools)
-	if current.Phase != phase || current.ActiveMove != active || current.OwnerNode != owner {
+	if next.UID == "" || current.UID != next.UID || current.Phase != phase || current.ActiveMove != active || current.OwnerNode != owner {
 		return volumeapi.ErrStateConflict
 	}
 	next.PublishedNodes = current.PublishedNodes
-	if next.UID == "" {
-		next.UID = current.UID
-	}
 	if next.CreationOperationID == "" {
 		next.CreationOperationID = current.CreationOperationID
 	}
@@ -593,7 +590,7 @@ func TestJobStateAndBlockedVolume(t *testing.T) {
 	if err != nil || !complete || failed {
 		t.Fatalf("job state complete=%v failed=%v err=%v", complete, failed, err)
 	}
-	observed := observation{Volume: repository.volumes[volumeID]}
+	observed := observation{Volume: identifiedTestState(volumeID, repository.volumes[volumeID], repository.pools)}
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionMarkBlocked, Reason: "CopyFailed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +605,7 @@ func TestBlockedBeforeLockClosesRediscovery(t *testing.T) {
 	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}
 	repository := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source"}}, moves: []volumeapi.Move{move}}
 	reconciler := &Reconciler{Client: fake.NewSimpleClientset(readyNode("source", true)), Repository: repository, Namespace: "system", HelperImage: "helper"}
-	observed := observation{Volume: repository.volumes[volumeID]}
+	observed := observation{Volume: identifiedTestState(volumeID, repository.volumes[volumeID], repository.pools)}
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionMarkBlocked, Reason: "ControlledConsumerMissing"}); err != nil {
 		t.Fatal(err)
 	}

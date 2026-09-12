@@ -298,7 +298,7 @@ func TestOwnerCommitConvergesAfterCASResponseLost(t *testing.T) {
 	placement := reconciler.placementPod(move, &corev1.Pod{}, namesFor(move.Name))
 	placement.Spec.NodeName = "destination"
 	reconciler.Client = fake.NewSimpleClientset(placement)
-	observed := observation{Volume: inner.volumes[volumeID], DestinationNode: "destination"}
+	observed := observation{Volume: identifiedTestState(volumeID, inner.volumes[volumeID], inner.pools), DestinationNode: "destination"}
 
 	if err := reconciler.commitOwner(ctx, &move, observed); err == nil {
 		t.Fatal("lost owner commit response was hidden")
@@ -330,7 +330,7 @@ func TestCompletionConvergesAfterActiveMoveClearResponseLost(t *testing.T) {
 	}
 	repository := &lostResponseRepository{memoryRepository: inner, stateCASResponses: 1}
 	reconciler := &Reconciler{Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", Cleanups: cleanups, CleanupOperator: receiptCleanupOperator{}}
-	observed := observation{Volume: inner.volumes[volumeID], Names: namesFor(move.Name)}
+	observed := observation{Volume: identifiedTestState(volumeID, inner.volumes[volumeID], inner.pools), Names: namesFor(move.Name)}
 	for name, current := range map[string]*volume.CopyIdentity{
 		"missing current copy": nil,
 		"different current copy": func() *volume.CopyIdentity {

@@ -27,6 +27,14 @@ func TestStateCASPreservesConcurrentNodePublication(t *testing.T) {
 	if err := r.Ensure(ctx, id, "source"); err != nil {
 		t.Fatal(err)
 	}
+	object, err := client.Resource(VolumeResource).Get(ctx, id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.SetUID("volume-uid")
+	if _, err := client.Resource(VolumeResource).Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	stale, _ := r.Get(ctx, id)
 	if err := r.SetPublished(ctx, id, "source", true); err != nil {
 		t.Fatal(err)
@@ -52,6 +60,41 @@ func TestStateCASPreservesConcurrentNodePublication(t *testing.T) {
 	live, _ = r.Get(ctx, id)
 	if len(live.PublishedNodes) != 0 {
 		t.Fatalf("unpublish lost: %+v", live)
+	}
+}
+
+func TestStateCASRejectsReplacementVolumeUID(t *testing.T) {
+	ctx := context.Background()
+	const id = "shiftpv-55555555555555555555555555555555"
+	original := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
+		"metadata": map[string]any{"name": id, "uid": "original-uid"},
+		"spec":     map[string]any{"volumeID": id},
+		"status":   map[string]any{"phase": PhaseReady, "ownerNode": "source", "activeMove": ""},
+	}}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{VolumeResource: "ShiftPVVolumeList"}, original)
+	registry := &Registry{Client: client}
+	stale, err := registry.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := original.DeepCopy()
+	replacement.SetUID("replacement-uid")
+	replacement.SetResourceVersion("")
+	if err := client.Resource(VolumeResource).Delete(ctx, id, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Resource(VolumeResource).Create(ctx, replacement, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	stale.Phase = PhaseMoving
+	stale.ActiveMove = "stale-move"
+	if err := registry.CompareAndSetState(ctx, id, PhaseReady, "", "source", stale); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("replacement Volume CAS error = %v", err)
+	}
+	current, err := registry.Get(ctx, id)
+	if err != nil || current.UID != "replacement-uid" || current.Phase != PhaseReady || current.ActiveMove != "" {
+		t.Fatalf("replacement Volume changed: state=%#v err=%v", current, err)
 	}
 }
 
@@ -517,7 +560,19 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 	if err := registry.Ensure(ctx, volumeID, "node-a"); err != nil {
 		t.Fatal(err)
 	}
-	next := State{Phase: PhaseMoving, OwnerNode: "node-a", ActiveMove: "move-test"}
+	createdVolume, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdVolume.SetUID("volume-uid")
+	if _, err := client.Resource(VolumeResource).Update(ctx, createdVolume, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := registry.Get(ctx, volumeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := State{UID: current.UID, Phase: PhaseMoving, OwnerNode: "node-a", ActiveMove: "move-test"}
 	if err := registry.CompareAndSetState(ctx, volumeID, PhaseReady, "", "node-a", next); err != nil {
 		t.Fatal(err)
 	}
