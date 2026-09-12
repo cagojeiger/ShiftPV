@@ -23,6 +23,7 @@ type memoryRepository struct {
 	volumes    map[string]volumeapi.State
 	moves      []volumeapi.Move
 	pools      []volumeapi.Pool
+	removed    []string
 	volumesErr error
 	movesErr   error
 	poolsErr   error
@@ -63,6 +64,11 @@ func (m *memoryRepository) ListPools(context.Context) ([]volumeapi.Pool, error) 
 	return m.pools, m.poolsErr
 }
 
+func (m *memoryRepository) RemovePoolFinalizer(_ context.Context, name, uid string) error {
+	m.removed = append(m.removed, name+"/"+uid)
+	return nil
+}
+
 func TestCheckAllowsEmptyCluster(t *testing.T) {
 	checker := &Checker{Client: fake.NewClientset(), Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	report, err := checker.Check(context.Background())
@@ -74,11 +80,27 @@ func TestCheckAllowsEmptyCluster(t *testing.T) {
 	}
 }
 
+func TestReleasePoolProtectionUsesExactRegisteredIdentity(t *testing.T) {
+	repository := &memoryRepository{pools: []volumeapi.Pool{
+		{Name: "protected", UID: "protected-uid", Finalizers: []string{PoolProtectionFinalizer}},
+		{Name: "plain", UID: "plain-uid"},
+	}}
+	checker := &Checker{Volumes: repository}
+	if err := checker.ReleasePoolProtection(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.removed) != 1 || repository.removed[0] != "protected/protected-uid" {
+		t.Fatalf("removed=%v", repository.removed)
+	}
+}
+
 func TestCheckPoolDeleteAllowsExactEmptyPoolWhileOtherPoolsRemainActive(t *testing.T) {
 	now := time.Date(2026, time.September, 12, 7, 0, 0, 0, time.UTC)
 	poolA := volumeapi.Pool{
 		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1,
-		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true}},
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1,
+			Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionIdentityReleased, Status: metav1.ConditionTrue, ObservedGeneration: 1, Reason: "PoolIdentityReleased"}},
+			Inventory:  &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true}},
 	}
 	poolB := volumeapi.Pool{
 		Name: "pool-b", UID: "pool-b-uid", NodeName: "node-b", Generation: 1,
@@ -101,9 +123,13 @@ func TestCheckPoolDeleteAllowsExactEmptyPoolWhileOtherPoolsRemainActive(t *testi
 	cleanups := cleanupRepository{items: []cleanupapi.Cleanup{{Name: "other", Spec: cleanupapi.Spec{Target: volume.CopyIdentity{PoolName: poolB.Name, PoolUID: poolB.UID}}}}}
 	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanups, StorageClassName: "shiftpv", Namespace: "shiftpv-system", Now: func() time.Time { return now }}
 
-	report, err := checker.CheckPoolDelete(context.Background(), poolA.Name, types.UID(poolA.UID))
+	report, err := checker.CheckPoolDeleteAfter(context.Background(), poolA.Name, types.UID(poolA.UID), now.Add(-time.Second))
 	if err != nil || !report.Safe() {
 		t.Fatalf("empty Pool deletion blockers=%#v err=%v", report.Blockers, err)
+	}
+	report, err = checker.CheckPoolDeleteAfter(context.Background(), poolA.Name, types.UID(poolA.UID), now)
+	if err != nil || !report.WaitingForInventory() {
+		t.Fatalf("pre-delete Pool inventory report=%#v err=%v", report.Blockers, err)
 	}
 }
 
@@ -122,9 +148,13 @@ func TestCheckPoolDeleteBlocksEveryTargetPoolDependency(t *testing.T) {
 			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
 		}}, Data: map[string]string{"volumeID": "data", "nodeName": target.NodeName}},
 	)
+	foreignCopy := volume.CopyIdentity{PoolName: "pool-b", PoolUID: "pool-b-uid", NodeName: "node-b"}
 	repository := &memoryRepository{
-		pools:   []volumeapi.Pool{target},
-		volumes: map[string]volumeapi.State{"data": {OwnerNode: target.NodeName, CurrentCopy: &currentCopy}},
+		pools: []volumeapi.Pool{target},
+		volumes: map[string]volumeapi.State{
+			"data":              {OwnerNode: target.NodeName, CurrentCopy: &currentCopy},
+			"foreign-published": {OwnerNode: "node-b", CurrentCopy: &foreignCopy, PublishedNodes: []string{target.NodeName}},
+		},
 		moves: []volumeapi.Move{{
 			Name: "move-data", Spec: volumeapi.MoveSpec{VolumeID: "data", SourceNode: target.NodeName}, Status: volumeapi.MoveStatus{Phase: "Copying", SourceCopy: &currentCopy},
 		}},
@@ -134,18 +164,18 @@ func TestCheckPoolDeleteBlocksEveryTargetPoolDependency(t *testing.T) {
 	}}}
 	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanups, Namespace: "shiftpv-system", Now: func() time.Time { return now }}
 
-	report, err := checker.CheckPoolDelete(context.Background(), target.Name, types.UID(target.UID))
+	report, err := checker.CheckPoolDeleteAfter(context.Background(), target.Name, types.UID(target.UID), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := blockersText(report.Blockers)
-	for _, expected := range []string{"PersistentVolume//pv-data/", "ShiftPVCleanup//cleanup-data/", "ShiftPVMove//move-data/", "ShiftPVPoolCopy//pool-a/", "ShiftPVVolume//data/", "VolumeReservation/shiftpv-system/data/"} {
+	for _, expected := range []string{"PersistentVolume//pv-data/", "ShiftPVCleanup//cleanup-data/", "ShiftPVMove//move-data/", "ShiftPVPoolCopy//pool-a/", "ShiftPVVolume//data/", "ShiftPVVolume//foreign-published/", "VolumeReservation/shiftpv-system/data/"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("Pool blockers do not contain %q: %s", expected, joined)
 		}
 	}
 
-	if _, err := checker.CheckPoolDelete(context.Background(), target.Name, "replacement-uid"); err == nil || !strings.Contains(err.Error(), "identity changed") {
+	if _, err := checker.CheckPoolDeleteAfter(context.Background(), target.Name, "replacement-uid", time.Time{}); err == nil || !strings.Contains(err.Error(), "identity changed") {
 		t.Fatalf("Pool UID mismatch error = %v", err)
 	}
 }
@@ -339,6 +369,31 @@ func TestCheckRequiresEmptyInventoryObservedAfterQuiesce(t *testing.T) {
 	repository.poolsErr = errors.New("Pool API unavailable")
 	if _, err := checker.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "Pool API unavailable") {
 		t.Fatalf("Pool API failure did not close uninstall gate: %v", err)
+	}
+}
+
+func TestCheckWaitsForDeletingPoolIdentityRelease(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 10, 0, 0, 0, time.UTC)
+	deletedAt := metav1.NewTime(now.Add(-time.Minute))
+	pool := volumeapi.Pool{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", Generation: 1, DeletionTimestamp: &deletedAt,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true}},
+	}
+	repository := &memoryRepository{pools: []volumeapi.Pool{pool}}
+	checker := &Checker{
+		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Now: func() time.Time { return now },
+	}
+	report, err := checker.CheckAfter(context.Background(), deletedAt.Time)
+	if err != nil || report.Safe() || !report.WaitingForInventory() || len(report.Blockers) != 1 || report.Blockers[0].Kind != "ShiftPVPoolIdentity" {
+		t.Fatalf("retained Pool identity report=%#v err=%v", report, err)
+	}
+	repository.pools[0].Status.Conditions = []metav1.Condition{{
+		Type: volumeapi.PoolConditionIdentityReleased, Status: metav1.ConditionTrue, ObservedGeneration: 1, Reason: "PoolIdentityReleased",
+	}}
+	report, err = checker.CheckAfter(context.Background(), deletedAt.Time)
+	if err != nil || !report.Safe() {
+		t.Fatalf("released Pool identity report=%#v err=%v", report, err)
 	}
 }
 

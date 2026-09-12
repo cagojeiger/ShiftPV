@@ -422,10 +422,14 @@ sequenceDiagram
 보호 대상은 labeled CSI Deployment, DaemonSet, Service, ServiceAccount, RBAC, StorageClass,
 `CSIDriver`, ShiftPV CRD와 모든 `ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`, `ShiftPVCleanup`이다. 정상 CSI
 수명주기에서는 chart가 지정한 controller ServiceAccount만 Volume, Move, Cleanup을 정리한다.
-Pool 등록 해제는 exact Pool의 최신·완전한 inventory가 비어 있고 해당 PV, reservation, Volume,
-진행 중 Move, Cleanup 참조가 없을 때 허용한다. 참조가 남은 Pool과 그 밖의 직접 `kubectl delete`는
-lifecycle admission이 차단한다. Admission은 read-only이므로 DELETE 또는 dry-run DELETE 자체가 제거
-permit을 만들지 않는다.
+Controller는 Pool에 protection finalizer를 설치한다. `kubectl delete shiftpvpool/<name>`은 Pool을
+`PoolDeregistering`으로 전환해 신규 provisioning·이동 대상에서 제외한다. node inventory와 cleanup은
+계속되며, deletion timestamp 이후의 최신·완전한 inventory가 비고 해당 exact Pool UID를 가리키는 PV,
+reservation, Volume, 진행 중 Move, Cleanup이 없어지면 controller가 exact UID의 identity 해제를 승인한다.
+Node는 filesystem lock 안에서 empty Pool을 재확인하고 identity marker를 해제해 상태로 보고하며,
+controller가 이를 확인한 뒤 finalizer를 제거한다. 같은 빈 경로는 새 Pool UID로 다시 등록할 수 있다. 보호되지 않은 Pool
+삭제, 외부 finalizer 제거와 그 밖의 직접 `kubectl delete`는 lifecycle admission이 차단한다. Admission은 read-only이므로
+DELETE 또는 dry-run DELETE 자체가 제거 permit을 만들지 않는다.
 
 정상 제거:
 
@@ -455,6 +459,8 @@ helm rollback <release> <blocked-revision> --namespace <namespace> --no-hooks --
 5분 동안 유지되는 quiescing/granted 상태는 현재 `CSIDriver` UID에 결합된다. 재설치는 새 UID와
 새 lifecycle로 시작한다. 검사 실패는 quiescing을 취소하고 Controller reconciliation을 복구한다.
 Argo CD mode는 5초 뒤 새 bounded 시도를 시작하고 Helm mode는 즉시 실패를 반환한다.
+검사가 안전하게 끝나면 guard가 Pool protection finalizer를 exact UID 기준으로 해제한 뒤 chart 제거를
+허용한다. 따라서 정상 uninstall은 CRD 밖에 dangling finalizer를 남기지 않는다.
 
 Emergency recovery는 Helm hook 우회 전에 lifecycle admission을 명시적으로 제거한다.
 

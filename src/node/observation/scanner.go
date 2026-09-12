@@ -35,6 +35,18 @@ type Scanner struct {
 	Limit        int
 }
 
+func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
+	if s == nil || s.Installation == nil || !filepath.IsAbs(s.HostRoot) || pool.UID == "" {
+		return ownership.ErrIdentity
+	}
+	installationID, err := s.Installation.InstallationID(ctx)
+	if err != nil {
+		return err
+	}
+	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
+	return ownership.ReleaseEmptyPool(ctx, root, ownership.PoolIdentity{InstallationID: installationID, PoolUID: pool.UID})
+}
+
 func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) volumeapi.PoolInventory {
 	result := volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now.UTC())}
 	if s == nil || s.Installation == nil || s.Publications == nil || !filepath.IsAbs(s.HostRoot) || !filepath.IsAbs(s.TargetRoot) || pool.UID == "" || s.Limit < 1 || s.Limit > 256 {

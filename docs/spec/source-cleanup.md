@@ -146,9 +146,14 @@ dependency다. Exact cleanup의 `Completed` 정산 뒤 reservation이 해제되�
 Uninstall guard는 provisioning quiesce 뒤의 fresh·valid·complete Pool inventory에서 copy가 0개인 것도
 확인한다. 조건을 충족하지 않은 snapshot의 copy 목록은 부재 또는 존재의 최종 증거로 사용하지 않고
 새 inventory를 기다린다. ShiftPV CR 삭제도 lifecycle admission 대상이며, 정상 CSI 정리를 수행하는
-controller identity만 Volume, Move, Cleanup 삭제를 독립적으로 진행한다. Exact UID의 Pool은 최신의
-빈 inventory와 해당 Pool을 가리키는 lifecycle 참조가 모두 없을 때만 등록 해제된다. Helm pre-delete와
-Argo CD lifecycle admission은 같은 dependency 판정을 사용한다.
+controller identity만 Volume, Move, Cleanup 삭제를 독립적으로 진행한다. Pool 삭제 요청은 protection
+finalizer가 수락해 먼저 `PoolDeregistering`으로 전환한다. 이 Pool은 신규 배치에서 제외되지만 node
+inventory 관측과 exact cleanup은 계속된다. Controller는 deletion timestamp 이후의 최신·완전한 빈
+inventory와 해당 exact Pool UID를 가리키는 lifecycle 참조가 모두 해소되기를 기다린 뒤 identity 해제를
+승인한다. Node는 filesystem lock 안에서 관리 data directory와 copy marker가 모두 빈 것을 다시 확인한
+뒤 exact `.shiftpv/pool.json`만 해제하고 `IdentityReleased` 상태를 기록한다. Controller는 이 상태를
+확인한 뒤 finalizer를 해제한다. 같은 경로는 새 Pool UID로 다시 등록할 수 있다.
+Helm pre-delete와 Argo CD lifecycle admission은 같은 dependency 판정을 사용한다.
 
 관측 지표는 [`metrics.md`](metrics.md), 전체 이동 순서는
 [`volume-mobility.md`](volume-mobility.md), 운영 명령은

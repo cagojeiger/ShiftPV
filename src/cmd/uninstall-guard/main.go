@@ -124,6 +124,9 @@ func run(ctx context.Context, checker *uninstallcheck.Checker, permit *uninstall
 	if !report.Safe() {
 		return fmt.Errorf("dependent storage resources still exist:\n%s", formatBlockers(report))
 	}
+	if err := checker.ReleasePoolProtection(ctx); err != nil {
+		return fmt.Errorf("release Pool deletion protection: %w", err)
+	}
 	if err := permit.DisableValidation(ctx, validationWebhook); err != nil {
 		return fmt.Errorf("disable lifecycle validation for teardown: %w", err)
 	}

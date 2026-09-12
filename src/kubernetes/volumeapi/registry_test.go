@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -587,9 +588,13 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 	_ = unstructured.SetNestedMap(truncated.Object, map[string]any{
 		"observedAt": now.Format(time.RFC3339), "valid": true, "truncated": true,
 	}, "status", "inventory")
+	deleting := pool("deleting", "node-deleting")
+	deletionTime := metav1.NewTime(now.Add(-time.Second))
+	deleting.SetDeletionTimestamp(&deletionTime)
+	deleting.SetFinalizers([]string{PoolProtectionFinalizer})
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		PoolResource: "ShiftPVPoolList",
-	}, ready, stale, outdated, conditionOutdated, pending, missingInventory, invalidInventory, staleInventory, truncated)
+	}, ready, stale, outdated, conditionOutdated, pending, missingInventory, invalidInventory, staleInventory, truncated, deleting)
 	registry := &Registry{Client: client, Now: func() time.Time { return now }}
 
 	pools, err := registry.ReadyPools(context.Background())
@@ -600,7 +605,7 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 		t.Fatalf("ready pools = %#v", pools)
 	}
 	nodes, err := registry.PoolNodes(context.Background())
-	if err != nil || len(nodes) != 9 {
+	if err != nil || len(nodes) != 10 || !slices.Contains(nodes, "node-deleting") {
 		t.Fatalf("registered topology nodes = %#v err=%v", nodes, err)
 	}
 	if _, err := registry.ReadyPoolForNode(context.Background(), "node-stale"); !errors.Is(err, ErrPoolNotReady) {
@@ -608,6 +613,9 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 	}
 	if _, err := registry.ReadyPoolForNode(context.Background(), "node-truncated"); !errors.Is(err, ErrPoolNotReady) || !strings.Contains(err.Error(), "InventoryTruncated") {
 		t.Fatalf("truncated pool error = %v", err)
+	}
+	if _, err := registry.ReadyPoolForNode(context.Background(), "node-deleting"); !errors.Is(err, ErrPoolNotReady) || !strings.Contains(err.Error(), "PoolDeregistering") {
+		t.Fatalf("deleting pool error = %v", err)
 	}
 	for node, reason := range map[string]string{
 		"node-missing-inventory": "InventoryMissing",
@@ -617,6 +625,83 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 		if _, err := registry.ReadyPoolForNode(context.Background(), node); !errors.Is(err, ErrPoolNotReady) || !strings.Contains(err.Error(), reason) {
 			t.Fatalf("%s pool error = %v", reason, err)
 		}
+	}
+}
+
+func TestRegistryMaintainsExactPoolProtectionFinalizer(t *testing.T) {
+	object := pool("pool-a", "node-a")
+	object.SetUID("pool-a-uid")
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		PoolResource: "ShiftPVPoolList",
+	}, object)
+	registry := &Registry{Client: client}
+	ctx := context.Background()
+
+	if err := registry.EnsurePoolFinalizer(ctx, "pool-a", "pool-a-uid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.EnsurePoolFinalizer(ctx, "pool-a", "pool-a-uid"); err != nil {
+		t.Fatalf("idempotent ensure: %v", err)
+	}
+	current, err := client.Resource(PoolResource).Get(ctx, "pool-a", metav1.GetOptions{})
+	if err != nil || !reflect.DeepEqual(current.GetFinalizers(), []string{PoolProtectionFinalizer}) {
+		t.Fatalf("finalizers=%v err=%v", current.GetFinalizers(), err)
+	}
+	if err := registry.ApprovePoolIdentityRelease(ctx, "pool-a", "pool-a-uid"); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("active Pool identity release was approved: %v", err)
+	}
+	deletionTime := metav1.Now()
+	current.SetDeletionTimestamp(&deletionTime)
+	if _, err := client.Resource(PoolResource).Update(ctx, current, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.ApprovePoolIdentityRelease(ctx, "pool-a", "replacement-uid"); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("replacement Pool identity release was approved: %v", err)
+	}
+	if err := registry.ApprovePoolIdentityRelease(ctx, "pool-a", "pool-a-uid"); err != nil {
+		t.Fatal(err)
+	}
+	current, err = client.Resource(PoolResource).Get(ctx, "pool-a", metav1.GetOptions{})
+	if err != nil || current.GetAnnotations()[PoolIdentityReleaseAnnotation] != "pool-a-uid" {
+		t.Fatalf("release approval=%v err=%v", current.GetAnnotations(), err)
+	}
+	if err := registry.RemovePoolFinalizer(ctx, "pool-a", "replacement-uid"); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("replacement Pool removed finalizer: %v", err)
+	}
+	if err := registry.RemovePoolFinalizer(ctx, "pool-a", "pool-a-uid"); err != nil {
+		t.Fatal(err)
+	}
+	current, err = client.Resource(PoolResource).Get(ctx, "pool-a", metav1.GetOptions{})
+	if err != nil || len(current.GetFinalizers()) != 0 {
+		t.Fatalf("finalizers=%v err=%v", current.GetFinalizers(), err)
+	}
+}
+
+func TestTerminatingPoolSeparatesPlacementFromExactCleanup(t *testing.T) {
+	now := time.Date(2026, 9, 12, 9, 0, 0, 0, time.UTC)
+	deletionTime := metav1.NewTime(now.Add(-time.Second))
+	pool := Pool{
+		Name: "pool", UID: "pool-uid", Generation: 2, DeletionTimestamp: &deletionTime,
+		Status: PoolStatus{
+			ObservedGeneration: 2, LastProbeTime: metav1.NewTime(now),
+			Conditions: []metav1.Condition{
+				{Type: PoolConditionReady, Status: metav1.ConditionFalse, Reason: "PoolDeregistering", ObservedGeneration: 2},
+				{Type: PoolConditionAccessible, Status: metav1.ConditionTrue, Reason: "DirectoryAccessible", ObservedGeneration: 2},
+				{Type: PoolConditionWritable, Status: metav1.ConditionTrue, Reason: "DirectoryWritable", ObservedGeneration: 2},
+				{Type: PoolConditionCapacityReadable, Status: metav1.ConditionTrue, Reason: "CapacityReadable", ObservedGeneration: 2},
+			},
+		},
+	}
+	if ready, reason := pool.ReadyAt(now, time.Minute); ready || reason != "PoolDeregistering" {
+		t.Fatalf("placement readiness = %v, %s", ready, reason)
+	}
+	if ready, reason := pool.CleanupReadyAt(now, time.Minute); !ready || reason != "PoolCleanupReady" {
+		t.Fatalf("cleanup readiness = %v, %s", ready, reason)
+	}
+	pool.Status.Conditions[1].Status = metav1.ConditionFalse
+	pool.Status.Conditions[1].Reason = "PathMissing"
+	if ready, reason := pool.CleanupReadyAt(now, time.Minute); ready || reason != "PathMissing" {
+		t.Fatalf("failed cleanup readiness = %v, %s", ready, reason)
 	}
 }
 

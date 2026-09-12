@@ -33,6 +33,7 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	lifecycleadmission "github.com/cagojeiger/ShiftPV/src/lifecycle/admission"
 	cleanupcontroller "github.com/cagojeiger/ShiftPV/src/lifecycle/cleanupcontroller"
+	poolcontroller "github.com/cagojeiger/ShiftPV/src/lifecycle/poolcontroller"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
 	"github.com/cagojeiger/ShiftPV/src/metrics"
 	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
@@ -140,6 +141,10 @@ func main() {
 	cleanupReconciler := &cleanupcontroller.Reconciler{
 		Store: cleanupStore, Operator: operator, Client: client, Namespace: *namespace, Inventory: volumeRegistry, Interval: 30 * time.Second,
 	}
+	lifecycleChecker := &uninstallcheck.Checker{
+		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassName: *storageClassName, Namespace: *namespace,
+	}
+	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, Interval: 2 * time.Second}
 	controllerService := &controllercsi.Service{
 		Client: client, Namespace: *namespace, Operator: operator, Volumes: volumeRegistry,
 		CapacityPools: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
@@ -147,9 +152,10 @@ func main() {
 	}
 	identityService := &identity.Service{Version: version}
 
-	errCh := make(chan error, 6)
+	errCh := make(chan error, 7)
 	go func() { errCh <- quiesceGate.Run(ctx) }()
 	go func() { errCh <- cleanupReconciler.Run(ctx) }()
+	go func() { errCh <- poolLifecycleReconciler.Run(ctx) }()
 	go func() {
 		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {
 			csi.RegisterIdentityServer(server, identityService)
@@ -202,10 +208,9 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", &admission.Handler{Client: client, Volumes: volumeRegistry})
-	mux.Handle("/validate-delete", &lifecycleadmission.Handler{Checker: &uninstallcheck.Checker{
-		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassName: *storageClassName, Namespace: *namespace,
-	}, Permit: &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName},
-		TrustedRuntimeDeleter: "system:serviceaccount:" + *namespace + ":" + *controllerServiceAccount})
+	mux.Handle("/validate-delete", &lifecycleadmission.Handler{Checker: lifecycleChecker,
+		Permit:            &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName},
+		TrustedController: "system:serviceaccount:" + *namespace + ":" + *controllerServiceAccount})
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
 	webhookServer = &http.Server{Addr: *webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}
 	go func() {

@@ -8,7 +8,8 @@ fail-closed hook plus authoritative lifecycle-admission contract:
 1. An Application with no dependent ShiftPV storage is deleted successfully.
 2. An Application with a mounted ShiftPV volume remains in deletion while the
    `argocd` mode guard Job stays Running and lifecycle admission rejects
-   protected resource deletion.
+   protected resource deletion. The active Pool retains controller-owned
+   deletion protection, including rejection of direct finalizer removal.
 3. The Controller, Node Plugin, StorageClass, and mounted checksum remain intact
    after that denial.
 4. Removing the PVC/PV/Volume blockers lets the running Job complete a fresh

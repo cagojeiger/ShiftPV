@@ -20,16 +20,11 @@ import (
 )
 
 type fakeChecker struct {
-	report     uninstallcheck.Report
-	err        error
-	poolReport uninstallcheck.Report
-	poolErr    error
+	report uninstallcheck.Report
+	err    error
 }
 
 func (f fakeChecker) Check(context.Context) (uninstallcheck.Report, error) { return f.report, f.err }
-func (f fakeChecker) CheckPoolDelete(context.Context, string, types.UID) (uninstallcheck.Report, error) {
-	return f.poolReport, f.poolErr
-}
 
 type fakePermit struct {
 	granted bool
@@ -40,7 +35,7 @@ func (f fakePermit) Granted(context.Context) (bool, error) { return f.granted, f
 
 func TestAdmitRuntimeDeleteRequiresPermitExceptForTrustedController(t *testing.T) {
 	trusted := "system:serviceaccount:shiftpv-system:shiftpv-controller"
-	handler := &Handler{TrustedRuntimeDeleter: trusted}
+	handler := &Handler{TrustedController: trusted}
 	request := &admissionv1.AdmissionRequest{
 		UID:       types.UID("runtime-delete"),
 		Operation: admissionv1.Delete,
@@ -70,6 +65,50 @@ func TestAdmitRuntimeDeleteRequiresPermitExceptForTrustedController(t *testing.T
 	response = handler.Admit(context.Background(), request)
 	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "not configured") {
 		t.Fatalf("untrusted runtime deletion bypassed lifecycle protection: %#v", response)
+	}
+}
+
+func TestAdmitPoolProtectionReleaseRequiresTrustedController(t *testing.T) {
+	trusted := "system:serviceaccount:shiftpv-system:shiftpv-controller"
+	request := poolUpdateRequest(true, false)
+	response := (&Handler{}).Admit(context.Background(), request)
+	if response.Allowed {
+		t.Fatalf("unconfigured handler trusted an empty user: %#v", response)
+	}
+
+	response = (&Handler{TrustedController: trusted}).Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "trusted controller") {
+		t.Fatalf("untrusted finalizer removal response = %#v", response)
+	}
+
+	request.UserInfo.Username = trusted
+	response = (&Handler{TrustedController: trusted}).Admit(context.Background(), request)
+	if !response.Allowed {
+		t.Fatalf("trusted finalizer removal denied: %#v", response)
+	}
+
+	request = poolUpdateRequest(true, true)
+	response = (&Handler{TrustedController: trusted}).Admit(context.Background(), request)
+	if !response.Allowed {
+		t.Fatalf("Pool update preserving finalizer denied: %#v", response)
+	}
+
+	request = poolUpdateRequest(true, true)
+	request.Object = poolObject(true, "pool-uid")
+	response = (&Handler{TrustedController: trusted}).Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "trusted controller") {
+		t.Fatalf("untrusted Pool identity release approval response = %#v", response)
+	}
+	request.UserInfo.Username = trusted
+	response = (&Handler{TrustedController: trusted}).Admit(context.Background(), request)
+	if !response.Allowed {
+		t.Fatalf("trusted Pool identity release approval denied: %#v", response)
+	}
+
+	request.OldObject.Raw = nil
+	response = (&Handler{TrustedController: trusted}).Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "object is missing") {
+		t.Fatalf("Pool update without old object response = %#v", response)
 	}
 }
 
@@ -104,22 +143,17 @@ func TestAdmitDeleteRequiresGrantedQuiescedTeardown(t *testing.T) {
 	}
 }
 
-func TestAdmitAllowsOnlyDependencyFreePoolDeregistration(t *testing.T) {
-	request := poolDeleteRequest("pool-a", "pool-uid")
+func TestAdmitStartsOnlyFinalizerProtectedPoolDeregistration(t *testing.T) {
+	request := poolDeleteRequest("pool-a", true)
 	response := (&Handler{Checker: fakeChecker{}, Permit: fakePermit{}}).Admit(context.Background(), request)
 	if !response.Allowed {
-		t.Fatalf("dependency-free Pool deletion denied: %#v", response)
+		t.Fatalf("finalizer-protected Pool deletion denied: %#v", response)
 	}
 
-	blocker := uninstallcheck.Blocker{Kind: "ShiftPVPoolCopy", Name: "pool-a"}
-	response = (&Handler{Checker: fakeChecker{poolReport: uninstallcheck.Report{Blockers: []uninstallcheck.Blocker{blocker}}}, Permit: fakePermit{}}).Admit(context.Background(), request)
-	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "ShiftPVPoolCopy pool-a") {
-		t.Fatalf("dependent Pool deletion response = %#v", response)
-	}
-
-	response = (&Handler{Checker: fakeChecker{poolErr: errors.New("inventory unavailable")}, Permit: fakePermit{}}).Admit(context.Background(), request)
-	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "inventory unavailable") {
-		t.Fatalf("Pool inspection failure response = %#v", response)
+	request = poolDeleteRequest("pool-a", false)
+	response = (&Handler{Checker: fakeChecker{}, Permit: fakePermit{}}).Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "install deletion protection") {
+		t.Fatalf("unprotected Pool deletion response = %#v", response)
 	}
 
 	request.OldObject.Raw = nil
@@ -129,15 +163,35 @@ func TestAdmitAllowsOnlyDependencyFreePoolDeregistration(t *testing.T) {
 	}
 }
 
-func poolDeleteRequest(name string, uid types.UID) *admissionv1.AdmissionRequest {
-	oldObject, _ := json.Marshal(map[string]any{"metadata": map[string]any{"uid": uid}})
+func poolDeleteRequest(name string, protected bool) *admissionv1.AdmissionRequest {
 	return &admissionv1.AdmissionRequest{
 		UID:       types.UID("pool-delete"),
 		Name:      name,
 		Operation: admissionv1.Delete,
 		Resource:  metav1.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvpools"},
-		OldObject: runtime.RawExtension{Raw: oldObject},
+		OldObject: poolObject(protected, ""),
 	}
+}
+
+func poolUpdateRequest(oldProtected, newProtected bool) *admissionv1.AdmissionRequest {
+	return &admissionv1.AdmissionRequest{
+		UID: types.UID("pool-update"), Name: "pool-a", Operation: admissionv1.Update,
+		Resource:  metav1.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvpools"},
+		OldObject: poolObject(oldProtected, ""), Object: poolObject(newProtected, ""),
+	}
+}
+
+func poolObject(protected bool, releaseApproval string) runtime.RawExtension {
+	finalizers := []string{}
+	if protected {
+		finalizers = append(finalizers, uninstallcheck.PoolProtectionFinalizer)
+	}
+	annotations := map[string]string{}
+	if releaseApproval != "" {
+		annotations[uninstallcheck.PoolIdentityReleaseAnnotation] = releaseApproval
+	}
+	raw, _ := json.Marshal(map[string]any{"metadata": map[string]any{"finalizers": finalizers, "annotations": annotations}})
+	return runtime.RawExtension{Raw: raw}
 }
 
 func TestAdmissionHTTPAndIgnoredOperations(t *testing.T) {

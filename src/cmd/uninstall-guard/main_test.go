@@ -27,10 +27,12 @@ type emptyVolumeRepository struct{}
 type emptyCleanupRepository struct{}
 
 type mutableVolumeRepository struct {
-	mu     sync.Mutex
-	once   sync.Once
-	listed chan struct{}
-	pools  []volumeapi.Pool
+	mu        sync.Mutex
+	once      sync.Once
+	listed    chan struct{}
+	pools     []volumeapi.Pool
+	removed   []string
+	removeErr error
 }
 
 func (emptyCleanupRepository) List(context.Context) ([]cleanupapi.Cleanup, error) { return nil, nil }
@@ -44,6 +46,7 @@ func (emptyVolumeRepository) ListMoves(context.Context) ([]volumeapi.Move, error
 func (emptyVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, error) {
 	return nil, nil
 }
+func (emptyVolumeRepository) RemovePoolFinalizer(context.Context, string, string) error { return nil }
 
 func (m *mutableVolumeRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
 	return map[string]volumeapi.State{}, nil
@@ -71,6 +74,13 @@ func (m *mutableVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, 
 		}
 	})
 	return result, nil
+}
+
+func (m *mutableVolumeRepository) RemovePoolFinalizer(_ context.Context, name, uid string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removed = append(m.removed, name+"/"+uid)
+	return m.removeErr
 }
 
 func (m *mutableVolumeRepository) observeEmpty(at time.Time) {
@@ -108,12 +118,16 @@ func TestRunWaitsForEmptyPoolInventoryObservedAfterQuiesce(t *testing.T) {
 	go func() { _ = gate.Run(ctx) }()
 	repository := &mutableVolumeRepository{listed: make(chan struct{}), pools: []volumeapi.Pool{{
 		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/var/lib/shiftpv", Generation: 1,
+		Finalizers: []string{volumeapi.PoolProtectionFinalizer},
 		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{
 			ObservedAt: metav1.NewTime(time.Now().Add(-time.Minute)), Valid: true,
 			Copies: []volumeapi.CopyObservation{{Marker: "copy-before-quiesce.json", Present: true}},
 		}},
 	}}}
-	checker := &uninstallcheck.Checker{Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
+	checker := &uninstallcheck.Checker{
+		Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Now: func() time.Time { return time.Now().Add(2 * time.Minute) },
+	}
 	go func() {
 		<-repository.listed
 		repository.observeEmpty(time.Now())
@@ -124,6 +138,40 @@ func TestRunWaitsForEmptyPoolInventoryObservedAfterQuiesce(t *testing.T) {
 	}
 	if granted, err := store.Granted(context.Background()); err != nil || !granted {
 		t.Fatalf("Granted = %v, %v", granted, err)
+	}
+	if len(repository.removed) != 1 || repository.removed[0] != "pool-a/pool-uid" {
+		t.Fatalf("removed Pool protections = %v", repository.removed)
+	}
+}
+
+func TestRunCancelsQuiesceWhenPoolProtectionReleaseFails(t *testing.T) {
+	client := uninstallClient()
+	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
+	gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() { _ = gate.Run(ctx) }()
+	repository := &mutableVolumeRepository{removeErr: fmt.Errorf("injected finalizer release failure"), pools: []volumeapi.Pool{{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/var/lib/shiftpv", Generation: 1,
+		Finalizers: []string{volumeapi.PoolProtectionFinalizer},
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{
+			ObservedAt: metav1.NewTime(time.Now().Add(time.Minute)), Valid: true,
+		}},
+	}}}
+	checker := &uninstallcheck.Checker{
+		Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Now: func() time.Time { return time.Now().Add(2 * time.Minute) },
+	}
+
+	err := run(ctx, checker, store, "shiftpv-lifecycle")
+	if err == nil || !strings.Contains(err.Error(), "injected finalizer release failure") {
+		t.Fatalf("run error = %v", err)
+	}
+	if _, quiescing, err := store.Quiescing(context.Background()); err != nil || quiescing {
+		t.Fatalf("quiesce after finalizer release failure = %v, %v", quiescing, err)
+	}
+	if len(repository.removed) != 1 || repository.removed[0] != "pool-a/pool-uid" {
+		t.Fatalf("removed Pool protections = %v", repository.removed)
 	}
 }
 

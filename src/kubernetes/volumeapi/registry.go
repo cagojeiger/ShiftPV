@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -34,8 +35,11 @@ var (
 )
 
 const (
-	PoolConditionReady      = "Ready"
-	PoolConditionAccessible = "Accessible"
+	PoolConditionReady            = "Ready"
+	PoolConditionAccessible       = "Accessible"
+	PoolConditionIdentityReleased = "IdentityReleased"
+	PoolProtectionFinalizer       = "shiftpv.io/pool-protection"
+	PoolIdentityReleaseAnnotation = "shiftpv.io/release-pool-identity"
 	// PoolConditionMounted is retained so newer node plugins can remove the
 	// obsolete condition written by releases that required an exact mount point.
 	PoolConditionMounted           = "Mounted"
@@ -109,13 +113,16 @@ func CreationOperationID(volumeUID string) (string, error) {
 }
 
 type Pool struct {
-	Name          string
-	UID           string
-	NodeName      string
-	MountPath     string
-	CapacityLimit string
-	Generation    int64
-	Status        PoolStatus
+	Name                    string
+	UID                     string
+	NodeName                string
+	MountPath               string
+	CapacityLimit           string
+	Generation              int64
+	DeletionTimestamp       *metav1.Time
+	Finalizers              []string
+	IdentityReleaseApproval string
+	Status                  PoolStatus
 }
 
 type PoolStatus struct {
@@ -748,7 +755,99 @@ func (r *Registry) SetPoolStatus(ctx context.Context, name, uid, nodeName string
 	})
 }
 
+func (r *Registry) EnsurePoolFinalizer(ctx context.Context, name, uid string) error {
+	return r.updatePoolFinalizer(ctx, name, uid, true)
+}
+
+func (r *Registry) RemovePoolFinalizer(ctx context.Context, name, uid string) error {
+	return r.updatePoolFinalizer(ctx, name, uid, false)
+}
+
+func (r *Registry) ApprovePoolIdentityRelease(ctx context.Context, name, uid string) error {
+	if err := r.validate(); err != nil {
+		return err
+	}
+	if name == "" || uid == "" {
+		return fmt.Errorf("ShiftPVPool name and UID are required")
+	}
+	resource := r.Client.Resource(PoolResource)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		object, err := resource.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("read ShiftPVPool identity release approval: %w", err)
+		}
+		if string(object.GetUID()) != uid {
+			return fmt.Errorf("%w: ShiftPVPool %q UID changed from %q to %q", ErrStateConflict, name, uid, object.GetUID())
+		}
+		if object.GetDeletionTimestamp() == nil {
+			return fmt.Errorf("%w: ShiftPVPool %q is not deleting", ErrStateConflict, name)
+		}
+		annotations := object.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		if annotations[PoolIdentityReleaseAnnotation] == uid {
+			return nil
+		}
+		annotations[PoolIdentityReleaseAnnotation] = uid
+		object.SetAnnotations(annotations)
+		if _, err := resource.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("approve ShiftPVPool identity release: %w", err)
+		}
+		return nil
+	})
+}
+
+func (r *Registry) updatePoolFinalizer(ctx context.Context, name, uid string, present bool) error {
+	if err := r.validate(); err != nil {
+		return err
+	}
+	if name == "" || uid == "" {
+		return fmt.Errorf("ShiftPVPool name and UID are required")
+	}
+	resource := r.Client.Resource(PoolResource)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		object, err := resource.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) && !present {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read ShiftPVPool finalizer: %w", err)
+		}
+		if string(object.GetUID()) != uid {
+			return fmt.Errorf("%w: ShiftPVPool %q UID changed from %q to %q", ErrStateConflict, name, uid, object.GetUID())
+		}
+		finalizers := object.GetFinalizers()
+		hasFinalizer := slices.Contains(finalizers, PoolProtectionFinalizer)
+		if present == hasFinalizer {
+			return nil
+		}
+		if present {
+			if object.GetDeletionTimestamp() != nil {
+				return fmt.Errorf("%w: ShiftPVPool %q is already deleting without protection", ErrStateConflict, name)
+			}
+			finalizers = append(finalizers, PoolProtectionFinalizer)
+		} else {
+			filtered := finalizers[:0]
+			for _, finalizer := range finalizers {
+				if finalizer != PoolProtectionFinalizer {
+					filtered = append(filtered, finalizer)
+				}
+			}
+			finalizers = filtered
+		}
+		object.SetFinalizers(finalizers)
+		if _, err := resource.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update ShiftPVPool finalizer: %w", err)
+		}
+		return nil
+	})
+}
+
 func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	if p.DeletionTimestamp != nil {
+		return false, "PoolDeregistering"
+	}
 	condition := meta.FindStatusCondition(p.Status.Conditions, PoolConditionReady)
 	if condition == nil || condition.Status != metav1.ConditionTrue {
 		if condition != nil && condition.Reason != "" {
@@ -765,6 +864,37 @@ func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
 	return true, condition.Reason
 }
 
+// CleanupReadyAt keeps an exact, already-approved cleanup executable while a
+// Pool is terminating. New placement continues to use ReadyAt and remains
+// closed for the same Pool.
+func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	if p.DeletionTimestamp == nil {
+		return p.ReadyAt(now, staleAfter)
+	}
+	if p.Status.ObservedGeneration != p.Generation {
+		return false, "ProbeOutdated"
+	}
+	for _, conditionType := range []string{PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable} {
+		condition := meta.FindStatusCondition(p.Status.Conditions, conditionType)
+		if condition == nil {
+			return false, "ProbePending"
+		}
+		if condition.ObservedGeneration != p.Generation {
+			return false, "ProbeOutdated"
+		}
+		if condition.Status != metav1.ConditionTrue {
+			if condition.Reason != "" {
+				return false, condition.Reason
+			}
+			return false, "ProbeFailed"
+		}
+	}
+	if p.Status.LastProbeTime.IsZero() || staleAfter <= 0 || now.Sub(p.Status.LastProbeTime.Time) > staleAfter || now.Before(p.Status.LastProbeTime.Time) {
+		return false, "ProbeStale"
+	}
+	return true, "PoolCleanupReady"
+}
+
 func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 	status := PoolStatus{}
 	if data, found, err := unstructured.NestedMap(object.Object, "status"); err != nil {
@@ -779,7 +909,8 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 	capacityLimit, _, _ := unstructured.NestedString(object.Object, "spec", "capacity", "limit")
 	return Pool{
 		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, MountPath: filepath.Clean(mountPath),
-		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), Status: status,
+		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), DeletionTimestamp: object.GetDeletionTimestamp(),
+		Finalizers: append([]string(nil), object.GetFinalizers()...), IdentityReleaseApproval: object.GetAnnotations()[PoolIdentityReleaseAnnotation], Status: status,
 	}, nil
 }
 

@@ -57,7 +57,7 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 		if staleAfter <= 0 {
 			staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 		}
-		if ready, reason := pool.ReadyAt(time.Now(), staleAfter); !ready {
+		if ready, reason := pool.CleanupReadyAt(time.Now(), staleAfter); !ready {
 			return cleanupapi.Cleanup{}, retryableError{err: fmt.Errorf("cleanup Pool %q is not ready: %s", pool.Name, reason)}
 		}
 	}

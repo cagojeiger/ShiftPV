@@ -97,6 +97,9 @@ Unit test는 다음 고비용 경계를 포함한다.
 | create/copy/promotion marker 경계 crash 복구와 active Move 외 unrecorded path 비채택 | `src/node/ownership/{store,transfer}_test.go`, `src/kubernetes/volumeapi/registry_test.go`, `src/mobility/controller/reconciler_test.go` |
 | inventory exact-limit와 overflow admission | `src/node/observation/scanner_test.go`, `src/kubernetes/volumeapi/registry_test.go` |
 | reservation·미완료 Cleanup의 Helm/Argo CD 제거 차단 | `TestCheckReportsEveryShiftPVDependency`, `TestCheckBlocksUnsettledCleanupContract` |
+| Pool 삭제의 exact UID 참조·post-delete inventory barrier | `src/lifecycle/uninstall/checker_test.go` |
+| Pool finalizer → identity 승인 → node release → finalizer 해제 | `src/lifecycle/poolcontroller/reconciler_test.go`, `src/pool/readiness/reconciler_test.go`, `src/node/ownership/pool_release_test.go` |
+| Pool 보호 metadata의 외부 변경 거부 | `src/lifecycle/admission/handler_test.go`, `src/webhook/certificate/manager_test.go` |
 | 완료 증거 저장 전 잠금·transfer resource 보존 | `TestCompletionConfirmationPrecedesResourceDeletionAndUnlock` |
 | CAS·journal·삭제 응답 유실과 반복 기록 실패 | `TestCompletionRecoversAcrossAPIFailureBoundaries` |
 | 완료 중 다른 owner·Move 잠금·phase 보존 | `TestCompletionRejectsConflictingAuthority` |
@@ -135,7 +138,7 @@ kind control-plane
 
 | Scenario | 검증 |
 |---|---|
-| Directory Pool | 기존 non-mount directory에서 provision, write, Retain 보존·명시적 폐기, move·cleanup |
+| Directory Pool | 기존 non-mount directory에서 provision, write, Retain 보존·명시적 폐기, Pool 삭제 fence·동일 경로 재등록, move·cleanup |
 | Metrics | 격리 Prometheus target 3개, 실제 copy 관측, CSI 호출, cleanup 후 예약·active Move 0 |
 | Capacity | 외부 사용량과 reservation으로 신규 claim 제어, 해제 용량 단일 반환 |
 | StorageClass | default와 명시 선택의 결정적 공존 |

@@ -2,12 +2,15 @@ package uninstall
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -18,12 +21,17 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
-const DriverName = "csi.shiftpv.io"
+const (
+	DriverName                    = "csi.shiftpv.io"
+	PoolProtectionFinalizer       = volumeapi.PoolProtectionFinalizer
+	PoolIdentityReleaseAnnotation = volumeapi.PoolIdentityReleaseAnnotation
+)
 
 type VolumeRepository interface {
 	ListVolumes(context.Context) (map[string]volumeapi.State, error)
 	ListMoves(context.Context) ([]volumeapi.Move, error)
 	ListPools(context.Context) ([]volumeapi.Pool, error)
+	RemovePoolFinalizer(context.Context, string, string) error
 }
 
 type CleanupRepository interface {
@@ -61,10 +69,30 @@ func (c *Checker) Check(ctx context.Context) (Report, error) {
 	return c.CheckAfter(ctx, time.Time{})
 }
 
-// CheckPoolDelete determines whether one exact Pool registration can be
+func (c *Checker) ReleasePoolProtection(ctx context.Context) error {
+	if c == nil || c.Volumes == nil {
+		return fmt.Errorf("uninstall checker is not configured")
+	}
+	pools, err := c.Volumes.ListPools(ctx)
+	if err != nil {
+		return fmt.Errorf("list ShiftPVPools: %w", err)
+	}
+	var result error
+	for _, pool := range pools {
+		if !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
+			continue
+		}
+		if err := c.Volumes.RemovePoolFinalizer(ctx, pool.Name, pool.UID); err != nil {
+			result = errors.Join(result, fmt.Errorf("release ShiftPVPool %q protection: %w", pool.Name, err))
+		}
+	}
+	return result
+}
+
+// CheckPoolDeleteAfter determines whether one exact Pool registration can be
 // removed without losing authority over a volume, move, cleanup, reservation,
 // PersistentVolume, or physical copy. Other Pools may remain in active use.
-func (c *Checker) CheckPoolDelete(ctx context.Context, poolName string, poolUID types.UID) (Report, error) {
+func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poolUID types.UID, inventoryAfter time.Time) (Report, error) {
 	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
 		return Report{}, fmt.Errorf("Pool deletion checker is not configured")
 	}
@@ -102,7 +130,7 @@ func (c *Checker) CheckPoolDelete(ctx context.Context, poolName string, poolUID 
 	if maxAge <= 0 {
 		maxAge = volumeapi.DefaultPoolReadinessStaleAfter
 	}
-	report.Blockers = append(report.Blockers, poolInventoryBlockers(*target, now, maxAge, time.Time{})...)
+	report.Blockers = append(report.Blockers, poolInventoryBlockers(*target, now, maxAge, inventoryAfter.UTC())...)
 
 	persistentVolumes, err := c.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -142,6 +170,7 @@ func (c *Checker) CheckPoolDelete(ctx context.Context, poolName string, poolUID 
 	}
 	for volumeID, state := range volumes {
 		usesPool := state.CurrentCopy != nil && state.CurrentCopy.PoolName == target.Name && state.CurrentCopy.PoolUID == target.UID
+		usesPool = usesPool || contains(state.PublishedNodes, target.NodeName)
 		if !usesPool && state.OwnerNode != target.NodeName {
 			continue
 		}
@@ -349,6 +378,16 @@ func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Rep
 	}
 	for _, pool := range pools {
 		report.Blockers = append(report.Blockers, poolInventoryBlockers(pool, now, maxAge, inventoryAfter.UTC())...)
+		if pool.DeletionTimestamp != nil {
+			released := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionIdentityReleased)
+			if released == nil || released.Status != metav1.ConditionTrue || released.ObservedGeneration != pool.Generation {
+				reason := "identity=retained"
+				if released != nil && released.Reason != "" {
+					reason = released.Reason
+				}
+				report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVPoolIdentity", Name: pool.Name, Reason: reason})
+			}
+		}
 	}
 
 	sort.Slice(report.Blockers, func(left, right int) bool {
@@ -364,7 +403,7 @@ func (r Report) WaitingForInventory() bool {
 		return false
 	}
 	for _, blocker := range r.Blockers {
-		if blocker.Kind != PoolInventoryBlockerKind {
+		if blocker.Kind != PoolInventoryBlockerKind && blocker.Kind != "ShiftPVPoolIdentity" {
 			return false
 		}
 	}

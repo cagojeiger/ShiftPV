@@ -71,7 +71,10 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 	if runtime.ObjectSelector != nil {
 		t.Fatalf("runtime CR objectSelector = %#v, want nil", runtime.ObjectSelector)
 	}
-	if len(runtime.Rules) != 1 || !reflect.DeepEqual(runtime.Rules[0].Rule.Resources, []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups"}) {
+	if len(runtime.Rules) != 2 || !reflect.DeepEqual(runtime.Rules[0].Operations, []admissionv1.OperationType{admissionv1.Delete}) ||
+		!reflect.DeepEqual(runtime.Rules[0].Rule.Resources, []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups"}) ||
+		!reflect.DeepEqual(runtime.Rules[1].Operations, []admissionv1.OperationType{admissionv1.Update}) ||
+		!reflect.DeepEqual(runtime.Rules[1].Rule.Resources, []string{"shiftpvpools"}) {
 		t.Fatalf("runtime CR rules = %#v", runtime.Rules)
 	}
 	crds := findValidationWebhook(t, validation, validationCRDWebhookName)

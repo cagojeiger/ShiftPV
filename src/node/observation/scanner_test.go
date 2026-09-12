@@ -29,6 +29,43 @@ type publications struct {
 
 func (p publications) HasPublishedTarget(string, string) (bool, error) { return p.published, p.err }
 
+func TestScannerReleasesExactEmptyPoolForReregistration(t *testing.T) {
+	host := t.TempDir()
+	root := filepath.Join(host, "pool")
+	if err := os.Mkdir(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	old := ownership.PoolIdentity{InstallationID: "installation", PoolUID: "old-pool-uid"}
+	store, err := ownership.Open(root, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scanner := &Scanner{HostRoot: host, Installation: installation{id: old.InstallationID}}
+	if err := scanner.ReleasePool(context.Background(), volumeapi.Pool{UID: old.PoolUID, MountPath: "/pool"}); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := ownership.Open(root, ownership.PoolIdentity{InstallationID: old.InstallationID, PoolUID: "new-pool-uid"})
+	if err != nil {
+		t.Fatalf("same path did not accept replacement Pool identity: %v", err)
+	}
+	if err := replacement.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScannerReleasePoolFailsClosedWithoutExactIdentity(t *testing.T) {
+	pool := volumeapi.Pool{UID: "pool-uid", MountPath: "/pool"}
+	if err := (*Scanner)(nil).ReleasePool(context.Background(), pool); !errors.Is(err, ownership.ErrIdentity) {
+		t.Fatalf("nil scanner error=%v", err)
+	}
+	if err := (&Scanner{HostRoot: "/host", Installation: installation{err: errors.New("identity unavailable")}}).ReleasePool(context.Background(), pool); err == nil || err.Error() != "identity unavailable" {
+		t.Fatalf("installation error=%v", err)
+	}
+}
+
 func TestScannerReportsExactCopiesAndPreservesUnrecordedPaths(t *testing.T) {
 	host := t.TempDir()
 	root := filepath.Join(host, "pool")

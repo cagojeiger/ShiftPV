@@ -15,7 +15,7 @@ ShiftPV/
 │   ├── cmd/{controller,node,uninstall-guard,volume-helper}/
 │   ├── csi/{controller,identity,node,server}/
 │   ├── kubernetes/{cleanupapi,helperpod,volumeapi}/
-│   ├── lifecycle/{admission,cleanupcontroller,uninstall}/
+│   ├── lifecycle/{admission,cleanupcontroller,poolcontroller,uninstall}/
 │   ├── metrics/
 │   ├── mobility/{admission,controller,fsm}/
 │   ├── node/{mount,observation,ownership}/
@@ -35,13 +35,14 @@ ShiftPV/
 | `src/kubernetes/helperpod` | node-bound filesystem effect Job |
 | `src/kubernetes/volumeapi` | Pool, Volume, Move persistence |
 | `src/lifecycle/cleanupcontroller` | observation → disposition → cleanup settlement |
+| `src/lifecycle/poolcontroller` | Pool protection → deregistration convergence |
 | `src/lifecycle/admission`, `uninstall` | safe removal policy |
 | `src/mobility/admission` | owner pin과 Placement Hold |
 | `src/mobility/controller` | Move observation과 action orchestration |
 | `src/mobility/fsm` | 외부 I/O 없는 state decision |
 | `src/node/mount` | bind mount와 target boundary |
 | `src/node/observation` | bounded Pool inventory |
-| `src/node/ownership` | copy marker, inode, lock, transfer, reclaim |
+| `src/node/ownership` | copy marker, inode, lock, transfer, reclaim, empty Pool identity release |
 | `src/pool/capacity` | statfs와 reservation admission |
 | `src/pool/readiness` | node-local Pool probe |
 | `src/metrics` | cached operational snapshot |
@@ -60,6 +61,10 @@ flowchart TB
     OWN --> FS[Registered Pool]
     OBS[node/observation] --> API
     API --> RECON[Cleanup reconciler]
+    API --> POOL[Pool lifecycle reconciler]
+    POOL -->|exact UID release approval| API
+    API --> READY[Pool readiness]
+    READY -->|locked empty check| OWN
 ```
 
 | 검증 | 위치 |

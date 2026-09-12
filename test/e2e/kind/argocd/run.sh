@@ -147,10 +147,14 @@ RESERVATION_UID=$(kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" -o json
 CHECKSUM_BEFORE=$(kubectl exec shiftpv-argocd-e2e -- sha256sum /data/payload | awk '{print $1}')
 CONTROLLER_SERVICE_ACCOUNT=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o jsonpath='{.spec.template.spec.serviceAccountName}')
 
-# Direct deletion cannot erase the Pool or volume ownership evidence. Runtime
-# cleanup performed by the trusted controller remains available independently.
-if kubectl delete shiftpvpool/worker --wait=false; then
-	echo "direct ShiftPVPool deletion bypassed lifecycle admission" >&2
+# Pool deletion is fenced by a controller-owned finalizer. This Application
+# test keeps the active Pool registered; directory-pool.sh proves terminating
+# Pools remain until exact storage dependencies converge.
+kubectl wait --for=jsonpath='{.metadata.finalizers[0]}'=shiftpv.io/pool-protection \
+	shiftpvpool/worker --timeout=2m
+if kubectl patch shiftpvpool/worker --type=json \
+	-p='[{"op":"remove","path":"/metadata/finalizers/0"}]'; then
+	echo "direct ShiftPVPool finalizer removal bypassed lifecycle admission" >&2
 	exit 1
 fi
 if kubectl delete customresourcedefinition/shiftpvpools.shiftpv.io --wait=false; then

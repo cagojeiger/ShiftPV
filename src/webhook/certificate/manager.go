@@ -405,14 +405,24 @@ func (m *Manager) ensureValidationWebhook(ctx context.Context, owner *storagev1.
 					Service:  &admissionv1.ServiceReference{Namespace: m.Config.Namespace, Name: m.Config.ServiceName, Path: &path, Port: &port},
 					CABundle: append([]byte(nil), caBundle...),
 				},
-				Rules: []admissionv1.RuleWithOperations{{
-					Operations: []admissionv1.OperationType{admissionv1.Delete},
-					Rule: admissionv1.Rule{
-						APIGroups:   []string{"shiftpv.io"},
-						APIVersions: []string{"v1alpha1"},
-						Resources:   []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups"},
+				Rules: []admissionv1.RuleWithOperations{
+					{
+						Operations: []admissionv1.OperationType{admissionv1.Delete},
+						Rule: admissionv1.Rule{
+							APIGroups:   []string{"shiftpv.io"},
+							APIVersions: []string{"v1alpha1"},
+							Resources:   []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups"},
+						},
 					},
-				}},
+					{
+						Operations: []admissionv1.OperationType{admissionv1.Update},
+						Rule: admissionv1.Rule{
+							APIGroups:   []string{"shiftpv.io"},
+							APIVersions: []string{"v1alpha1"},
+							Resources:   []string{"shiftpvpools"},
+						},
+					},
+				},
 			},
 			{
 				Name:                    validationCRDWebhookName,

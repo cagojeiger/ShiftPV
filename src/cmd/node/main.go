@@ -70,6 +70,7 @@ func main() {
 		HostRoot: *hostRoot, TargetRoot: *targetRoot, Installation: registry, Publications: binder, Limit: 256,
 	}
 	readinessReconciler.Inventory = inventoryScanner.Scan
+	readinessReconciler.Release = inventoryScanner.ReleasePool
 	var exporter *metrics.Exporter
 	if *metricsAddress != "" {
 		exporter = metrics.New("filesystem")

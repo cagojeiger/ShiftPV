@@ -16,27 +16,20 @@ MOBILITY_NAMESPACE=shiftpv-directory-mobility
 PV_NAME=
 VOLUME_ID=
 
-restore_default_pool() {
-	kubectl delete pod "${WORKLOAD}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-	kubectl delete pvc "${WORKLOAD}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-	kubectl delete namespace "${MOBILITY_NAMESPACE}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-	if [[ -n "${PV_NAME}" ]]; then
-		kubectl wait --for=delete "pv/${PV_NAME}" --timeout=2m >/dev/null 2>&1 || true
-	fi
-	kubectl delete storageclass "${STORAGE_CLASS}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-	kubectl delete shiftpvpool "${POOL_A_NAME}" "${POOL_B_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-	kubectl uncordon "${POOL_A_NODE}" >/dev/null 2>&1 || true
-	kubectl uncordon "${POOL_B_NODE}" >/dev/null 2>&1 || true
-	kubectl apply -f "${WORK_DIR}/pools.yaml" >/dev/null 2>&1 || true
+wait_for_pool_protection() {
+	local pool_name=$1
+	kubectl wait --for=jsonpath='{.metadata.finalizers[0]}'=shiftpv.io/pool-protection \
+		"shiftpvpool/${pool_name}" --timeout=2m
 }
-trap restore_default_pool EXIT
 
-# Register one ordinary root-filesystem directory Pool per Kind node.
-kubectl delete shiftpvpool worker-a worker-b --wait=true
-docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}"
-docker exec "${POOL_B_NODE}" test ! -e "${POOL_B_PATH}"
+wait_for_pool_inventory() {
+	local pool_name=$1
+	kubectl wait --for=jsonpath='{.status.inventory.valid}'=true \
+		"shiftpvpool/${pool_name}" --timeout=2m
+}
 
-kubectl apply -f - <<EOF
+apply_test_pools() {
+	kubectl apply -f - <<EOF
 apiVersion: shiftpv.io/v1alpha1
 kind: ShiftPVPool
 metadata:
@@ -57,6 +50,31 @@ spec:
   capacity:
     limit: 512Mi
 EOF
+}
+
+restore_default_pool() {
+	kubectl delete pod "${WORKLOAD}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kubectl delete pvc "${WORKLOAD}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kubectl delete namespace "${MOBILITY_NAMESPACE}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	if [[ -n "${PV_NAME}" ]]; then
+		kubectl wait --for=delete "pv/${PV_NAME}" --timeout=2m >/dev/null 2>&1 || true
+	fi
+	kubectl delete storageclass "${STORAGE_CLASS}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kubectl delete shiftpvpool "${POOL_A_NAME}" "${POOL_B_NAME}" --ignore-not-found --wait=true --timeout=30s >/dev/null 2>&1 || true
+	kubectl uncordon "${POOL_A_NODE}" >/dev/null 2>&1 || true
+	kubectl uncordon "${POOL_B_NODE}" >/dev/null 2>&1 || true
+	kubectl apply -f "${WORK_DIR}/pools.yaml" >/dev/null 2>&1 || true
+}
+trap restore_default_pool EXIT
+
+# Register one ordinary root-filesystem directory Pool per Kind node.
+wait_for_pool_protection worker-a
+wait_for_pool_protection worker-b
+kubectl delete shiftpvpool worker-a worker-b --wait=true --timeout=2m
+docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}"
+docker exec "${POOL_B_NODE}" test ! -e "${POOL_B_PATH}"
+
+apply_test_pools
 kubectl wait --for=condition=Ready=false "shiftpvpool/${POOL_A_NAME}" --timeout=2m
 MISSING_REASON=$(kubectl get "shiftpvpool/${POOL_A_NAME}" \
 	-o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')
@@ -77,6 +95,10 @@ for node_path in "${POOL_A_NODE}:${POOL_A_PATH}" "${POOL_B_NODE}:${POOL_B_PATH}"
 done
 kubectl wait --for=condition=Ready "shiftpvpool/${POOL_A_NAME}" --timeout=2m
 kubectl wait --for=condition=Ready "shiftpvpool/${POOL_B_NAME}" --timeout=2m
+wait_for_pool_inventory "${POOL_A_NAME}"
+wait_for_pool_inventory "${POOL_B_NAME}"
+wait_for_pool_protection "${POOL_A_NAME}"
+wait_for_pool_protection "${POOL_B_NAME}"
 
 ACCESSIBLE_STATUS=$(kubectl get "shiftpvpool/${POOL_A_NAME}" \
 	-o jsonpath='{.status.conditions[?(@.type=="Accessible")].status}')
@@ -154,6 +176,16 @@ kubectl exec "${WORKLOAD}" -- grep -Fx 'ShiftPV ordinary directory Pool' /data/p
 docker exec "${POOL_A_NODE}" grep -Fx \
 	'ShiftPV ordinary directory Pool' "${POOL_A_PATH}/volumes/${VOLUME_ID}/payload"
 
+# Deregistration is a durable fence: the protected Pool enters terminating,
+# rejects new placement, and remains until the mounted then retained copy is
+# retired and the node releases the exact empty Pool identity.
+OLD_POOL_UID=$(kubectl get "shiftpvpool/${POOL_A_NAME}" -o jsonpath='{.metadata.uid}')
+kubectl delete "shiftpvpool/${POOL_A_NAME}" --wait=false
+kubectl wait --for=condition=Ready=false "shiftpvpool/${POOL_A_NAME}" --timeout=2m
+test -n "$(kubectl get "shiftpvpool/${POOL_A_NAME}" -o jsonpath='{.metadata.deletionTimestamp}')"
+test "$(kubectl get "shiftpvpool/${POOL_A_NAME}" -o jsonpath='{.metadata.finalizers[0]}')" = shiftpv.io/pool-protection
+test "$(kubectl get "shiftpvpool/${POOL_A_NAME}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')" = PoolDeregistering
+
 kubectl patch pv "${PV_NAME}" --type=merge \
 	-p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
 kubectl delete pod "${WORKLOAD}" --wait=true
@@ -181,7 +213,20 @@ kubectl wait --for=delete "pv/${PV_NAME}" --timeout=2m
 kubectl -n shiftpv-system wait --for=delete "configmap/${VOLUME_ID}" --timeout=2m
 kubectl wait --for=delete "shiftpvvolume/${VOLUME_ID}" --timeout=2m
 docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/volumes/${VOLUME_ID}"
+kubectl wait --for=delete "shiftpvpool/${POOL_A_NAME}" --timeout=2m
 PV_NAME=
+
+# Re-registration gets a new identity and is protected before it can serve the
+# following mobility scenario.
+apply_test_pools
+kubectl wait --for=condition=Ready "shiftpvpool/${POOL_A_NAME}" --timeout=2m
+wait_for_pool_inventory "${POOL_A_NAME}"
+wait_for_pool_protection "${POOL_A_NAME}"
+NEW_POOL_UID=$(kubectl get "shiftpvpool/${POOL_A_NAME}" -o jsonpath='{.metadata.uid}')
+if [[ "${NEW_POOL_UID}" == "${OLD_POOL_UID}" ]]; then
+	echo "re-registered Pool kept the deleted identity: ${NEW_POOL_UID}" >&2
+	exit 1
+fi
 
 # Prove that mobility composes with the same ordinary-directory Pool contract.
 # Cordon worker B during initial placement so worker A is the deterministic
