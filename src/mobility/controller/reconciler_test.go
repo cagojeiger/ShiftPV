@@ -223,6 +223,30 @@ func TestDiscoverMovesSkipsPoolThatIsNotReady(t *testing.T) {
 	}
 }
 
+func TestDiscoverMovesSkipsDestinationContainingServingCopy(t *testing.T) {
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	source := volumeapi.Pool{Name: "source", UID: "source-pool-uid", NodeName: "source", MountPath: "/pool"}
+	destination := volumeapi.Pool{Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/pool"}
+	state := identifiedTestState(volumeID, volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"}}, []volumeapi.Pool{source, destination})
+	foreign := *state.CurrentCopy
+	foreign.PoolName, foreign.PoolUID, foreign.NodeName, foreign.CopyID = destination.Name, destination.UID, destination.NodeName, "old-destination-copy"
+	source.Status.Inventory = &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: state.CurrentCopy, Present: true}}}
+	destination.Status.Inventory = &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &foreign, Present: true}}}
+	repository := &memoryRepository{
+		volumes: map[string]volumeapi.State{volumeID: state}, pools: []volumeapi.Pool{source, destination},
+		readyPools: []volumeapi.Pool{source, destination}, readyPoolsConfigured: true,
+	}
+	client := fake.NewSimpleClientset(mobilityObjects(volumeID)...)
+	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	if err := reconciler.discoverMoves(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.moves) != 0 || repository.volumes[volumeID].Phase != volumeapi.PhaseReady {
+		t.Fatalf("occupied destination admitted: moves=%#v volume=%#v", repository.moves, repository.volumes[volumeID])
+	}
+	assertNoEviction(t, client)
+}
+
 func TestDiscoverMovesSkipsIneligibleVolumes(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	for name, mutate := range map[string]func([]runtime.Object, *memoryRepository) []runtime.Object{
@@ -377,6 +401,54 @@ func TestObserveMarksSelectedNotReadyDestinationUnavailable(t *testing.T) {
 	}
 	if !observed.FSM.DestinationUnavailable || observed.FSM.DestinationBlocked || observed.DestinationNode != "destination" {
 		t.Fatalf("destination observation = %#v", observed)
+	}
+}
+
+func TestObserveRejectsForeignServingCopyButAllowsCurrentDestinationCopy(t *testing.T) {
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	sourceCopy, _, destinationCopy := testCopyIdentities(volumeID, "source", "destination")
+	move := volumeapi.Move{
+		Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{
+			Phase: string(fsm.PhaseCopying), ConsumerName: "consumer", CandidateNodes: []string{"destination"},
+			DestinationNode: "destination", DestinationPoolUID: destinationCopy.PoolUID, DestinationCopy: &destinationCopy,
+		},
+	}
+	source := volumeapi.Pool{
+		Name: sourceCopy.PoolName, UID: sourceCopy.PoolUID, NodeName: sourceCopy.NodeName, MountPath: "/source-pool",
+		Status: volumeapi.PoolStatus{Inventory: &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &sourceCopy, Present: true}}}},
+	}
+	destination := volumeapi.Pool{
+		Name: destinationCopy.PoolName, UID: destinationCopy.PoolUID, NodeName: destinationCopy.NodeName, MountPath: "/destination-pool",
+		Status: volumeapi.PoolStatus{Inventory: &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &destinationCopy, Present: true}}}},
+	}
+	repository := &memoryRepository{
+		volumes: map[string]volumeapi.State{volumeID: {
+			UID: sourceCopy.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CurrentCopy: &sourceCopy,
+		}},
+		pools: []volumeapi.Pool{source, destination}, readyPools: []volumeapi.Pool{source, destination}, readyPoolsConfigured: true,
+		moves: []volumeapi.Move{move},
+	}
+	reconciler := &Reconciler{Client: fake.NewSimpleClientset(mobilityObjects(volumeID)...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+
+	observed, err := reconciler.observe(context.Background(), move)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.FSM.DestinationUnavailable || observed.FSM.UnsafeReason == "DestinationServingCopyPresent" {
+		t.Fatalf("current transaction destination copy was rejected: %#v", observed.FSM)
+	}
+
+	foreign := destinationCopy
+	foreign.CopyID = "foreign-copy"
+	destination.Status.Inventory.Copies = append(destination.Status.Inventory.Copies, volumeapi.CopyObservation{Identity: &foreign, Present: true})
+	repository.readyPools = []volumeapi.Pool{source, destination}
+	observed, err = reconciler.observe(context.Background(), move)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.FSM.DestinationUnavailable || observed.FSM.UnsafeReason != "DestinationServingCopyPresent" {
+		t.Fatalf("foreign serving copy was admitted: %#v", observed.FSM)
 	}
 }
 

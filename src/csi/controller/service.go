@@ -115,6 +115,9 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	}
 	state, beginErr := s.Volumes.BeginCreate(ctx, id, nodeName)
 	if beginErr != nil {
+		if errors.Is(beginErr, volumeapi.ErrPoolCopyConflict) {
+			return nil, status.Error(codes.FailedPrecondition, beginErr.Error())
+		}
 		return nil, kubernetesAPIError("record volume creation intent", beginErr)
 	}
 	if state.CurrentCopy == nil {

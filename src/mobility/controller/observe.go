@@ -99,7 +99,8 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		if nodeName == move.Spec.SourceNode {
 			continue
 		}
-		if _, ready := readyPoolNodes[nodeName]; !ready {
+		readyPool, ready := readyPoolNodes[nodeName]
+		if !ready || volumeapi.PoolHasConflictingServingVolume(readyPool, move.Spec.VolumeID, move.Status.DestinationCopy) {
 			continue
 		}
 		node, nodeErr := r.Client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
@@ -298,11 +299,15 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	}
 	if result.DestinationNode != "" {
 		readyPool, ready := readyPoolNodes[result.DestinationNode]
+		copyConflict := ready && volumeapi.PoolHasConflictingServingVolume(readyPool, move.Spec.VolumeID, move.Status.DestinationCopy)
 		destinationNode, destinationErr := r.Client.CoreV1().Nodes().Get(ctx, result.DestinationNode, metav1.GetOptions{})
 		if destinationErr != nil && !apierrors.IsNotFound(destinationErr) {
 			return result, fmt.Errorf("read selected destination Node %q: %w", result.DestinationNode, destinationErr)
 		}
-		result.FSM.DestinationUnavailable = destinationErr != nil || !ready || !nodeReady(destinationNode)
+		result.FSM.DestinationUnavailable = destinationErr != nil || !ready || !nodeReady(destinationNode) || copyConflict
+		if copyConflict {
+			result.FSM.UnsafeReason = "DestinationServingCopyPresent"
+		}
 		if move.Status.CapacityApproved && ready &&
 			(move.Status.DestinationPoolUID == "" || readyPool.UID != move.Status.DestinationPoolUID) {
 			result.FSM.DestinationBlocked = true

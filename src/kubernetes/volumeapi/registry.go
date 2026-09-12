@@ -30,6 +30,7 @@ var (
 	ErrPoolConfiguration = errors.New("ShiftPV Pool configuration is invalid")
 	ErrPoolNotFound      = errors.New("ShiftPV Pool is not registered")
 	ErrPoolNotReady      = errors.New("ShiftPV Pool is not ready")
+	ErrPoolCopyConflict  = errors.New("ShiftPV Pool contains a conflicting serving copy")
 )
 
 const (
@@ -259,6 +260,9 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 	pool, err := r.ReadyPoolForNode(ctx, ownerNode)
 	if err != nil {
 		return State{}, err
+	}
+	if PoolHasServingVolume(pool, volumeID) {
+		return State{}, fmt.Errorf("%w: Pool %q already contains volume %q", ErrPoolCopyConflict, pool.Name, volumeID)
 	}
 	if create {
 		object, err = resource.Create(ctx, &unstructured.Unstructured{Object: map[string]any{
@@ -685,6 +689,29 @@ func poolInventoryReadyAt(pool Pool, now time.Time, staleAfter time.Duration) (b
 		return false, "InventoryStale"
 	}
 	return true, ""
+}
+
+// PoolHasServingVolume reports whether the Pool already contains the physical
+// serving path reserved for volumeID, regardless of that copy's incarnation.
+func PoolHasServingVolume(pool Pool, volumeID string) bool {
+	return PoolHasConflictingServingVolume(pool, volumeID, nil)
+}
+
+// PoolHasConflictingServingVolume permits only the exact serving copy already
+// journaled by the current transaction.
+func PoolHasConflictingServingVolume(pool Pool, volumeID string, allowed *volume.CopyIdentity) bool {
+	if pool.Status.Inventory == nil {
+		return false
+	}
+	for _, observed := range pool.Status.Inventory.Copies {
+		if observed.Present && observed.Identity != nil && observed.Identity.Role == volume.RoleServing && observed.Identity.VolumeID == volumeID {
+			if allowed != nil && *observed.Identity == *allowed {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Registry) SetPoolStatus(ctx context.Context, name, uid, nodeName string, status PoolStatus) error {

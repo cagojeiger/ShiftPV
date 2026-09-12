@@ -276,6 +276,104 @@ func TestBeginCreatePersistsIdentityBeforeReady(t *testing.T) {
 	}
 }
 
+func TestPoolServingCopyConflict(t *testing.T) {
+	serving := volume.CopyIdentity{
+		InstallationID: "installation-uid", PoolName: "pool-a", PoolUID: "pool-uid",
+		VolumeID: "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", VolumeUID: "old-volume-uid",
+		CopyID: "old-copy", NodeName: "node-a", Role: volume.RoleServing,
+	}
+	pool := Pool{Status: PoolStatus{Inventory: &PoolInventory{Valid: true, Copies: []CopyObservation{
+		{Identity: &serving, Present: true},
+	}}}}
+	if !PoolHasServingVolume(pool, serving.VolumeID) {
+		t.Fatal("existing serving copy was not detected")
+	}
+	if PoolHasConflictingServingVolume(pool, serving.VolumeID, &serving) {
+		t.Fatal("the exact copy owned by the current transaction was rejected")
+	}
+
+	foreign := serving
+	foreign.CopyID = "foreign-copy"
+	pool.Status.Inventory.Copies = append(pool.Status.Inventory.Copies, CopyObservation{Identity: &foreign, Present: true})
+	if !PoolHasConflictingServingVolume(pool, serving.VolumeID, &serving) {
+		t.Fatal("a foreign serving copy was hidden by the allowed identity")
+	}
+
+	retired := serving
+	retired.Role = volume.RoleRetired
+	pool.Status.Inventory.Copies = []CopyObservation{
+		{Identity: &serving, Present: false},
+		{Identity: &retired, Present: true},
+	}
+	if PoolHasServingVolume(pool, serving.VolumeID) {
+		t.Fatal("absent or retired copies were treated as serving conflicts")
+	}
+}
+
+func TestBeginCreateRejectsExistingServingCopyBeforeIntent(t *testing.T) {
+	ctx := context.Background()
+	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Namespace",
+		"metadata": map[string]any{"name": installationNamespace, "uid": "installation-uid"},
+	}}
+	const volumeID = "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	serving := volume.CopyIdentity{
+		InstallationID: "installation-uid", PoolName: "pool-a", PoolUID: "pool-uid",
+		VolumeID: volumeID, VolumeUID: "old-volume-uid", CopyID: "old-copy",
+		NodeName: "node-a", Role: volume.RoleServing,
+	}
+	registeredPool := pool("pool-a", "node-a")
+	registeredPool.SetUID("pool-uid")
+	status, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&PoolStatus{
+		ObservedGeneration: 1,
+		LastProbeTime:      metav1.NewTime(time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)),
+		Conditions: []metav1.Condition{{
+			Type: PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1,
+			LastTransitionTime: metav1.NewTime(time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)), Reason: "PoolReady",
+		}},
+		Inventory: &PoolInventory{
+			ObservedAt: metav1.NewTime(time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)),
+			Valid:      true, Copies: []CopyObservation{{Identity: &serving, Present: true}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registeredPool.Object["status"] = status
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", namespaceResource: "NamespaceList",
+	}, clusterIdentity, registeredPool)
+	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 1, 0, time.UTC) }}
+
+	if _, err := registry.BeginCreate(ctx, volumeID, "node-a"); !errors.Is(err, ErrPoolCopyConflict) {
+		t.Fatalf("existing serving copy error = %v", err)
+	}
+	if _, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("conflicting copy created a ShiftPVVolume: %v", err)
+	}
+
+	placeholder := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
+		"metadata": map[string]any{"name": volumeID, "uid": "new-volume-uid"},
+		"spec":     map[string]any{"volumeID": volumeID},
+	}}
+	if _, err := client.Resource(VolumeResource).Create(ctx, placeholder, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.BeginCreate(ctx, volumeID, "node-a"); !errors.Is(err, ErrPoolCopyConflict) {
+		t.Fatalf("uninitialized intent bypassed serving copy conflict: %v", err)
+	}
+	current, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{})
+	if err != nil || current.GetUID() != "new-volume-uid" {
+		t.Fatalf("uninitialized intent was replaced: object=%#v err=%v", current, err)
+	}
+	state, err := stateFrom(current)
+	if err != nil || state.Phase != "" || state.CurrentCopy != nil {
+		t.Fatalf("conflicting intent received creation authority: state=%#v err=%v", state, err)
+	}
+}
+
 func TestBeginCreateRejectsReplacementVolumeBeforeStatusWrite(t *testing.T) {
 	ctx := context.Background()
 	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}

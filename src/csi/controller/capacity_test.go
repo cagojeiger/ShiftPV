@@ -323,6 +323,42 @@ func TestCreateVolumeRejectsUnavailablePoolBeforeCapacityProbe(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeRejectsServingCopyBeforeReservation(t *testing.T) {
+	request := validCreateRequest("worker-a")
+	volumeID, err := volume.IDFromName(request.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serving := volume.CopyIdentity{
+		InstallationID: "installation-uid", PoolName: "pool-a", PoolUID: "pool-uid",
+		VolumeID: volumeID, VolumeUID: "old-volume-uid", CopyID: "old-copy",
+		NodeName: "worker-a", Role: volume.RoleServing,
+	}
+	probe := &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}}
+	client := fake.NewClientset()
+	service := configuredService(&Service{
+		Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
+		CapacityPools: &fakePoolCapacityRegistry{
+			pool: volumeapi.Pool{
+				Name: "pool-a", UID: "pool-uid", NodeName: "worker-a", MountPath: "/pool", CapacityLimit: "1Gi",
+				Status: volumeapi.PoolStatus{Inventory: &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &serving, Present: true}}}},
+			},
+		},
+		CapacityProbe: probe,
+	})
+	_, err = service.CreateVolume(context.Background(), request)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("code = %s, want FailedPrecondition: %v", status.Code(err), err)
+	}
+	if probe.callCount() != 0 {
+		t.Fatalf("capacity probe called despite serving copy conflict: %d", probe.callCount())
+	}
+	reservations, listErr := client.CoreV1().ConfigMaps("shiftpv-system").List(context.Background(), metav1.ListOptions{})
+	if listErr != nil || len(reservations.Items) != 0 {
+		t.Fatalf("serving copy conflict created reservations: items=%d err=%v", len(reservations.Items), listErr)
+	}
+}
+
 func capacityService(client *fake.Clientset, limit string, volumes map[string]volumeapi.State, probe PoolCapacityProbe) *Service {
 	registry := &fakePoolCapacityRegistry{
 		pool:    volumeapi.Pool{Name: "pool-a", NodeName: "worker-a", MountPath: "/pool", CapacityLimit: limit},
