@@ -404,6 +404,88 @@ func TestObserveMarksSelectedNotReadyDestinationUnavailable(t *testing.T) {
 	}
 }
 
+func TestObserveAllowsOnlyActiveMoveToRepairDestinationCrashWindow(t *testing.T) {
+	now := time.Date(2026, 9, 12, 4, 0, 0, 0, time.UTC)
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	sourceCopy, incoming, destinationCopy := testCopyIdentities(volumeID, "source", "destination")
+	incoming.CopyID = "move-move-uid-incoming"
+	destinationCopy.CopyID = "move-move-uid-serving"
+	baseMove := volumeapi.Move{
+		Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{
+			ConsumerName: "old-consumer", ConsumerUID: "old-consumer-uid", CandidateNodes: []string{"destination"},
+			DestinationNode: "destination", DestinationPoolUID: destinationCopy.PoolUID, CapacityApproved: true, SourceBytes: 1,
+			SourceCopy: &sourceCopy, IncomingCopy: &incoming, DestinationCopy: &destinationCopy,
+			CopyOperationID: "copy-move-uid", PromotionOperationID: "promote-move-uid",
+		},
+	}
+	source := volumeapi.Pool{
+		Name: sourceCopy.PoolName, UID: sourceCopy.PoolUID, NodeName: sourceCopy.NodeName, MountPath: "/source-pool",
+		Status: volumeapi.PoolStatus{Inventory: &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &sourceCopy, Present: true}}}},
+	}
+	readyStatus := volumeapi.PoolStatus{
+		ObservedGeneration: 1, LastProbeTime: metav1.NewTime(now),
+		Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+	}
+
+	for _, test := range []struct {
+		name, phase, marker string
+		action              fsm.Action
+		complete            bool
+	}{
+		{name: "copy repair", phase: string(fsm.PhaseCopying), marker: "path:.shiftpv/incoming/" + incoming.CopyID, action: fsm.ActionEnsureCopy},
+		{name: "promotion repair", phase: string(fsm.PhasePromoting), marker: "path:volumes/" + volumeID, action: fsm.ActionEnsurePromotion},
+		{name: "completed copy waits for ordinary inventory", phase: string(fsm.PhaseCopying), marker: "path:.shiftpv/incoming/" + incoming.CopyID, action: fsm.ActionWait, complete: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			move := baseMove
+			move.Status.Phase = test.phase
+			destination := volumeapi.Pool{
+				Name: destinationCopy.PoolName, UID: destinationCopy.PoolUID, NodeName: destinationCopy.NodeName,
+				MountPath: "/destination-pool", Generation: 1, Status: readyStatus,
+			}
+			destination.Status.Inventory = &volumeapi.PoolInventory{
+				ObservedAt: metav1.NewTime(now), Message: "CopyObservationProblem",
+				Copies: []volumeapi.CopyObservation{{Marker: test.marker, Present: true, Problem: "UnrecordedPath"}},
+			}
+			repository := &memoryRepository{
+				volumes: map[string]volumeapi.State{volumeID: {
+					UID: sourceCopy.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CurrentCopy: &sourceCopy,
+				}},
+				pools: []volumeapi.Pool{source, destination}, readyPools: []volumeapi.Pool{source}, readyPoolsConfigured: true, moves: []volumeapi.Move{move},
+			}
+			objects := mobilityObjects(volumeID)
+			replacement := objects[len(objects)-1].(*corev1.Pod)
+			replacement.Spec.NodeName = "destination"
+			replacement.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: placementHoldName}}
+			reconciler := &Reconciler{Client: fake.NewSimpleClientset(objects...), Repository: repository, Namespace: "system", HelperImage: "helper", Now: func() time.Time { return now }}
+			placement := reconciler.placementPod(move, replacement, namesFor(move.Name))
+			placement.UID = "placement-uid"
+			placement.Spec.NodeName = "destination"
+			if _, err := reconciler.Client.CoreV1().Pods("system").Create(context.Background(), placement, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if test.complete {
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: namesFor(move.Name).CopyJob, Namespace: "system"}, Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}}
+				if _, err := reconciler.Client.BatchV1().Jobs("system").Create(context.Background(), job, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observed, err := reconciler.observe(context.Background(), move)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := fsm.Decide(fsm.Phase(test.phase), observed.FSM)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Action != test.action || observed.FSM.DestinationUnavailable != test.complete {
+				t.Fatalf("observation=%#v decision=%#v", observed.FSM, decision)
+			}
+		})
+	}
+}
+
 func TestObserveRejectsForeignServingCopyButAllowsCurrentDestinationCopy(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	sourceCopy, _, destinationCopy := testCopyIdentities(volumeID, "source", "destination")

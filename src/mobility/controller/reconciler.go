@@ -51,11 +51,12 @@ type Reconciler struct {
 	CleanupOperator    interface {
 		Reclaim(context.Context, cleanupapi.Cleanup, *cleanupapi.Store) (cleanupapi.Cleanup, error)
 	}
-	Interval         time.Duration
-	Now              func() time.Time
-	Recorder         record.EventRecorder
-	Wake             <-chan struct{}
-	ObserveDiscovery func(map[string]int, error)
+	Interval                time.Duration
+	PoolReadinessStaleAfter time.Duration
+	Now                     func() time.Time
+	Recorder                record.EventRecorder
+	Wake                    <-chan struct{}
+	ObserveDiscovery        func(map[string]int, error)
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {

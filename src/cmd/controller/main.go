@@ -192,7 +192,7 @@ func main() {
 		eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
 		eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
 		wake := mobilitycontroller.WatchEvents(ctx, client, dynamicClient, *namespace)
-		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, ServiceAccountName: *helperServiceAccount, Cleanups: cleanupStore, CleanupOperator: operator, Interval: *mobilityInterval, Recorder: eventRecorder, Wake: wake}
+		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, ServiceAccountName: *helperServiceAccount, Cleanups: cleanupStore, CleanupOperator: operator, Interval: *mobilityInterval, PoolReadinessStaleAfter: *poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
 		if exporter != nil {
 			exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
 			reconciler.ObserveDiscovery = exporter.ObserveDiscovery

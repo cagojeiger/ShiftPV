@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -146,6 +148,73 @@ func TestPopulateIncomingDoesNotAdoptUnrecordedDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".shiftpv", copyMarker(incoming.CopyID))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unrecorded incoming gained copy authority: %v", err)
+	}
+}
+
+func TestPromoteIncomingRecoversCrashAfterRenameBeforePlacement(t *testing.T) {
+	root := t.TempDir()
+	incoming, serving := transferIdentities()
+	authority := func(context.Context) error { return nil }
+	if err := PopulateIncoming(context.Background(), root, incoming, "copy-operation", authority, func(_ context.Context, path string) error {
+		return os.WriteFile(filepath.Join(path, "payload"), []byte("preserve"), 0600)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenExisting(root, PoolIdentity{InstallationID: incoming.InstallationID, PoolUID: incoming.PoolUID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placed, err := store.readPlacement(incoming.CopyID)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	intent := transferIntent{OperationID: "promote-operation", Incoming: incoming, Destination: serving, Device: placed.Device, Inode: placed.Inode}
+	if err := store.ensureMarker(operationMarker("promotion", intent.OperationID), intent); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.ensureMarker(copyMarker(serving.CopyID), serving); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	incomingFD, err := unix.Openat(int(store.control.Fd()), "incoming", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	volumesFD, err := store.openOrCreateDirectory(int(store.root.Fd()), "volumes", 0755)
+	if err != nil {
+		unix.Close(incomingFD)
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := renameDirectory(incomingFD, incoming.CopyID, volumesFD, serving.VolumeID); err != nil {
+		unix.Close(incomingFD)
+		unix.Close(volumesFD)
+		store.Close()
+		t.Fatal(err)
+	}
+	unix.Close(incomingFD)
+	unix.Close(volumesFD)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PromoteIncoming(context.Background(), root, incoming, serving, "promote-operation", authority); err != nil {
+		t.Fatalf("promotion did not repair renamed path: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "volumes", serving.VolumeID, "payload"))
+	if err != nil || string(data) != "preserve" {
+		t.Fatalf("recovered promotion payload=%q err=%v", data, err)
+	}
+	store, err = OpenExisting(root, PoolIdentity{InstallationID: serving.InstallationID, PoolUID: serving.PoolUID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.VerifyServing(serving); err != nil {
+		t.Fatalf("repaired serving placement is invalid: %v", err)
 	}
 }
 

@@ -297,8 +297,19 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	} else if placementErr != nil && !apierrors.IsNotFound(placementErr) {
 		return result, fmt.Errorf("read placement reservation Pod: %w", placementErr)
 	}
+	destinationRepair := false
 	if result.DestinationNode != "" {
 		readyPool, ready := readyPoolNodes[result.DestinationNode]
+		if !ready {
+			registeredPool, exists := poolNodes[result.DestinationNode]
+			staleAfter := r.PoolReadinessStaleAfter
+			if staleAfter <= 0 {
+				staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
+			}
+			if exists && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, state, r.now(), staleAfter) {
+				readyPool, ready, destinationRepair = registeredPool, true, true
+			}
+		}
 		copyConflict := ready && volumeapi.PoolHasConflictingServingVolume(readyPool, move.Spec.VolumeID, move.Status.DestinationCopy)
 		destinationNode, destinationErr := r.Client.CoreV1().Nodes().Get(ctx, result.DestinationNode, metav1.GetOptions{})
 		if destinationErr != nil && !apierrors.IsNotFound(destinationErr) {
@@ -321,6 +332,13 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	result.FSM.PromotionComplete, result.FSM.PromotionFailed, err = r.jobState(ctx, result.Names.PromotionJob)
 	if err != nil {
 		return result, err
+	}
+	// A helper may repair its own exact unrecorded path, but a completed Job
+	// must still wait for the next ordinary valid inventory before authority can
+	// advance to promotion or owner commit.
+	if destinationRepair && (move.Status.Phase == string(fsm.PhaseCopying) && result.FSM.CopyComplete ||
+		move.Status.Phase == string(fsm.PhasePromoting) && result.FSM.PromotionComplete) {
+		result.FSM.DestinationUnavailable = true
 	}
 	result.FSM.PublishedOnDestination = result.DestinationNode != "" && contains(state.PublishedNodes, result.DestinationNode)
 	if move.Status.Phase == string(fsm.PhaseWaitingForDestinationPublish) || move.Status.Phase == string(fsm.PhaseCleaningSource) {

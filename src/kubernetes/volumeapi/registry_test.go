@@ -620,6 +620,87 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 	}
 }
 
+func TestPoolReadyForActiveMoveRepairAtAdmitsOnlyExactCrashWindow(t *testing.T) {
+	now := time.Date(2026, 9, 12, 4, 0, 0, 0, time.UTC)
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	source := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid",
+		VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "source-copy", NodeName: "source", Role: volume.RoleServing,
+	}
+	incoming := volume.CopyIdentity{
+		InstallationID: source.InstallationID, PoolName: "destination-pool", PoolUID: "destination-pool-uid",
+		VolumeID: volumeID, VolumeUID: source.VolumeUID, CopyID: "move-move-uid-incoming", NodeName: "destination", Role: volume.RoleIncoming,
+	}
+	destination := incoming
+	destination.CopyID, destination.Role = "move-move-uid-serving", volume.RoleServing
+	state := State{UID: source.VolumeUID, Phase: PhaseMoving, OwnerNode: source.NodeName, ActiveMove: "move-test", CurrentCopy: &source}
+	move := Move{
+		Name: "move-test", UID: "move-uid", Spec: MoveSpec{VolumeID: volumeID, SourceNode: source.NodeName},
+		Status: MoveStatus{
+			Phase: "Copying", DestinationNode: incoming.NodeName, DestinationPoolUID: incoming.PoolUID,
+			SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
+			CopyOperationID: "copy-move-uid", PromotionOperationID: "promote-move-uid",
+		},
+	}
+	readyStatus := PoolStatus{
+		ObservedGeneration: 1, LastProbeTime: metav1.NewTime(now),
+		Conditions: []metav1.Condition{{Type: PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+	}
+	pool := Pool{Name: incoming.PoolName, UID: incoming.PoolUID, NodeName: incoming.NodeName, MountPath: "/pool", Generation: 1, Status: readyStatus}
+	pool.Status.Inventory = &PoolInventory{
+		ObservedAt: metav1.NewTime(now), Message: "CopyObservationProblem",
+		Copies: []CopyObservation{{Marker: "path:.shiftpv/incoming/" + incoming.CopyID, Present: true, Problem: "UnrecordedPath"}},
+	}
+	if !PoolReadyForActiveMoveRepairAt(pool, move, state, now, DefaultPoolReadinessStaleAfter) {
+		t.Fatal("exact incoming crash window was not admitted for repair")
+	}
+
+	promoting := move
+	promoting.Status.Phase = "Promoting"
+	promotingPool := pool
+	promotingPool.Status.Inventory = &PoolInventory{
+		ObservedAt: metav1.NewTime(now), Message: "CopyObservationProblem",
+		Copies: []CopyObservation{
+			{Marker: "placement-" + incoming.CopyID, Identity: &incoming, Present: false},
+			{Marker: "path:volumes/" + volumeID, Present: true, Problem: "UnrecordedPath"},
+		},
+	}
+	if !PoolReadyForActiveMoveRepairAt(promotingPool, promoting, state, now, DefaultPoolReadinessStaleAfter) {
+		t.Fatal("exact promotion crash window was not admitted for repair")
+	}
+
+	tests := map[string]func(*Pool, *Move, *State){
+		"unrelated path": func(pool *Pool, _ *Move, _ *State) {
+			pool.Status.Inventory.Copies[0].Marker = "path:.shiftpv/incoming/foreign"
+		},
+		"extra problem": func(pool *Pool, _ *Move, _ *State) {
+			pool.Status.Inventory.Copies = append(pool.Status.Inventory.Copies, CopyObservation{Marker: "path:volumes/foreign", Present: true, Problem: "UnrecordedPath"})
+		},
+		"unexpected type": func(pool *Pool, _ *Move, _ *State) {
+			pool.Status.Inventory.Copies[0].Problem = "UnexpectedPathType"
+		},
+		"stale inventory": func(pool *Pool, _ *Move, _ *State) {
+			pool.Status.Inventory.ObservedAt = metav1.NewTime(now.Add(-4 * time.Minute))
+		},
+		"truncated inventory": func(pool *Pool, _ *Move, _ *State) { pool.Status.Inventory.Truncated = true },
+		"pool replacement":    func(pool *Pool, _ *Move, _ *State) { pool.UID = "replacement-pool-uid" },
+		"inactive move":       func(_ *Pool, _ *Move, state *State) { state.ActiveMove = "other-move" },
+		"changed operation":   func(_ *Pool, move *Move, _ *State) { move.Status.CopyOperationID = "copy-other" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidatePool, candidateMove, candidateState := pool, move, state
+			inventory := *pool.Status.Inventory
+			inventory.Copies = append([]CopyObservation(nil), pool.Status.Inventory.Copies...)
+			candidatePool.Status.Inventory = &inventory
+			mutate(&candidatePool, &candidateMove, &candidateState)
+			if PoolReadyForActiveMoveRepairAt(candidatePool, candidateMove, candidateState, now, DefaultPoolReadinessStaleAfter) {
+				t.Fatal("unsafe inventory was admitted for repair")
+			}
+		})
+	}
+}
+
 func TestRegistrySetPoolStatusUsesPoolIdentity(t *testing.T) {
 	object := pool("pool-a", "node-a")
 	object.SetUID("pool-a-uid")
