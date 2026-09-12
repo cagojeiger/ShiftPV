@@ -160,6 +160,7 @@ type MoveStatus struct {
 	ReplacementName      string
 	ReplacementUID       string
 	DestinationNode      string
+	DestinationPoolUID   string
 	SourceBytes          int64
 	CapacityApproved     bool
 	CapacityReason       string
@@ -961,7 +962,7 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		PersistentVolumeName: read("persistentVolumeName"), ClaimNamespace: read("persistentVolumeClaimNamespace"),
 		ClaimName: read("persistentVolumeClaimName"), ConsumerName: read("consumerName"), ConsumerUID: read("consumerUID"), ReplacementName: read("replacementName"),
 		ReplacementUID:  read("replacementUID"),
-		DestinationNode: read("destinationNode"), SourceBytes: sourceBytes, CapacityApproved: capacityApproved,
+		DestinationNode: read("destinationNode"), DestinationPoolUID: read("destinationPoolUID"), SourceBytes: sourceBytes, CapacityApproved: capacityApproved,
 		CapacityReason: read("capacityReason"), CandidateNodes: candidates, EvictionRequested: evictionRequested,
 		CopyJobName: read("copyJobName"), PromotionJobName: read("promotionJobName"), CleanupJobName: read("cleanupJobName"),
 		CopyOperationID: read("copyOperationID"), PromotionOperationID: read("promotionOperationID"), CleanupName: read("cleanupName"),
@@ -978,7 +979,7 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 		"persistentVolumeName": status.PersistentVolumeName, "persistentVolumeClaimNamespace": status.ClaimNamespace,
 		"persistentVolumeClaimName": status.ClaimName, "consumerName": status.ConsumerName, "consumerUID": status.ConsumerUID, "replacementName": status.ReplacementName,
 		"replacementUID":  status.ReplacementUID,
-		"destinationNode": status.DestinationNode, "sourceBytes": status.SourceBytes,
+		"destinationNode": status.DestinationNode, "destinationPoolUID": status.DestinationPoolUID, "sourceBytes": status.SourceBytes,
 		"capacityApproved": status.CapacityApproved, "capacityReason": status.CapacityReason,
 		"candidateNodes":    stringSliceToAny(status.CandidateNodes),
 		"evictionRequested": status.EvictionRequested, "copyJobName": status.CopyJobName,

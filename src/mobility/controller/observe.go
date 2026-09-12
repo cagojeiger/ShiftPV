@@ -68,9 +68,9 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	if err != nil {
 		return result, err
 	}
-	readyPoolNodes := make(map[string]struct{}, len(readyPools))
+	readyPoolNodes := make(map[string]volumeapi.Pool, len(readyPools))
 	for _, pool := range readyPools {
-		readyPoolNodes[pool.NodeName] = struct{}{}
+		readyPoolNodes[pool.NodeName] = pool
 	}
 	sourceNode, err := r.Client.CoreV1().Nodes().Get(ctx, move.Spec.SourceNode, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -296,12 +296,17 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		return result, fmt.Errorf("read placement reservation Pod: %w", placementErr)
 	}
 	if result.DestinationNode != "" {
-		_, ready := readyPoolNodes[result.DestinationNode]
+		readyPool, ready := readyPoolNodes[result.DestinationNode]
 		destinationNode, destinationErr := r.Client.CoreV1().Nodes().Get(ctx, result.DestinationNode, metav1.GetOptions{})
 		if destinationErr != nil && !apierrors.IsNotFound(destinationErr) {
 			return result, fmt.Errorf("read selected destination Node %q: %w", result.DestinationNode, destinationErr)
 		}
 		result.FSM.DestinationUnavailable = destinationErr != nil || !ready || !nodeReady(destinationNode)
+		if move.Status.CapacityApproved && ready &&
+			(move.Status.DestinationPoolUID == "" || readyPool.UID != move.Status.DestinationPoolUID) {
+			result.FSM.DestinationBlocked = true
+			result.FSM.UnsafeReason = "DestinationPoolIdentityChanged"
+		}
 	}
 	result.FSM.CopyComplete, result.FSM.CopyFailed, err = r.jobState(ctx, result.Names.CopyJob)
 	if err != nil {

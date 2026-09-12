@@ -141,7 +141,7 @@ func TestMoveJobsUseIdentityHelperAndRejectReplacement(t *testing.T) {
 	move := volumeapi.Move{
 		Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
 		Status: volumeapi.MoveStatus{
-			DestinationNode: "destination", SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
+			DestinationNode: "destination", DestinationPoolUID: destination.PoolUID, SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
 			CopyOperationID: "copy-operation", PromotionOperationID: "promote-operation",
 		},
 	}
@@ -215,7 +215,7 @@ func TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly(t *testing.T) 
 		InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid",
 		VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "initial-volume-uid", NodeName: "source", Role: volume.RoleServing,
 	}
-	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{SourceCopy: &source, DestinationNode: "destination"}}
+	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{SourceCopy: &source, DestinationNode: "destination", DestinationPoolUID: "destination-pool-uid"}}
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{volumeID: {UID: source.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CurrentCopy: &source}},
 		pools: []volumeapi.Pool{
@@ -255,11 +255,31 @@ func TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly(t *testing.T) 
 	}
 }
 
+func TestMoveCopyIdentityRejectsPoolRecreatedAfterCapacityApproval(t *testing.T) {
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	source, _, _ := testCopyIdentities(volumeID, "source", "destination")
+	move := volumeapi.Move{
+		Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{SourceCopy: &source, DestinationNode: "destination", DestinationPoolUID: "admitted-pool-uid"},
+	}
+	repository := &memoryRepository{pools: []volumeapi.Pool{
+		{Name: source.PoolName, UID: source.PoolUID, NodeName: "source", MountPath: "/source"},
+		{Name: "destination-pool", UID: "replacement-pool-uid", NodeName: "destination", MountPath: "/destination"},
+	}}
+	reconciler := &Reconciler{Repository: repository}
+	if err := reconciler.prepareMoveCopyIdentities(context.Background(), &move); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("recreated destination Pool was accepted: %v", err)
+	}
+	if move.Status.IncomingCopy != nil || move.Status.DestinationCopy != nil {
+		t.Fatalf("copy identities were created for replacement Pool: %+v", move.Status)
+	}
+}
+
 func TestMoveCleanupSettlesOnlyReceiptForExactSource(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	source := volume.CopyIdentity{InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "source-copy", NodeName: "source", Role: volume.RoleServing}
 	destination := volume.CopyIdentity{InstallationID: "installation", PoolName: "destination-pool", PoolUID: "destination-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "destination-copy", NodeName: "destination", Role: volume.RoleServing}
-	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: "CleaningSource", SourceCopy: &source, DestinationCopy: &destination, DestinationNode: "destination"}}
+	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: "CleaningSource", SourceCopy: &source, DestinationCopy: &destination, DestinationNode: "destination", DestinationPoolUID: destination.PoolUID}}
 	repository := &memoryRepository{moves: []volumeapi.Move{move}, volumes: map[string]volumeapi.State{volumeID: {UID: source.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name, CurrentCopy: &destination, PublishedNodes: []string{"destination"}}}}
 	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{cleanupapi.Resource: "ShiftPVCleanupList"})
 	dynamicClient.PrependReactor("create", "shiftpvcleanups", func(action k8stesting.Action) (bool, runtime.Object, error) {

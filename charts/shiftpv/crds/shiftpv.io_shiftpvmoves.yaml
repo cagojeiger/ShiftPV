@@ -96,6 +96,8 @@ spec:
                   type: string
                 destinationNode:
                   type: string
+                destinationPoolUID:
+                  type: string
                 sourceBytes:
                   type: integer
                   format: int64

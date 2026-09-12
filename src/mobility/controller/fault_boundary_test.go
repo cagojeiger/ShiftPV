@@ -125,7 +125,7 @@ func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testin
 		Name:   "move-test",
 		UID:    "move-uid",
 		Spec:   volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
-		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForCapacity), ClaimNamespace: "workload", CandidateNodes: []string{"destination"}, CapacityApproved: true, SourceBytes: 1, SourceCopy: &source},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForCapacity), ClaimNamespace: "workload", CandidateNodes: []string{"destination"}, DestinationPoolUID: "destination-pool-uid", CapacityApproved: true, SourceBytes: 1, SourceCopy: &source},
 	}
 	inner := &memoryRepository{
 		pools: []volumeapi.Pool{{Name: "source-pool", UID: "source-pool-uid", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination-pool", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination-pool"}},
@@ -319,7 +319,7 @@ func TestCompletionConvergesAfterActiveMoveClearResponseLost(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	source, _, destination := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
-		UID: "move-uid", Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseCompleting), DestinationNode: "destination", SourceCopy: &source, DestinationCopy: &destination}}
+		UID: "move-uid", Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseCompleting), DestinationNode: "destination", DestinationPoolUID: destination.PoolUID, SourceCopy: &source, DestinationCopy: &destination}}
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
 		UID: destination.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name, PublishedNodes: []string{"destination"}, CurrentCopy: &destination,
 	}}, moves: []volumeapi.Move{move}}

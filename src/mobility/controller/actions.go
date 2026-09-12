@@ -249,7 +249,7 @@ func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, obse
 }
 
 func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volumeapi.Move) error {
-	if move.UID == "" || move.Status.SourceCopy == nil || move.Status.SourceCopy.Validate() != nil || move.Status.DestinationNode == "" {
+	if move.UID == "" || move.Status.SourceCopy == nil || move.Status.SourceCopy.Validate() != nil || move.Status.DestinationNode == "" || move.Status.DestinationPoolUID == "" {
 		return fmt.Errorf("move source identity or destination is missing")
 	}
 	var pool volumeapi.Pool
@@ -265,6 +265,9 @@ func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volume
 	}
 	if pool.Name == "" || pool.UID == "" {
 		return fmt.Errorf("destination Pool identity is missing")
+	}
+	if pool.UID != move.Status.DestinationPoolUID {
+		return fmt.Errorf("destination Pool identity changed")
 	}
 	base := volume.CopyIdentity{
 		InstallationID: move.Status.SourceCopy.InstallationID, PoolName: pool.Name, PoolUID: pool.UID,
@@ -332,6 +335,7 @@ func validDestinationAuthorityIntent(move volumeapi.Move) bool {
 	destination := move.Status.DestinationCopy
 	return move.Name != "" && destination != nil && destination.Validate() == nil && destination.Role == volume.RoleServing &&
 		move.Status.DestinationNode != "" && move.Status.DestinationNode != move.Spec.SourceNode &&
+		move.Status.DestinationPoolUID != "" && destination.PoolUID == move.Status.DestinationPoolUID &&
 		destination.VolumeID == move.Spec.VolumeID && destination.NodeName == move.Status.DestinationNode
 }
 

@@ -473,7 +473,7 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 	if err := registry.CompareAndSetState(ctx, volumeID, PhaseReady, "", "node-a", next); err == nil {
 		t.Fatal("stale state precondition was accepted")
 	}
-	status := MoveStatus{Phase: "Copying", DestinationNode: "node-b", ReplacementUID: "replacement-uid", CandidateNodes: []string{"node-b"}, EvictionRequested: true, CopyJobName: "copy"}
+	status := MoveStatus{Phase: "Copying", DestinationNode: "node-b", DestinationPoolUID: "pool-b-uid", ReplacementUID: "replacement-uid", CandidateNodes: []string{"node-b"}, EvictionRequested: true, CopyJobName: "copy"}
 	if err := registry.SetMoveStatus(ctx, "move-test", status); err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if move.Status.Phase != "Copying" || move.Status.DestinationNode != "node-b" || move.Status.ReplacementUID != "replacement-uid" || !move.Status.EvictionRequested {
+	if move.Status.Phase != "Copying" || move.Status.DestinationNode != "node-b" || move.Status.DestinationPoolUID != "pool-b-uid" || move.Status.ReplacementUID != "replacement-uid" || !move.Status.EvictionRequested {
 		t.Fatalf("move = %#v", move)
 	}
 	moves, err := registry.ListMoves(ctx)

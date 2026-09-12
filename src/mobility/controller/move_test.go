@@ -26,7 +26,7 @@ func cleanupMoveFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 		Name: "move-cleanup", UID: "move-cleanup-uid",
 		Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
 		Status: volumeapi.MoveStatus{
-			Phase: string(fsm.PhaseWaitingForDestinationPublish), DestinationNode: "destination",
+			Phase: string(fsm.PhaseWaitingForDestinationPublish), DestinationNode: "destination", DestinationPoolUID: destination.PoolUID,
 			SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
 			CopyOperationID: "copy-move-cleanup-uid", PromotionOperationID: "promote-move-cleanup-uid",
 		},
