@@ -605,20 +605,31 @@ func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interfa
 	if !observed {
 		return fmt.Errorf("orphan copy is not present in the exact Pool inventory: %w", volumeapi.ErrStateConflict)
 	}
-	return verifyOrphanReservation(ctx, client, namespace, cleanup)
+	return verifyOrphanReservation(ctx, client, namespace, cleanup, authority)
 }
 
-func verifyOrphanReservation(ctx context.Context, client kubernetes.Interface, namespace string, cleanup cleanupapi.Cleanup) error {
+func verifyOrphanReservation(ctx context.Context, client kubernetes.Interface, namespace string, cleanup cleanupapi.Cleanup, authority volumeapi.CopyAuthority) error {
 	reservation, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, cleanup.Spec.Target.VolumeID, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if authority == volumeapi.CopyAuthoritySuperseded {
+			return fmt.Errorf("active volume capacity reservation is missing: %w", volumeapi.ErrStateConflict)
+		}
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("read orphan capacity reservation: %w", err)
 	}
-	if cleanup.Spec.ReservationUID == "" || string(reservation.UID) != cleanup.Spec.ReservationUID ||
-		reservation.Labels["app.kubernetes.io/name"] != "shiftpv" || reservation.Labels["app.kubernetes.io/component"] != "volume-reservation" ||
+	if reservation.Labels["app.kubernetes.io/name"] != "shiftpv" || reservation.Labels["app.kubernetes.io/component"] != "volume-reservation" ||
 		reservation.Data["volumeID"] != cleanup.Spec.Target.VolumeID || reservation.Data["volumeUID"] != cleanup.Spec.Target.VolumeUID {
+		return fmt.Errorf("orphan capacity reservation identity changed: %w", volumeapi.ErrStateConflict)
+	}
+	if authority == volumeapi.CopyAuthoritySuperseded {
+		if cleanup.Spec.ReservationUID != "" {
+			return fmt.Errorf("cleanup owns an active volume capacity reservation: %w", volumeapi.ErrStateConflict)
+		}
+		return nil
+	}
+	if cleanup.Spec.ReservationUID == "" || string(reservation.UID) != cleanup.Spec.ReservationUID {
 		return fmt.Errorf("orphan capacity reservation identity changed: %w", volumeapi.ErrStateConflict)
 	}
 	return nil

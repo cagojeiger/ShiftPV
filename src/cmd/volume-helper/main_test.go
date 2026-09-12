@@ -99,7 +99,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kube-system", UID: types.UID(target.InstallationID)}}, reservation,
 	)
 	cleanup := cleanupapi.Cleanup{Spec: cleanupapi.Spec{
-		OperationID: "review-copy-id", Target: target, Reason: "OrphanReclaim", ReservationUID: reservationUID, Approved: true,
+		OperationID: "review-copy-id", Target: target, Reason: "OrphanReclaim", Approved: true,
 		Authority: cleanupapi.Authority{Kind: "Namespace", Name: "kube-system", UID: target.InstallationID},
 	}}
 	recoveredMove := &unstructured.Unstructured{Object: map[string]any{

@@ -63,7 +63,7 @@ Node control marker는 copy identity와 directory의 device/inode를 함께 기�
 | `target` | exact copy identity |
 | `reason` | `MoveSource`, `VolumeDelete`, `OrphanReclaim` |
 | `authority` | 삭제를 허가한 `ShiftPVMove`, `ShiftPVVolume`, cluster `Namespace` identity |
-| `reservationUID` | orphan 발견 시 관찰한 exact reservation UID; 없으면 빈 값 |
+| `reservationUID` | cleanup이 회수할 exact orphan reservation UID; reservation이 없거나 active volume 소유이면 빈 값 |
 | `approved` | Helper 실행 허용 여부 |
 
 ```mermaid

@@ -237,7 +237,18 @@ func (s orphanSnapshot) classify(target volume.CopyIdentity, reservationUID stri
 		return false, "CopyNotObserved", "absence is not deletion evidence; restore the original filesystem or resolve the stale review request"
 	}
 	reservation, reservationExists := s.reservations[target.VolumeID]
-	if reservationUID == "" {
+	if authority == volumeapi.CopyAuthoritySuperseded {
+		if reservationUID != "" {
+			return false, "LiveReservationOwnershipConflict", "data is preserved because cleanup cannot own the active volume reservation"
+		}
+		if !reservationExists {
+			return false, "LiveReservationMissing", "data is preserved until the active volume capacity reservation is restored"
+		}
+		if reservation.Labels["app.kubernetes.io/name"] != "shiftpv" || reservation.Labels["app.kubernetes.io/component"] != "volume-reservation" ||
+			reservation.Data["volumeID"] != target.VolumeID || reservation.Data["volumeUID"] != target.VolumeUID {
+			return false, "LiveReservationIdentityChanged", "data is preserved because the active volume capacity reservation identity is invalid"
+		}
+	} else if reservationUID == "" {
 		if reservationExists {
 			return false, "ReservationIdentityUnknown", "data is preserved because a reservation exists without the cleanup contract owning its UID"
 		}
@@ -339,7 +350,9 @@ func (r *Reconciler) discover(ctx context.Context, snapshot orphanSnapshot) erro
 				continue
 			}
 			reservationUID := ""
+			authority := volumeapi.ClassifyCopyAuthority(snapshot.volumes, identity)
 			if reservation, exists := snapshot.reservations[identity.VolumeID]; exists &&
+				authority != volumeapi.CopyAuthoritySuperseded &&
 				reservation.Labels["app.kubernetes.io/name"] == "shiftpv" && reservation.Labels["app.kubernetes.io/component"] == "volume-reservation" &&
 				reservation.Data["volumeID"] == identity.VolumeID && reservation.Data["volumeUID"] == identity.VolumeUID {
 				reservationUID = string(reservation.UID)
@@ -394,7 +407,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request cleanupapi.Cleanup) 
 	if r.Now != nil {
 		now = r.Now().UTC()
 	}
-	if request.Spec.Reason == "OrphanReclaim" {
+	if request.Spec.Reason == "OrphanReclaim" && request.Spec.ReservationUID != "" {
 		if err := r.releaseReservation(ctx, request); err != nil {
 			return err
 		}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -407,6 +408,14 @@ func TestDiscoverFindsSupersededCopyWhilePersistentVolumeRemains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := client.CoreV1().ConfigMaps("system").Create(context.Background(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: target.VolumeID, Namespace: "system", UID: "live-reservation", Labels: map[string]string{
+			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
+		}},
+		Data: map[string]string{"volumeID": target.VolumeID, "volumeUID": target.VolumeUID, "nodeName": current.NodeName, "capacity": "64"},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	reconciler := &Reconciler{
 		Store: store, Operator: &operator{}, Client: client, Namespace: "system", Interval: time.Second,
 		Now: func() time.Time { return time.Unix(1, 0) },
@@ -429,7 +438,7 @@ func TestDiscoverFindsSupersededCopyWhilePersistentVolumeRemains(t *testing.T) {
 	}
 	for _, request := range requests {
 		if request.Spec.Target == target {
-			if request.Status.Phase != cleanupapi.PhaseNeedsReview || request.Status.Reason != "OrphanPreserved" {
+			if request.Spec.ReservationUID != "" || request.Status.Phase != cleanupapi.PhaseNeedsReview || request.Status.Reason != "OrphanPreserved" {
 				t.Fatalf("superseded copy review=%#v", request)
 			}
 			return
@@ -481,6 +490,82 @@ func TestApprovedOrphanConvergesAndReleasesExactReservation(t *testing.T) {
 	}
 	if _, err := client.CoreV1().ConfigMaps("system").Get(context.Background(), target.VolumeID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("exact orphan reservation remains: %v", err)
+	}
+}
+
+func TestApprovedSupersededCopyPreservesLiveVolumeReservation(t *testing.T) {
+	store, existing := fixture(t)
+	if err := store.UpdateStatus(context.Background(), existing.Name, existing.UID, cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview, Reason: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	target := existing.Spec.Target
+	target.CopyID, target.Role = "superseded-copy", volume.RoleRetired
+	current := target
+	current.PoolName, current.PoolUID, current.CopyID, current.NodeName, current.Role = "current-pool", "current-pool-uid", "current-copy", "current-node", volume.RoleServing
+	state := volumeapi.State{UID: target.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: current.NodeName, CurrentCopy: &current}
+	const reservationUID = "live-reservation-uid"
+	reservation := corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: target.VolumeID, Namespace: "system", UID: types.UID(reservationUID), Labels: map[string]string{
+			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
+		}},
+		Data: map[string]string{
+			"requestName": "live-volume", "volumeID": target.VolumeID, "volumeUID": target.VolumeUID,
+			"nodeName": target.NodeName, "capacity": "64",
+		},
+	}
+	client := orphanKubernetesClient()
+	if _, err := client.CoreV1().ConfigMaps("system").Create(context.Background(), reservation.DeepCopy(), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "live-pv"},
+		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+			CSI: &corev1.CSIPersistentVolumeSource{Driver: "csi.shiftpv.io", VolumeHandle: target.VolumeID},
+		}},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	observed := inventory{
+		pools:   []volumeapi.Pool{readyPool(target, volumeapi.CopyObservation{Marker: "superseded", Identity: &target, Present: true})},
+		volumes: map[string]volumeapi.State{target.VolumeID: state},
+	}
+	worker := &operator{}
+	reconciler := &Reconciler{
+		Store: store, Operator: worker, Client: client, Namespace: "system", Inventory: observed,
+		Interval: time.Second, Now: func() time.Time { return time.Unix(1, 0) },
+	}
+	if err := reconciler.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request cleanupapi.Cleanup
+	for _, candidate := range requests {
+		if candidate.Spec.Target == target {
+			request = candidate
+			break
+		}
+	}
+	if request.Name == "" || request.Spec.ReservationUID != "" || request.Status.Reason != "OrphanPreserved" {
+		t.Fatalf("superseded cleanup owns live reservation: %#v", request)
+	}
+	approveCleanup(t, store, request.Name)
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := store.Get(context.Background(), request.Name)
+	if err != nil || settled.Status.Phase != cleanupapi.PhaseCompleted || worker.calls != 1 {
+		t.Fatalf("superseded cleanup did not settle: cleanup=%#v calls=%d err=%v", settled, worker.calls, err)
+	}
+	liveReservation, err := client.CoreV1().ConfigMaps("system").Get(context.Background(), target.VolumeID, metav1.GetOptions{})
+	if err != nil || string(liveReservation.UID) != reservationUID {
+		t.Fatalf("live reservation was removed: reservation=%#v err=%v", liveReservation, err)
+	}
+	reserved, err := poolcapacity.ReservedBytes([]corev1.ConfigMap{*liveReservation}, map[string]volumeapi.State{target.VolumeID: state}, nil, current.NodeName)
+	if err != nil || reserved != 64 {
+		t.Fatalf("live capacity accounting failed after superseded cleanup: reserved=%d err=%v", reserved, err)
 	}
 }
 
@@ -633,7 +718,17 @@ func TestOrphanClassificationPreservesEveryUnprovenBoundary(t *testing.T) {
 			current.CopyID, current.NodeName, current.Role = "current-copy", "other-node", volume.RoleServing
 			s.volumes[target.VolumeID] = volumeapi.State{UID: target.VolumeUID, CurrentCopy: &current}
 			s.volumesByPV[target.VolumeID] = struct{}{}
+			s.reservations[target.VolumeID] = corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: target.VolumeID, UID: "live-reservation", Labels: map[string]string{
+					"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
+				},
+			}, Data: map[string]string{"volumeID": target.VolumeID, "volumeUID": target.VolumeUID}}
 		}, ready: true, reason: "OrphanReady"},
+		"superseded copy missing live reservation": {mutate: func(s *orphanSnapshot) {
+			current := target
+			current.CopyID, current.NodeName, current.Role = "current-copy", "other-node", volume.RoleServing
+			s.volumes[target.VolumeID] = volumeapi.State{UID: target.VolumeUID, CurrentCopy: &current}
+		}, reason: "LiveReservationMissing"},
 		"pool identity":         {mutate: func(s *orphanSnapshot) { s.pools = nil }, reason: "PoolIdentityUnavailable"},
 		"pool readiness":        {mutate: func(s *orphanSnapshot) { s.pools[0].Status.Conditions = nil }, reason: "PoolUnavailable"},
 		"inventory unavailable": {mutate: func(s *orphanSnapshot) { s.pools[0].Status.Inventory = nil }, reason: "ObservationUnavailable"},
