@@ -84,7 +84,7 @@ helm-lint:
 	helm lint charts/shiftpv
 
 helm-template:
-	@set -e; controller_version=$$(tr -d '[:space:]' < versions/controller); \
+	@set -e; controller_version=$$(awk '$$1 == "appVersion:" {gsub(/"/, "", $$2); print $$2; exit}' charts/shiftpv/Chart.yaml); \
 		first=$$(mktemp); second=$$(mktemp); \
 		trap 'rm -f "$$first" "$$second"' EXIT; \
 		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$first"; \
