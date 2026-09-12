@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestDarwinReclaimRetiresButPreservesWhenMountBoundaryProofIsUnavailable(t *testing.T) {
+func TestDarwinReclaimPreservesServingCopyWhenMountBoundaryProofIsUnavailable(t *testing.T) {
 	root := t.TempDir()
 	identity := testIdentity()
 	authority := func(context.Context) error { return nil }
@@ -24,8 +24,8 @@ func TestDarwinReclaimRetiresButPreservesWhenMountBoundaryProofIsUnavailable(t *
 	if err == nil || !strings.Contains(err.Error(), "requires Linux") {
 		t.Fatalf("unsupported purge result: %v", err)
 	}
-	data, readErr := os.ReadFile(filepath.Join(root, ".shiftpv", "retired", identity.CopyID, "data"))
+	data, readErr := os.ReadFile(filepath.Join(root, "volumes", identity.VolumeID, "data"))
 	if readErr != nil || string(data) != "preserved" {
-		t.Fatal("unsupported environment lost retired data")
+		t.Fatal("unsupported environment changed serving data")
 	}
 }

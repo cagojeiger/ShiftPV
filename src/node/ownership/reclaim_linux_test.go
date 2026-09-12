@@ -8,7 +8,40 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
+
+func TestReclaimRejectsUnsupportedPurgeBeforeRetire(t *testing.T) {
+	root := t.TempDir()
+	identity := testIdentity()
+	authority := func(context.Context) error { return nil }
+	if err := PrepareServing(context.Background(), root, identity, authority); err != nil {
+		t.Fatal(err)
+	}
+	dataPath := filepath.Join(root, "volumes", identity.VolumeID, "data")
+	if err := os.WriteFile(dataPath, []byte("preserved"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	purgeCalled := false
+	_, _, err := reclaim(
+		context.Background(), root, identity, "operation-unsupported", authority,
+		func(*Store) error { return unix.ENOSYS },
+		func(context.Context, *Store, localIntent) error {
+			purgeCalled = true
+			return nil
+		},
+	)
+	if !errors.Is(err, unix.ENOSYS) || purgeCalled {
+		t.Fatalf("unsupported purge result: called=%v err=%v", purgeCalled, err)
+	}
+	if data, readErr := os.ReadFile(dataPath); readErr != nil || string(data) != "preserved" {
+		t.Fatalf("unsupported purge changed serving data: data=%q err=%v", data, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".shiftpv", "retired", identity.CopyID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unsupported purge retired the serving copy: %v", statErr)
+	}
+}
 
 func TestReclaimIsIdentityBoundIdempotentAndDoesNotFollowSymlinks(t *testing.T) {
 	root := t.TempDir()

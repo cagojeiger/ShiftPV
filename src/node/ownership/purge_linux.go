@@ -12,6 +12,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func preflightPurge(store *Store) error {
+	fd, err := openPurgeDirectory(int(store.control.Fd()), ".")
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
+}
+
 func purgeRetired(ctx context.Context, store *Store, intent localIntent) error {
 	parent, err := openPurgeDirectory(int(store.control.Fd()), "retired")
 	if err != nil {

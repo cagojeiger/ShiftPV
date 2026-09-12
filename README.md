@@ -67,7 +67,7 @@ owns disks, filesystems, encryption, mounts, and backup.
 |---|---|
 | Chart compatibility | Kubernetes 1.35+ |
 | Automated E2E baseline | Kubernetes 1.35.8 |
-| Nodes | Linux |
+| Nodes | Linux kernel 5.6+ (`openat2`) |
 | Node access | Privileged DaemonSet with HostPath |
 | Pool | Existing writable absolute non-root directory |
 | Argo CD | 3.3+ for guarded Application deletion |

@@ -20,6 +20,18 @@ import (
 // Reclaim retires and purges exactly one API-authorized copy. Retries use the
 // same operation ID and local intent, including after rename or response loss.
 func Reclaim(ctx context.Context, root string, target volume.CopyIdentity, operationID string, authority func(context.Context) error) (Receipt, string, error) {
+	return reclaim(ctx, root, target, operationID, authority, preflightPurge, purgeRetired)
+}
+
+func reclaim(
+	ctx context.Context,
+	root string,
+	target volume.CopyIdentity,
+	operationID string,
+	authority func(context.Context) error,
+	preflight func(*Store) error,
+	purge func(context.Context, *Store, localIntent) error,
+) (Receipt, string, error) {
 	if authority == nil || !volume.ValidIdentityToken(operationID) || target.Validate() != nil {
 		return Receipt{}, "", ErrIdentity
 	}
@@ -72,10 +84,13 @@ func Reclaim(ctx context.Context, root string, target volume.CopyIdentity, opera
 	if err := authority(ctx); err != nil {
 		return Receipt{}, "", fmt.Errorf("recheck cleanup authority before filesystem effect: %w", err)
 	}
+	if err := preflight(store); err != nil {
+		return Receipt{}, "", fmt.Errorf("verify safe purge support: %w", err)
+	}
 	if err := store.retire(target, intent); err != nil {
 		return Receipt{}, "", fmt.Errorf("retire cleanup target: %w", err)
 	}
-	if err := purgeRetired(ctx, store, intent); err != nil {
+	if err := purge(ctx, store, intent); err != nil {
 		return Receipt{}, "", fmt.Errorf("purge retired target: %w", err)
 	}
 	receipt := Receipt{OperationID: operationID, Target: target, Device: intent.Device, Inode: intent.Inode, Retired: true, Purged: true}

@@ -10,6 +10,8 @@ tests:
         values: '0+0x6 1+0x5'
       - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",source="metadata"}'
         values: '-600+0x6 420+60x5'
+      - series: 'up{shiftpv="true",namespace="shiftpv-system",source="metadata"}'
+        values: '1+0x11'
       - series: 'shiftpv_pool_accounting_valid{shiftpv="true",namespace="shiftpv-system",pool="pool-a",node="worker-a"}'
         values: '0+0x6 1+0x5'
       - series: 'shiftpv_pool_inventory_valid{shiftpv="true",namespace="shiftpv-system",pool="pool-a",node="worker-a"}'
@@ -71,3 +73,24 @@ tests:
       - eval_time: 8m
         alertname: ShiftPVCopyNeedsReview
         exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'up{shiftpv="true",namespace="shiftpv-system",instance="controller"}'
+        values: '0+0x7'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ShiftPVObservationStale
+        exp_alerts:
+          - exp_labels: {instance: controller, namespace: shiftpv-system, severity: warning, shiftpv: "true"}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "ShiftPV has not completed a successful observation for more than five minutes."}
+          - exp_labels: {severity: warning, shiftpv: "true"}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "ShiftPV has not completed a successful observation for more than five minutes."}
+
+  - interval: 1m
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ShiftPVObservationStale
+        exp_alerts:
+          - exp_labels: {severity: warning, shiftpv: "true"}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "ShiftPV has not completed a successful observation for more than five minutes."}

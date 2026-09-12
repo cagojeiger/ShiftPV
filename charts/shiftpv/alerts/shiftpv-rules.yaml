@@ -11,7 +11,10 @@ groups:
           summary: ShiftPV observation is failing
           description: The latest completed ShiftPV observation for this source failed for five minutes.
       - alert: ShiftPVObservationStale
-        expr: time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"} > 300
+        expr: |
+          time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"} > 300
+          or absent(shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"})
+          or up{shiftpv="true"} == 0
         for: 5m
         labels:
           severity: warning
