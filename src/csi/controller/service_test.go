@@ -784,6 +784,40 @@ func TestCreateVolumeRetriesAfterAmbiguousReservationTimeout(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeRetriesAfterReservationBindingFailure(t *testing.T) {
+	client := fake.NewClientset()
+	operator := &fakeDirectoryOperator{}
+	service := configuredService(&Service{Client: client, Namespace: "shiftpv-system", Operator: operator})
+	req := validCreateRequest("worker-a")
+	volumeID, err := volume.IDFromName(req.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	client.PrependReactor("update", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failed {
+			return false, nil, nil
+		}
+		failed = true
+		return true, nil, apierrors.NewServiceUnavailable("reservation binding unavailable")
+	})
+
+	if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+		t.Fatalf("binding failure code=%s err=%v", status.Code(err), err)
+	}
+	reservation, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{})
+	if err != nil || reservation.Data["volumeUID"] != "" || operator.createCalls != 0 {
+		t.Fatalf("unbound intent was not preserved safely: reservation=%#v createCalls=%d err=%v", reservation, operator.createCalls, err)
+	}
+	if _, err := service.CreateVolume(context.Background(), req); err != nil {
+		t.Fatalf("retry did not bind and continue the durable creation: %v", err)
+	}
+	reservation, err = client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{})
+	if err != nil || reservation.Data["volumeUID"] != "volume-uid" || operator.createCalls != 1 {
+		t.Fatalf("retry did not converge: reservation=%#v createCalls=%d err=%v", reservation, operator.createCalls, err)
+	}
+}
+
 func TestCreateVolumePreservesDeadlineExceededCode(t *testing.T) {
 	client := fake.NewClientset()
 	client.PrependReactor("create", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {

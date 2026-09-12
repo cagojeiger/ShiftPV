@@ -102,6 +102,14 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 	}
 	result.Copies = append(result.Copies, unknown...)
 	result.Truncated = result.Truncated || truncated
+	if result.Message == "" {
+		for _, observed := range result.Copies {
+			if observed.Problem != "" {
+				result.Message = "CopyObservationProblem"
+				break
+			}
+		}
+	}
 	result.Valid = result.Message == ""
 	return result
 }

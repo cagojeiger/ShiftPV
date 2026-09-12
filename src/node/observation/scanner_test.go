@@ -48,7 +48,7 @@ func TestScannerReportsExactCopiesAndPreservesUnrecordedPaths(t *testing.T) {
 	}
 	scanner := &Scanner{HostRoot: host, TargetRoot: "/kubelet/pods", Installation: installation{id: identity.InstallationID}, Publications: publications{published: true}, Limit: 256}
 	result := scanner.Scan(context.Background(), volumeapi.Pool{Name: identity.PoolName, UID: identity.PoolUID, NodeName: identity.NodeName, MountPath: "/pool"}, time.Unix(1, 0))
-	if !result.Valid || result.Truncated || len(result.Copies) != 2 {
+	if result.Valid || result.Message != "CopyObservationProblem" || result.Truncated || len(result.Copies) != 2 {
 		t.Fatalf("inventory=%#v", result)
 	}
 	var exact, preserved bool
@@ -77,7 +77,7 @@ func TestScannerIsBoundedAndSurfacesIdentityFailure(t *testing.T) {
 	}
 	pool := volumeapi.Pool{Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/pool"}
 	result := (&Scanner{HostRoot: host, TargetRoot: "/kubelet/pods", Installation: installation{id: "installation"}, Publications: publications{}, Limit: 1}).Scan(context.Background(), pool, time.Now())
-	if !result.Valid || !result.Truncated || len(result.Copies) != 1 {
+	if result.Valid || result.Message != "CopyObservationProblem" || !result.Truncated || len(result.Copies) != 1 {
 		t.Fatalf("bounded inventory=%#v", result)
 	}
 	failed := (&Scanner{HostRoot: host, TargetRoot: "/kubelet/pods", Installation: installation{err: errors.New("api unavailable")}, Publications: publications{}, Limit: 1}).Scan(context.Background(), pool, time.Now())
@@ -97,7 +97,7 @@ func TestScannerDoesNotTruncateAtExactLimit(t *testing.T) {
 	}
 	pool := volumeapi.Pool{Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/pool"}
 	result := (&Scanner{HostRoot: host, TargetRoot: "/kubelet/pods", Installation: installation{id: "installation"}, Publications: publications{}, Limit: 1}).Scan(context.Background(), pool, time.Now())
-	if !result.Valid || result.Truncated || len(result.Copies) != 1 {
+	if result.Valid || result.Message != "CopyObservationProblem" || result.Truncated || len(result.Copies) != 1 {
 		t.Fatalf("exact-limit inventory=%#v", result)
 	}
 }
@@ -120,7 +120,7 @@ func TestScannerFailsClosedWhenPublicationObservationFails(t *testing.T) {
 		Publications: publications{err: errors.New("mount namespace unavailable")}, Limit: 256,
 	}
 	result := scanner.Scan(context.Background(), volumeapi.Pool{Name: identity.PoolName, UID: identity.PoolUID, NodeName: identity.NodeName, MountPath: "/pool"}, time.Now())
-	if !result.Valid || len(result.Copies) != 1 || result.Copies[0].Problem == "" || result.Copies[0].Published {
+	if result.Valid || result.Message != "CopyObservationProblem" || len(result.Copies) != 1 || result.Copies[0].Problem == "" || result.Copies[0].Published {
 		t.Fatalf("publication observation failure was not preserved: %#v", result)
 	}
 }

@@ -25,7 +25,18 @@ func ReservedBytes(reservations []corev1.ConfigMap, volumes map[string]volumeapi
 		seen[volumeID] = struct{}{}
 		ownerNode := reservation.Data["nodeName"]
 		if state, exists := volumes[volumeID]; exists {
-			if state.UID == "" || reservation.Data["volumeUID"] != state.UID {
+			if state.UID == "" {
+				return 0, fmt.Errorf("reservation %q does not match the current volume incarnation", reservation.Name)
+			}
+			reservationUID := reservation.Data["volumeUID"]
+			if reservationUID == "" {
+				copy := state.CurrentCopy
+				if state.Phase != volumeapi.PhasePending || copy == nil || copy.Validate() != nil ||
+					copy.VolumeID != volumeID || copy.VolumeUID != state.UID || copy.NodeName != state.OwnerNode ||
+					reservation.Data["nodeName"] != state.OwnerNode {
+					return 0, fmt.Errorf("reservation %q does not match the current volume incarnation", reservation.Name)
+				}
+			} else if reservationUID != state.UID {
 				return 0, fmt.Errorf("reservation %q does not match the current volume incarnation", reservation.Name)
 			}
 			ownerNode = state.OwnerNode
