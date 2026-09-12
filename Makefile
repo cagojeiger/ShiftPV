@@ -89,11 +89,11 @@ helm-template:
 		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$first"; \
 		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$second"; \
 		cmp -s "$$first" "$$second"; \
-		grep -q -- '--helper-image=busybox:1.37' "$$first"; \
-		grep -q -- '--mobility-helper-image=ghcr.io/cagojeiger/shiftpv-controller:0.1.11' "$$first"; \
-		! grep -q -- '--helper-service-account=' "$$first"; \
-		! grep -q -- '--controller-service-account=' "$$first"; \
-		! grep -q -- 'name: shiftpv-helper' "$$first"
+		grep -q -- '--helper-image=ghcr.io/cagojeiger/shiftpv-controller:0.3.0' "$$first"; \
+		grep -q -- '--mobility-helper-image=ghcr.io/cagojeiger/shiftpv-controller:0.3.0' "$$first"; \
+		grep -q -- '--helper-service-account=shiftpv-helper' "$$first"; \
+		grep -q -- '--controller-service-account=shiftpv-controller' "$$first"; \
+		grep -q -- 'name: shiftpv-helper' "$$first"
 	@! helm template shiftpv charts/shiftpv --namespace shiftpv-system --set controller.replicas=2 >/dev/null 2>&1
 	@set -e; rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
 		--set runtime.identityContract=true \
