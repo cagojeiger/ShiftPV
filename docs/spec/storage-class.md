@@ -88,5 +88,6 @@ PV Released (Retain)
 ```
 
 Helm은 StorageClass를 소유한다. PVC, PV, CR, reservation과 host data는 독립 lifecycle을 갖는다.
+Pool 등록 해제는 해당 Pool의 실제 copy와 lifecycle 참조가 모두 해소된 뒤 허용된다.
 Uninstall guard는 storage dependency 해소를 확인한 뒤 release 제거를 허용한다. 배포와 제거 절차는
 [Helm chart guide](../../charts/shiftpv/README.md#uninstall-and-recovery)에 있다.

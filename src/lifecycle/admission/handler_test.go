@@ -13,17 +13,23 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
 )
 
 type fakeChecker struct {
-	report uninstallcheck.Report
-	err    error
+	report     uninstallcheck.Report
+	err        error
+	poolReport uninstallcheck.Report
+	poolErr    error
 }
 
 func (f fakeChecker) Check(context.Context) (uninstallcheck.Report, error) { return f.report, f.err }
+func (f fakeChecker) CheckPoolDelete(context.Context, string, types.UID) (uninstallcheck.Report, error) {
+	return f.poolReport, f.poolErr
+}
 
 type fakePermit struct {
 	granted bool
@@ -95,6 +101,42 @@ func TestAdmitDeleteRequiresGrantedQuiescedTeardown(t *testing.T) {
 	response = (&Handler{Checker: fakeChecker{}, Permit: fakePermit{}}).Admit(context.Background(), request)
 	if response.Allowed || !strings.Contains(response.Result.Message, "quiesced teardown") {
 		t.Fatalf("safe direct delete response = %#v", response)
+	}
+}
+
+func TestAdmitAllowsOnlyDependencyFreePoolDeregistration(t *testing.T) {
+	request := poolDeleteRequest("pool-a", "pool-uid")
+	response := (&Handler{Checker: fakeChecker{}, Permit: fakePermit{}}).Admit(context.Background(), request)
+	if !response.Allowed {
+		t.Fatalf("dependency-free Pool deletion denied: %#v", response)
+	}
+
+	blocker := uninstallcheck.Blocker{Kind: "ShiftPVPoolCopy", Name: "pool-a"}
+	response = (&Handler{Checker: fakeChecker{poolReport: uninstallcheck.Report{Blockers: []uninstallcheck.Blocker{blocker}}}, Permit: fakePermit{}}).Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "ShiftPVPoolCopy pool-a") {
+		t.Fatalf("dependent Pool deletion response = %#v", response)
+	}
+
+	response = (&Handler{Checker: fakeChecker{poolErr: errors.New("inventory unavailable")}, Permit: fakePermit{}}).Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "inventory unavailable") {
+		t.Fatalf("Pool inspection failure response = %#v", response)
+	}
+
+	request.OldObject.Raw = nil
+	response = (&Handler{Checker: fakeChecker{}, Permit: fakePermit{}}).Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "identity is missing") {
+		t.Fatalf("Pool deletion without identity response = %#v", response)
+	}
+}
+
+func poolDeleteRequest(name string, uid types.UID) *admissionv1.AdmissionRequest {
+	oldObject, _ := json.Marshal(map[string]any{"metadata": map[string]any{"uid": uid}})
+	return &admissionv1.AdmissionRequest{
+		UID:       types.UID("pool-delete"),
+		Name:      name,
+		Operation: admissionv1.Delete,
+		Resource:  metav1.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvpools"},
+		OldObject: runtime.RawExtension{Raw: oldObject},
 	}
 }
 

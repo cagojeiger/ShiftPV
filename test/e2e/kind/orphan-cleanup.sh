@@ -87,6 +87,7 @@ VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 VOLUME_UID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
 COPY_ID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
 RESERVATION_UID=$(kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
+CONTROLLER_SERVICE_ACCOUNT=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o jsonpath='{.spec.template.spec.serviceAccountName}')
 CHECKSUM=$(kubectl -n "${NAMESPACE}" exec writer -- sha256sum /data/payload | awk '{print $1}')
 test "${CHECKSUM}" = "$(docker exec "${NODE}" sha256sum "${POOL_PATH}/volumes/${VOLUME_ID}/payload" | awk '{print $1}')"
 
@@ -99,7 +100,8 @@ docker exec "${NODE}" mount --bind "${POOL_PATH}/volumes/${VOLUME_ID}" "${MOUNT_
 MOUNTED=1
 wait_for_inventory_publication true
 
-kubectl delete "shiftpvvolume/${VOLUME_ID}" --wait=true
+kubectl --as="system:serviceaccount:shiftpv-system:${CONTROLLER_SERVICE_ACCOUNT}" \
+	delete "shiftpvvolume/${VOLUME_ID}" --wait=true
 sleep 35
 if [[ -n "$(cleanup_for_volume)" ]]; then
 	echo "orphan cleanup was discovered while Retain PersistentVolume ${PV_NAME} still existed" >&2

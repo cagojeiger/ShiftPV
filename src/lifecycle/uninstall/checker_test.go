@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 
@@ -71,6 +72,91 @@ func TestCheckAllowsEmptyCluster(t *testing.T) {
 	if !report.Safe() {
 		t.Fatalf("Check() blockers = %#v", report.Blockers)
 	}
+}
+
+func TestCheckPoolDeleteAllowsExactEmptyPoolWhileOtherPoolsRemainActive(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 7, 0, 0, 0, time.UTC)
+	poolA := volumeapi.Pool{
+		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true}},
+	}
+	poolB := volumeapi.Pool{
+		Name: "pool-b", UID: "pool-b-uid", NodeName: "node-b", Generation: 1,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true}},
+	}
+	otherCopy := volume.CopyIdentity{PoolName: poolB.Name, PoolUID: poolB.UID, NodeName: poolB.NodeName}
+	storageClassName := "shiftpv"
+	client := fake.NewClientset(
+		shiftPVPersistentVolumeOnNode("pv-other", poolB.NodeName),
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "app"}, Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: &storageClassName, VolumeName: "pv-other"}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "shiftpv-system", Labels: map[string]string{
+			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
+		}}, Data: map[string]string{"volumeID": "other", "nodeName": poolB.NodeName}},
+	)
+	repository := &memoryRepository{
+		pools:   []volumeapi.Pool{poolA, poolB},
+		volumes: map[string]volumeapi.State{"other": {OwnerNode: poolB.NodeName, CurrentCopy: &otherCopy}},
+		moves:   []volumeapi.Move{{Name: "other", Spec: volumeapi.MoveSpec{SourceNode: poolB.NodeName}, Status: volumeapi.MoveStatus{Phase: "Copying", DestinationPoolUID: poolB.UID}}},
+	}
+	cleanups := cleanupRepository{items: []cleanupapi.Cleanup{{Name: "other", Spec: cleanupapi.Spec{Target: volume.CopyIdentity{PoolName: poolB.Name, PoolUID: poolB.UID}}}}}
+	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanups, StorageClassName: "shiftpv", Namespace: "shiftpv-system", Now: func() time.Time { return now }}
+
+	report, err := checker.CheckPoolDelete(context.Background(), poolA.Name, types.UID(poolA.UID))
+	if err != nil || !report.Safe() {
+		t.Fatalf("empty Pool deletion blockers=%#v err=%v", report.Blockers, err)
+	}
+}
+
+func TestCheckPoolDeleteBlocksEveryTargetPoolDependency(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 7, 0, 0, 0, time.UTC)
+	target := volumeapi.Pool{
+		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{
+			ObservedAt: metav1.NewTime(now), Valid: true, Copies: []volumeapi.CopyObservation{{Marker: "copy.json", Present: true}},
+		}},
+	}
+	currentCopy := volume.CopyIdentity{PoolName: target.Name, PoolUID: target.UID, NodeName: target.NodeName}
+	client := fake.NewClientset(
+		shiftPVPersistentVolumeOnNode("pv-data", target.NodeName),
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "shiftpv-system", Labels: map[string]string{
+			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
+		}}, Data: map[string]string{"volumeID": "data", "nodeName": target.NodeName}},
+	)
+	repository := &memoryRepository{
+		pools:   []volumeapi.Pool{target},
+		volumes: map[string]volumeapi.State{"data": {OwnerNode: target.NodeName, CurrentCopy: &currentCopy}},
+		moves: []volumeapi.Move{{
+			Name: "move-data", Spec: volumeapi.MoveSpec{VolumeID: "data", SourceNode: target.NodeName}, Status: volumeapi.MoveStatus{Phase: "Copying", SourceCopy: &currentCopy},
+		}},
+	}
+	cleanups := cleanupRepository{items: []cleanupapi.Cleanup{{
+		Name: "cleanup-data", Spec: cleanupapi.Spec{OperationID: "cleanup-operation", Target: currentCopy}, Status: cleanupapi.Status{Phase: cleanupapi.PhaseRunning},
+	}}}
+	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanups, Namespace: "shiftpv-system", Now: func() time.Time { return now }}
+
+	report, err := checker.CheckPoolDelete(context.Background(), target.Name, types.UID(target.UID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := blockersText(report.Blockers)
+	for _, expected := range []string{"PersistentVolume//pv-data/", "ShiftPVCleanup//cleanup-data/", "ShiftPVMove//move-data/", "ShiftPVPoolCopy//pool-a/", "ShiftPVVolume//data/", "VolumeReservation/shiftpv-system/data/"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("Pool blockers do not contain %q: %s", expected, joined)
+		}
+	}
+
+	if _, err := checker.CheckPoolDelete(context.Background(), target.Name, "replacement-uid"); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("Pool UID mismatch error = %v", err)
+	}
+}
+
+func shiftPVPersistentVolumeOnNode(name, nodeName string) *corev1.PersistentVolume {
+	return &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: corev1.PersistentVolumeSpec{
+		PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: DriverName, VolumeHandle: name}},
+		NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+			MatchExpressions: []corev1.NodeSelectorRequirement{{Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{nodeName}}},
+		}}}},
+	}}
 }
 
 func TestCheckBlocksReservationUntilItIsReleased(t *testing.T) {

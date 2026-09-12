@@ -422,8 +422,10 @@ sequenceDiagram
 보호 대상은 labeled CSI Deployment, DaemonSet, Service, ServiceAccount, RBAC, StorageClass,
 `CSIDriver`, ShiftPV CRD와 모든 `ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`, `ShiftPVCleanup`이다. 정상 CSI
 수명주기에서는 chart가 지정한 controller ServiceAccount만 Volume, Move, Cleanup을 정리한다.
-Pool 삭제와 그 밖의 직접 `kubectl delete`는 lifecycle admission을 통과한다. Admission은
-read-only이므로 DELETE 또는 dry-run DELETE 자체가 제거 permit을 만들지 않는다.
+Pool 등록 해제는 exact Pool의 최신·완전한 inventory가 비어 있고 해당 PV, reservation, Volume,
+진행 중 Move, Cleanup 참조가 없을 때 허용한다. 참조가 남은 Pool과 그 밖의 직접 `kubectl delete`는
+lifecycle admission이 차단한다. Admission은 read-only이므로 DELETE 또는 dry-run DELETE 자체가 제거
+permit을 만들지 않는다.
 
 정상 제거:
 

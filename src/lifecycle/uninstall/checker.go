@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
@@ -57,6 +59,176 @@ func (r Report) Safe() bool {
 
 func (c *Checker) Check(ctx context.Context) (Report, error) {
 	return c.CheckAfter(ctx, time.Time{})
+}
+
+// CheckPoolDelete determines whether one exact Pool registration can be
+// removed without losing authority over a volume, move, cleanup, reservation,
+// PersistentVolume, or physical copy. Other Pools may remain in active use.
+func (c *Checker) CheckPoolDelete(ctx context.Context, poolName string, poolUID types.UID) (Report, error) {
+	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
+		return Report{}, fmt.Errorf("Pool deletion checker is not configured")
+	}
+	if strings.TrimSpace(poolName) == "" || poolUID == "" {
+		return Report{}, fmt.Errorf("exact Pool identity is required")
+	}
+	if strings.TrimSpace(c.Namespace) == "" {
+		return Report{}, fmt.Errorf("ShiftPV namespace is required")
+	}
+
+	pools, err := c.Volumes.ListPools(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPVPools: %w", err)
+	}
+	var target *volumeapi.Pool
+	for index := range pools {
+		if pools[index].Name == poolName {
+			target = &pools[index]
+			break
+		}
+	}
+	if target == nil {
+		return Report{}, fmt.Errorf("Pool %q was not found", poolName)
+	}
+	if target.UID != string(poolUID) {
+		return Report{}, fmt.Errorf("Pool %q identity changed", poolName)
+	}
+
+	report := Report{}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	maxAge := c.InventoryMaxAge
+	if maxAge <= 0 {
+		maxAge = volumeapi.DefaultPoolReadinessStaleAfter
+	}
+	report.Blockers = append(report.Blockers, poolInventoryBlockers(*target, now, maxAge, time.Time{})...)
+
+	persistentVolumes, err := c.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return Report{}, fmt.Errorf("list PersistentVolumes: %w", err)
+	}
+	for _, persistentVolume := range persistentVolumes.Items {
+		if persistentVolume.Spec.CSI == nil || persistentVolume.Spec.CSI.Driver != DriverName {
+			continue
+		}
+		matches, known := persistentVolumeTargetsNode(persistentVolume, target.NodeName)
+		if !known || matches {
+			reason := "placement=unknown"
+			if matches {
+				reason = "node=" + target.NodeName
+			}
+			report.Blockers = append(report.Blockers, Blocker{Kind: "PersistentVolume", Name: persistentVolume.Name, Reason: reason})
+		}
+	}
+
+	reservations, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: capacity.ReservationSelector})
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPV volume reservations: %w", err)
+	}
+	for _, reservation := range reservations.Items {
+		if reservation.Data["nodeName"] != target.NodeName {
+			continue
+		}
+		report.Blockers = append(report.Blockers, Blocker{
+			Kind: "VolumeReservation", Namespace: reservation.Namespace, Name: reservation.Name,
+			Reason: "volume=" + reservation.Data["volumeID"] + " node=" + target.NodeName,
+		})
+	}
+
+	volumes, err := c.Volumes.ListVolumes(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPVVolumes: %w", err)
+	}
+	for volumeID, state := range volumes {
+		usesPool := state.CurrentCopy != nil && state.CurrentCopy.PoolName == target.Name && state.CurrentCopy.PoolUID == target.UID
+		if !usesPool && state.OwnerNode != target.NodeName {
+			continue
+		}
+		reason := "owner=" + state.OwnerNode
+		if state.CurrentCopy == nil {
+			reason += " currentCopy=missing"
+		} else {
+			reason += " pool=" + state.CurrentCopy.PoolName + " poolUID=" + state.CurrentCopy.PoolUID
+		}
+		report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVVolume", Name: volumeID, Reason: reason})
+	}
+
+	moves, err := c.Volumes.ListMoves(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPVMoves: %w", err)
+	}
+	for _, move := range moves {
+		phase := fsm.Phase(move.Status.Phase)
+		if phase == fsm.PhaseSucceeded || phase == fsm.PhaseBlocked {
+			continue
+		}
+		usesPool := move.Spec.SourceNode == target.NodeName || move.Status.DestinationPoolUID == target.UID ||
+			copyUsesPool(move.Status.SourceCopy, *target) || copyUsesPool(move.Status.IncomingCopy, *target) || copyUsesPool(move.Status.DestinationCopy, *target)
+		if usesPool {
+			report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVMove", Name: move.Name, Reason: fmt.Sprintf("phase=%s volume=%s", phase, move.Spec.VolumeID)})
+		}
+	}
+
+	cleanups, err := c.Cleanups.List(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPVCleanups: %w", err)
+	}
+	for _, cleanup := range cleanups {
+		if cleanup.Status.Phase == cleanupapi.PhaseCompleted || cleanup.Spec.Target.PoolName != target.Name || cleanup.Spec.Target.PoolUID != target.UID {
+			continue
+		}
+		report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVCleanup", Name: cleanup.Name, Reason: "operation=" + cleanup.Spec.OperationID})
+	}
+
+	sort.Slice(report.Blockers, func(left, right int) bool {
+		return blockerKey(report.Blockers[left]) < blockerKey(report.Blockers[right])
+	})
+	return report, nil
+}
+
+func copyUsesPool(copy *cleanupapi.CopyIdentity, pool volumeapi.Pool) bool {
+	return copy != nil && copy.PoolName == pool.Name && copy.PoolUID == pool.UID
+}
+
+func persistentVolumeTargetsNode(persistentVolume corev1.PersistentVolume, nodeName string) (bool, bool) {
+	affinity := persistentVolume.Spec.NodeAffinity
+	if affinity == nil || affinity.Required == nil || len(affinity.Required.NodeSelectorTerms) == 0 {
+		return false, false
+	}
+	for _, term := range affinity.Required.NodeSelectorTerms {
+		known := false
+		matches := false
+		for _, expression := range term.MatchExpressions {
+			if expression.Key != corev1.LabelHostname {
+				continue
+			}
+			switch expression.Operator {
+			case corev1.NodeSelectorOpIn:
+				known = true
+				matches = contains(expression.Values, nodeName)
+			case corev1.NodeSelectorOpNotIn:
+				known = true
+				matches = !contains(expression.Values, nodeName)
+			}
+		}
+		if !known {
+			return false, false
+		}
+		if matches {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+func contains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Report, error) {
