@@ -116,6 +116,9 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	state, beginErr := s.Volumes.BeginCreate(ctx, id, nodeName)
 	if beginErr != nil {
 		if errors.Is(beginErr, volumeapi.ErrPoolCopyConflict) {
+			if releaseErr := s.releaseUnboundReservation(ctx, id, req.GetName(), nodeName, capacity); releaseErr != nil {
+				return nil, releaseErr
+			}
 			return nil, status.Error(codes.FailedPrecondition, beginErr.Error())
 		}
 		return nil, kubernetesAPIError("record volume creation intent", beginErr)
@@ -383,6 +386,51 @@ func (s *Service) bindReservation(ctx context.Context, id, volumeUID string) err
 			return err
 		}
 		return kubernetesAPIError("bind volume reservation", err)
+	}
+	return nil
+}
+
+func (s *Service) releaseUnboundReservation(ctx context.Context, id, requestName, nodeName string, capacity int64) error {
+	reservations := s.Client.CoreV1().ConfigMaps(s.Namespace)
+	expected := map[string]string{
+		"requestName": requestName,
+		"volumeID":    id,
+		"nodeName":    nodeName,
+		"capacity":    strconv.FormatInt(capacity, 10),
+	}
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current, err := reservations.Get(ctx, id, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if current.Labels["app.kubernetes.io/name"] != "shiftpv" || current.Labels["app.kubernetes.io/component"] != "volume-reservation" {
+			return nil
+		}
+		for key, value := range expected {
+			if current.Data[key] != value {
+				return nil
+			}
+		}
+		if current.Data["volumeUID"] != "" {
+			return nil
+		}
+		if current.UID == "" || current.ResourceVersion == "" {
+			return fmt.Errorf("unbound volume reservation identity is missing")
+		}
+		uid, resourceVersion := current.UID, current.ResourceVersion
+		err = reservations.Delete(ctx, id, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{
+			UID: &uid, ResourceVersion: &resourceVersion,
+		}})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return kubernetesAPIError("release unbound volume reservation after serving-copy conflict", err)
 	}
 	return nil
 }

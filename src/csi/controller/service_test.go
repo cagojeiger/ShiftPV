@@ -513,6 +513,71 @@ func TestCreateVolumeNeverRunsEffectWithoutDurableIntent(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeReleasesExactUnboundReservationAfterCopyConflict(t *testing.T) {
+	events := []string{}
+	registry := &durableCreateRegistry{events: &events, beginErr: volumeapi.ErrPoolCopyConflict}
+	client := fake.NewClientset()
+	client.PrependReactor("create", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		reservation := action.(k8stesting.CreateAction).GetObject().(*corev1.ConfigMap)
+		reservation.UID = "reservation-uid"
+		reservation.ResourceVersion = "reservation-rv"
+		return false, nil, nil
+	})
+	client.PrependReactor("delete", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		options := action.(k8stesting.DeleteAction).GetDeleteOptions()
+		if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != "reservation-uid" ||
+			options.Preconditions.ResourceVersion == nil || *options.Preconditions.ResourceVersion != "reservation-rv" {
+			t.Fatalf("reservation delete preconditions = %#v", options.Preconditions)
+		}
+		return false, nil, nil
+	})
+	service := configuredService(&Service{Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
+	req := validCreateRequest("worker-a")
+	volumeID, err := volume.IDFromName(req.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.CreateVolume(context.Background(), req)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("copy conflict code=%s err=%v", status.Code(err), err)
+	}
+	if got := strings.Join(events, ","); got != "intent" {
+		t.Fatalf("unexpected lifecycle events: %s", got)
+	}
+	if _, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unbound reservation remained after copy conflict: %v", err)
+	}
+}
+
+func TestCreateVolumePreservesConcurrentlyBoundReservationAfterCopyConflict(t *testing.T) {
+	events := []string{}
+	registry := &durableCreateRegistry{events: &events, beginErr: volumeapi.ErrPoolCopyConflict}
+	client := fake.NewClientset()
+	client.PrependReactor("create", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		reservation := action.(k8stesting.CreateAction).GetObject().(*corev1.ConfigMap)
+		reservation.UID = "reservation-uid"
+		reservation.ResourceVersion = "reservation-rv"
+		reservation.Data["volumeUID"] = "concurrent-volume-uid"
+		return false, nil, nil
+	})
+	service := configuredService(&Service{Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
+	req := validCreateRequest("worker-a")
+	volumeID, err := volume.IDFromName(req.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.CreateVolume(context.Background(), req)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("copy conflict code=%s err=%v", status.Code(err), err)
+	}
+	reservation, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{})
+	if err != nil || reservation.Data["volumeUID"] != "concurrent-volume-uid" {
+		t.Fatalf("concurrently bound reservation changed: reservation=%#v err=%v", reservation, err)
+	}
+}
+
 func TestCreateVolumeSettlesHelperOnlyAfterReadyIsDurable(t *testing.T) {
 	events := []string{}
 	copy := volume.CopyIdentity{
