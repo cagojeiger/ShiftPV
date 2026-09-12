@@ -32,7 +32,7 @@ tests:
         alertname: ShiftPVObservationStale
         exp_alerts:
           - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", source: metadata}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "ShiftPV has not completed a successful observation for more than five minutes."}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
       - eval_time: 6m
         alertname: ShiftPVPoolAccountingInvalid
         exp_alerts:
@@ -83,9 +83,9 @@ tests:
         alertname: ShiftPVObservationStale
         exp_alerts:
           - exp_labels: {instance: controller, namespace: shiftpv-system, severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "ShiftPV has not completed a successful observation for more than five minutes."}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
           - exp_labels: {severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "ShiftPV has not completed a successful observation for more than five minutes."}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
 
   - interval: 1m
     alert_rule_test:
@@ -93,4 +93,21 @@ tests:
         alertname: ShiftPVObservationStale
         exp_alerts:
           - exp_labels: {severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "ShiftPV has not completed a successful observation for more than five minutes."}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
+
+  - interval: 1m
+    input_series:
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",instance="controller",source="metadata"}'
+        values: '1 60 120 180 240 300 360 420 480 540 600'
+      - series: 'up{shiftpv="true",namespace="shiftpv-system",instance="controller"}'
+        values: '1+0x10'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",instance="worker-a",source="filesystem"}'
+        values: '1 60 stale _ _ _ _ _ _ _ _'
+      - series: 'up{shiftpv="true",namespace="shiftpv-system",instance="worker-a"}'
+        values: '1 1 stale _ _ _ _ _ _ _ _'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ShiftPVObservationStale
+        exp_alerts:
+          - exp_labels: {instance: worker-a, namespace: shiftpv-system, severity: warning, shiftpv: "true", source: filesystem}
+            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}

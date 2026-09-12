@@ -15,12 +15,16 @@ groups:
           time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"} > 300
           or absent(shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"})
           or up{shiftpv="true"} == 0
+          or (
+            max_over_time(shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"}[15m])
+            unless shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"}
+          )
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: ShiftPV observation is stale
-          description: ShiftPV has not completed a successful observation for more than five minutes.
+          description: A ShiftPV source is failing, stale, or missing from the current scrape targets.
       - alert: ShiftPVPoolAccountingInvalid
         expr: shiftpv_pool_accounting_valid{shiftpv="true"} == 0
         for: 5m

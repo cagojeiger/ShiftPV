@@ -98,7 +98,7 @@ filesystem 수치를 합산하면 중복될 수 있다.
 | Alert | 조건 |
 |---|---|
 | `ShiftPVObservationFailed` | 최근 snapshot 작업 실패 |
-| `ShiftPVObservationStale` | 마지막 성공이 5분보다 오래됨, 관측 시계열이 없음, 또는 metrics target 수집 실패 |
+| `ShiftPVObservationStale` | 마지막 성공이 5분보다 오래됨, 전체 관측 시계열이 없음, 최근 15분 내 개별 source가 사라짐, 또는 metrics target 수집 실패 |
 | `ShiftPVPoolAccountingInvalid` | 예약 회계를 capacity 판단에 사용할 수 없음 |
 | `ShiftPVPoolInventoryUnsafe` | copy inventory가 invalid 또는 truncated |
 | `ShiftPVCleanupNeedsReview` | 운영자 확인을 기다리는 Cleanup 존재 |

@@ -12,6 +12,7 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 type observation struct {
@@ -76,11 +77,11 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	if err != nil && !apierrors.IsNotFound(err) {
 		return result, fmt.Errorf("read source Node: %w", err)
 	}
-	_, sourceReady := readyPoolNodes[move.Spec.SourceNode]
-	sourceHealthy := err == nil && nodeReady(sourceNode) && sourceReady
+	sourcePool, sourceReady := readyPoolNodes[move.Spec.SourceNode]
+	sourceHealthy := err == nil && nodeReady(sourceNode) && sourceReady && sourceCopyPresent(sourcePool, state.CurrentCopy)
 	result.FSM.SourceHealthy = sourceHealthy
 	result.SourceCordoned = sourceNode != nil && sourceNode.Spec.Unschedulable
-	if !sourceHealthy {
+	if !sourceHealthy && !result.FSM.OwnerCommitted {
 		result.FSM.UnsafeReason = "SourceUnavailable"
 	}
 	// Discovery and Node updates are not atomic. A Move may be created from a
@@ -324,6 +325,19 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		}
 	}
 	return result, nil
+}
+
+func sourceCopyPresent(pool volumeapi.Pool, copy *volume.CopyIdentity) bool {
+	if copy == nil || copy.Validate() != nil || copy.Role != volume.RoleServing ||
+		copy.PoolName != pool.Name || copy.PoolUID != pool.UID || copy.NodeName != pool.NodeName || pool.Status.Inventory == nil {
+		return false
+	}
+	for _, observed := range pool.Status.Inventory.Copies {
+		if observed.Identity != nil && *observed.Identity == *copy {
+			return observed.Present && observed.Problem == ""
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) jobState(ctx context.Context, name string) (complete, failed bool, err error) {

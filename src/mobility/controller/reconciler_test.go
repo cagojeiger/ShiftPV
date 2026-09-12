@@ -91,9 +91,9 @@ func (m *memoryRepository) Pools(context.Context) ([]volumeapi.Pool, error) {
 }
 func (m *memoryRepository) ReadyPools(context.Context) ([]volumeapi.Pool, error) {
 	if m.readyPoolsConfigured {
-		return identifiedTestPools(m.readyPools), nil
+		return identifiedReadyTestPools(m.readyPools, m.volumes, m.pools), nil
 	}
-	return identifiedTestPools(m.pools), nil
+	return identifiedReadyTestPools(m.pools, m.volumes, m.pools), nil
 }
 func (m *memoryRepository) CreateMove(_ context.Context, _ string, spec volumeapi.MoveSpec) (volumeapi.Move, error) {
 	move := volumeapi.Move{Name: "move-generated", UID: "uid", Spec: spec}
@@ -136,6 +136,26 @@ func identifiedTestPools(pools []volumeapi.Pool) []volumeapi.Pool {
 		if result[index].UID == "" {
 			result[index].UID = result[index].Name + "-uid"
 		}
+	}
+	return result
+}
+
+func identifiedReadyTestPools(pools []volumeapi.Pool, states map[string]volumeapi.State, registered []volumeapi.Pool) []volumeapi.Pool {
+	result := identifiedTestPools(pools)
+	for index := range result {
+		if result[index].Status.Inventory != nil {
+			continue
+		}
+		inventory := &volumeapi.PoolInventory{Valid: true}
+		for id, raw := range states {
+			state := identifiedTestState(id, raw, registered)
+			if state.CurrentCopy == nil || state.CurrentCopy.PoolName != result[index].Name || state.CurrentCopy.PoolUID != result[index].UID {
+				continue
+			}
+			copy := *state.CurrentCopy
+			inventory.Copies = append(inventory.Copies, volumeapi.CopyObservation{Marker: "test-copy", Identity: &copy, Present: true})
+		}
+		result[index].Status.Inventory = inventory
 	}
 	return result
 }

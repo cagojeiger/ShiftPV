@@ -15,6 +15,7 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 const preflightVolume = "shiftpv-0123456789abcdef0123456789abcdef"
@@ -194,6 +195,53 @@ func TestPreflightAPIFailureDoesNotEvict(t *testing.T) {
 			}
 			if len(repo.moves) != 0 || repo.volumes[preflightVolume].Phase != volumeapi.PhaseReady {
 				t.Fatal("state changed")
+			}
+			assertNoEviction(t, client)
+		})
+	}
+}
+
+func TestPreflightRequiresExactPresentSourceCopy(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*volumeapi.Pool, volume.CopyIdentity)
+		valid  bool
+	}{
+		{name: "copy omitted", mutate: func(pool *volumeapi.Pool, _ volume.CopyIdentity) {
+			pool.Status.Inventory = &volumeapi.PoolInventory{Valid: true}
+		}},
+		{name: "copy missing", mutate: func(pool *volumeapi.Pool, copy volume.CopyIdentity) {
+			pool.Status.Inventory = &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &copy, Present: false}}}
+		}},
+		{name: "copy problem", mutate: func(pool *volumeapi.Pool, copy volume.CopyIdentity) {
+			pool.Status.Inventory = &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &copy, Present: true, Problem: "IdentityMismatch"}}}
+		}},
+		{name: "pool replaced", mutate: func(pool *volumeapi.Pool, copy volume.CopyIdentity) {
+			pool.UID = "replacement-pool-uid"
+			pool.Status.Inventory = &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &copy, Present: true}}}
+		}},
+		{name: "exact copy present", valid: true, mutate: func(pool *volumeapi.Pool, copy volume.CopyIdentity) {
+			pool.Status.Inventory = &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &copy, Present: true}}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r, repo, client := preflightFixture()
+			state := identifiedTestState(preflightVolume, repo.volumes[preflightVolume], repo.pools)
+			sourcePool := identifiedTestPools(repo.pools)[0]
+			test.mutate(&sourcePool, *state.CurrentCopy)
+			destinationPool := identifiedTestPools(repo.pools)[1]
+			repo.readyPoolsConfigured = true
+			repo.readyPools = []volumeapi.Pool{sourcePool, destinationPool}
+			move := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}}
+			observed, err := r.observe(context.Background(), move)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observed.FSM.PreconditionsValid != test.valid {
+				t.Fatalf("preconditions=%v reason=%q", observed.FSM.PreconditionsValid, observed.FSM.UnsafeReason)
+			}
+			if !test.valid && observed.FSM.UnsafeReason != "SourceUnavailable" {
+				t.Fatalf("unsafe reason=%q", observed.FSM.UnsafeReason)
 			}
 			assertNoEviction(t, client)
 		})
