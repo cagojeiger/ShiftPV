@@ -16,8 +16,13 @@ groups:
           or absent(shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"})
           or up{shiftpv="true"} == 0
           or (
-            max_over_time(shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"}[15m])
-            unless shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"}
+            max by (shiftpv, cluster, namespace, release, component, node, source) (
+              max_over_time(shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"}[15m])
+            )
+            unless on (shiftpv, cluster, namespace, release, component, node, source)
+            max by (shiftpv, cluster, namespace, release, component, node, source) (
+              shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"}
+            )
           )
         for: 5m
         labels:

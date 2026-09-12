@@ -336,10 +336,16 @@ func TestDiscoverReopensReviewFenceWhenCompletedCopyReappears(t *testing.T) {
 	}
 
 	target := request.Spec.Target
+	settledAt, err := time.Parse(time.RFC3339Nano, completed.Status.SettledAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := readyPool(target, volumeapi.CopyObservation{Marker: "restored", Identity: &target, Present: true})
+	pool.Status.Inventory.ObservedAt = metav1.NewTime(settledAt.Add(time.Second))
 	reconciler.Client = orphanKubernetesClient()
 	reconciler.Namespace = "system"
 	reconciler.Inventory = inventory{
-		pools:   []volumeapi.Pool{readyPool(target, volumeapi.CopyObservation{Marker: "restored", Identity: &target, Present: true})},
+		pools:   []volumeapi.Pool{pool},
 		volumes: map[string]volumeapi.State{},
 	}
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
@@ -352,6 +358,33 @@ func TestDiscoverReopensReviewFenceWhenCompletedCopyReappears(t *testing.T) {
 	}
 	if err := reconciler.ReconcileAll(context.Background()); err != nil || worker.calls != 1 {
 		t.Fatalf("reappeared cleanup reran automatically: calls=%d err=%v", worker.calls, err)
+	}
+}
+
+func TestDiscoverIgnoresPreSettlementCopyObservation(t *testing.T) {
+	store, request := fixture(t)
+	worker := &operator{}
+	reconciler := &Reconciler{Store: store, Operator: worker, Interval: time.Second, Now: func() time.Time { return time.Unix(1, 0) }}
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.Get(context.Background(), request.Name)
+	if err != nil || completed.Status.Phase != cleanupapi.PhaseCompleted {
+		t.Fatalf("cleanup did not settle: %#v err=%v", completed, err)
+	}
+	target := request.Spec.Target
+	reconciler.Client = orphanKubernetesClient()
+	reconciler.Namespace = "system"
+	reconciler.Inventory = inventory{
+		pools:   []volumeapi.Pool{readyPool(target, volumeapi.CopyObservation{Marker: "pre-purge", Identity: &target, Present: true})},
+		volumes: map[string]volumeapi.State{},
+	}
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.Get(context.Background(), request.Name)
+	if err != nil || current.Status.Phase != cleanupapi.PhaseCompleted || current.Status.Reason == "CopyReappeared" || worker.calls != 1 {
+		t.Fatalf("pre-settlement observation reopened cleanup: %#v calls=%d err=%v", current, worker.calls, err)
 	}
 }
 

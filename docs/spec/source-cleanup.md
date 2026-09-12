@@ -142,7 +142,7 @@ unrecorded path가 확인되면 새 할당을 닫는다. 기존 exact cleanup은
 
 Volume reservation과 `Pending`, `Running`, `Verifying`, `NeedsReview` cleanup은 uninstall
 dependency다. Exact cleanup의 `Completed` 정산 뒤 reservation이 해제되어야 정리 의무가 해소된다.
-완료된 대상이 다시 관측되면 `NeedsReview`로 돌아가 제거를 다시 차단한다.
+완료된 대상이 `settledAt` 이후의 새 inventory에서 다시 관측되면 `NeedsReview`로 돌아가 제거를 다시 차단한다.
 Helm pre-delete와 Argo CD lifecycle admission은 같은 판정을 사용한다.
 
 관측 지표는 [`metrics.md`](metrics.md), 전체 이동 순서는

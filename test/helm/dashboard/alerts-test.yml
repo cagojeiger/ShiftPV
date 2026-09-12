@@ -97,17 +97,32 @@ tests:
 
   - interval: 1m
     input_series:
-      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",instance="controller",source="metadata"}'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="controller",instance="controller",source="metadata"}'
         values: '1 60 120 180 240 300 360 420 480 540 600'
-      - series: 'up{shiftpv="true",namespace="shiftpv-system",instance="controller"}'
+      - series: 'up{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="controller",instance="controller"}'
         values: '1+0x10'
-      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",instance="worker-a",source="filesystem"}'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="node",node="worker-a",instance="worker-a",source="filesystem"}'
         values: '1 60 stale _ _ _ _ _ _ _ _'
-      - series: 'up{shiftpv="true",namespace="shiftpv-system",instance="worker-a"}'
+      - series: 'up{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="node",node="worker-a",instance="worker-a"}'
         values: '1 1 stale _ _ _ _ _ _ _ _'
     alert_rule_test:
       - eval_time: 8m
         alertname: ShiftPVObservationStale
         exp_alerts:
-          - exp_labels: {instance: worker-a, namespace: shiftpv-system, severity: warning, shiftpv: "true", source: filesystem}
+          - exp_labels: {component: node, namespace: shiftpv-system, node: worker-a, release: shiftpv, severity: warning, shiftpv: "true", source: filesystem}
             exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
+
+  - interval: 1m
+    input_series:
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="controller",pod="controller-old",instance="10.0.0.1:8080",source="metadata"}'
+        values: '1 60 stale _ _ _ _ _ _ _ _'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="controller",pod="controller-new",instance="10.0.0.2:8080",source="metadata"}'
+        values: '_ _ 120 180 240 300 360 420 480 540 600'
+      - series: 'up{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="controller",pod="controller-old",instance="10.0.0.1:8080"}'
+        values: '1 1 stale _ _ _ _ _ _ _ _'
+      - series: 'up{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="controller",pod="controller-new",instance="10.0.0.2:8080"}'
+        values: '_ _ 1+0x8'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ShiftPVObservationStale
+        exp_alerts: []

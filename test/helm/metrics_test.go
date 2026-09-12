@@ -58,7 +58,7 @@ func TestMetricsValues(t *testing.T) {
 				t.Fatal("missing listener wiring")
 			}
 			if tc.monitors == 1 {
-				for _, want := range []string{"release: kube-prometheus-stack", "matchNames: [\"storage\"]", "shiftpv.io/metrics: \"true\"", "port: metrics"} {
+				for _, want := range []string{"release: kube-prometheus-stack", "matchNames: [\"storage\"]", "shiftpv.io/metrics: \"true\"", "port: metrics", "targetLabel: component", "targetLabel: node", "targetLabel: release"} {
 					if !strings.Contains(output, want) {
 						t.Fatalf("missing monitor contract %q", want)
 					}

@@ -329,6 +329,9 @@ func (r *Reconciler) discover(ctx context.Context, snapshot orphanSnapshot) erro
 			}
 			if request, exists := requestsByTarget[identity]; exists {
 				if request.Status.Phase == cleanupapi.PhaseCompleted {
+					if !observedAfterSettlement(pool, request.Status.SettledAt) {
+						continue
+					}
 					if err := r.review(ctx, request, "CopyReappeared", "the exact copy was observed after its cleanup receipt settled; data is preserved and a new cleanup requires operator recovery"); err != nil {
 						return err
 					}
@@ -363,6 +366,14 @@ func (r *Reconciler) discover(ctx context.Context, snapshot orphanSnapshot) erro
 		}
 	}
 	return nil
+}
+
+func observedAfterSettlement(pool volumeapi.Pool, settledAt string) bool {
+	if pool.Status.Inventory == nil || pool.Status.Inventory.ObservedAt.IsZero() {
+		return false
+	}
+	settled, err := time.Parse(time.RFC3339Nano, settledAt)
+	return err == nil && pool.Status.Inventory.ObservedAt.Time.After(settled)
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, request cleanupapi.Cleanup) error {

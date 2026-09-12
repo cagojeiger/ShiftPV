@@ -104,5 +104,5 @@ filesystem 수치를 합산하면 중복될 수 있다.
 | `ShiftPVCleanupNeedsReview` | 운영자 확인을 기다리는 Cleanup 존재 |
 | `ShiftPVCopyNeedsReview` | orphan-preserved, missing, unsafe identity copy 존재 |
 
-Prometheus가 ServiceMonitor 없이 직접 수집할 때도 target에 `shiftpv="true"` label을 추가한다. Alert는
+Prometheus가 ServiceMonitor 없이 직접 수집할 때도 target에 `shiftpv="true"`, `release`, `component`와 node target의 `node` label을 추가한다. Alert는
 삭제 명령이 아니라 관찰 결과이며, 대상 CR과 Pool inventory를 확인한 뒤 조치한다.
