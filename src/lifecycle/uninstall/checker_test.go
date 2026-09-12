@@ -150,6 +150,12 @@ func TestCheckPoolDeleteAllowsEmptyDuplicateWhenLiveVolumeIdentifiesOtherPool(t 
 		InstallationID: "installation", PoolName: "pool-surviving", PoolUID: "pool-surviving-uid", VolumeID: volumeID,
 		VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: target.NodeName, Role: volume.RoleServing,
 	}
+	destinationVolumeID := "shiftpv-fedcba9876543210fedcba9876543210"
+	destinationCopy := volume.CopyIdentity{
+		InstallationID: currentCopy.InstallationID, PoolName: currentCopy.PoolName, PoolUID: currentCopy.PoolUID,
+		VolumeID: destinationVolumeID, VolumeUID: "destination-volume-uid", CopyID: "destination-copy-id",
+		NodeName: target.NodeName, Role: volume.RoleServing,
+	}
 	client := fake.NewClientset(
 		shiftPVPersistentVolumeOnNode(volumeID, target.NodeName),
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "shiftpv-system", Labels: map[string]string{
@@ -161,6 +167,13 @@ func TestCheckPoolDeleteAllowsEmptyDuplicateWhenLiveVolumeIdentifiesOtherPool(t 
 		volumes: map[string]volumeapi.State{volumeID: {
 			UID: currentCopy.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: target.NodeName, CurrentCopy: &currentCopy, PublishedNodes: []string{target.NodeName},
 		}},
+		moves: []volumeapi.Move{
+			{Name: "move-source", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: target.NodeName}, Status: volumeapi.MoveStatus{Phase: "Copying", SourceCopy: &currentCopy}},
+			{Name: "move-destination", Spec: volumeapi.MoveSpec{VolumeID: destinationVolumeID, SourceNode: "node-source"}, Status: volumeapi.MoveStatus{
+				Phase: "Copying", DestinationNode: target.NodeName, DestinationPoolUID: destinationCopy.PoolUID,
+				CandidateNodes: []string{target.NodeName}, DestinationCopy: &destinationCopy,
+			}},
+		},
 	}
 	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanupRepository{}, Namespace: "shiftpv-system", Now: func() time.Time { return now }}
 	report, err := checker.CheckPoolDeleteAfter(context.Background(), target.Name, types.UID(target.UID), now.Add(-time.Second))

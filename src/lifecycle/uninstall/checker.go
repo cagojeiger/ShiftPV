@@ -218,10 +218,7 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		if phase == fsm.PhaseSucceeded || phase == fsm.PhaseBlocked {
 			continue
 		}
-		usesPool := move.Spec.SourceNode == target.NodeName || move.Status.DestinationNode == target.NodeName ||
-			contains(move.Status.CandidateNodes, target.NodeName) || move.Status.DestinationPoolUID == target.UID ||
-			copyUsesPool(move.Status.SourceCopy, *target) || copyUsesPool(move.Status.IncomingCopy, *target) || copyUsesPool(move.Status.DestinationCopy, *target)
-		if usesPool {
+		if moveUsesPool(move, *target) {
 			report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVMove", Name: move.Name, Reason: fmt.Sprintf("phase=%s volume=%s", phase, move.Spec.VolumeID)})
 		}
 	}
@@ -245,6 +242,42 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 
 func copyUsesPool(copy *cleanupapi.CopyIdentity, pool volumeapi.Pool) bool {
 	return copy != nil && copy.PoolName == pool.Name && copy.PoolUID == pool.UID
+}
+
+func moveUsesPool(move volumeapi.Move, pool volumeapi.Pool) bool {
+	sourceKnown := exactMoveCopy(move.Status.SourceCopy, move.Spec.VolumeID, move.Spec.SourceNode, volume.RoleServing)
+	if sourceKnown {
+		if copyUsesPool(move.Status.SourceCopy, pool) {
+			return true
+		}
+	} else if move.Spec.SourceNode == pool.NodeName {
+		return true
+	}
+
+	destinationKnown := false
+	for _, candidate := range []struct {
+		identity *volume.CopyIdentity
+		role     string
+	}{{move.Status.IncomingCopy, volume.RoleIncoming}, {move.Status.DestinationCopy, volume.RoleServing}} {
+		if !exactMoveCopy(candidate.identity, move.Spec.VolumeID, move.Status.DestinationNode, candidate.role) {
+			continue
+		}
+		destinationKnown = true
+		if copyUsesPool(candidate.identity, pool) {
+			return true
+		}
+	}
+	if move.Status.DestinationNode != "" && move.Status.DestinationPoolUID != "" {
+		destinationKnown = true
+		if move.Status.DestinationPoolUID == pool.UID {
+			return true
+		}
+	}
+	return !destinationKnown && (move.Status.DestinationNode == pool.NodeName || contains(move.Status.CandidateNodes, pool.NodeName))
+}
+
+func exactMoveCopy(copy *volume.CopyIdentity, volumeID, nodeName, role string) bool {
+	return copy != nil && copy.Validate() == nil && copy.VolumeID == volumeID && copy.NodeName == nodeName && copy.Role == role
 }
 
 func currentCopyUsesPool(volumeID string, state volumeapi.State, pool volumeapi.Pool) (bool, bool) {
