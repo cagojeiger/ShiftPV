@@ -265,6 +265,48 @@ func TestInventoryIsBoundedAndPreservesMalformedMarkers(t *testing.T) {
 	}
 }
 
+func TestInventoryRejectsMissingOrChangedCopyMarker(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(string, volume.CopyIdentity) error
+	}{
+		{name: "missing", mutate: func(root string, identity volume.CopyIdentity) error {
+			return os.Remove(filepath.Join(root, ".shiftpv", copyMarker(identity.CopyID)))
+		}},
+		{name: "changed", mutate: func(root string, identity volume.CopyIdentity) error {
+			return os.WriteFile(filepath.Join(root, ".shiftpv", copyMarker(identity.CopyID)), []byte("{}"), 0600)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			identity := testIdentity()
+			if err := PrepareServing(context.Background(), root, identity, func(context.Context) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if err := test.mutate(root, identity); err != nil {
+				t.Fatal(err)
+			}
+			store, err := OpenExisting(root, PoolIdentity{InstallationID: identity.InstallationID, PoolUID: identity.PoolUID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			inventory, err := store.Inventory()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer inventory.Close()
+			observations, _, err := inventory.Page(context.Background(), 64)
+			if err != nil || len(observations) != 1 || observations[0].Problem == "" || observations[0].Identity != nil {
+				t.Fatalf("copy marker failure accepted: observations=%#v err=%v", observations, err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "volumes", identity.VolumeID)); err != nil {
+				t.Fatal("inventory modified serving data")
+			}
+		})
+	}
+}
+
 func testIdentity() volume.CopyIdentity {
 	return volume.CopyIdentity{
 		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",

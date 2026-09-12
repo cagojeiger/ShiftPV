@@ -66,8 +66,13 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 			}
 			for _, item := range page {
 				observation := volumeapi.CopyObservation{Marker: item.Marker, Identity: item.Identity, Present: item.Present, Problem: item.Problem}
-				if item.Identity != nil && item.Present && item.Problem == "" {
-					source := filepath.Join(root, filepath.FromSlash(physicalKey(*item.Identity)))
+				if item.Identity != nil && (item.Identity.InstallationID != installationID || item.Identity.PoolName != pool.Name ||
+					item.Identity.PoolUID != pool.UID || item.Identity.NodeName != pool.NodeName) {
+					observation.Identity = nil
+					observation.Problem = "PoolIdentityMismatch"
+				}
+				if observation.Identity != nil && observation.Present && observation.Problem == "" {
+					source := filepath.Join(root, filepath.FromSlash(physicalKey(*observation.Identity)))
 					observation.Published, err = s.Publications.HasPublishedTarget(source, s.TargetRoot)
 					if err != nil {
 						observation.Problem = "PublicationObservationFailed: " + err.Error()

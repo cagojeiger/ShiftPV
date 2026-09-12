@@ -86,6 +86,37 @@ func TestScannerIsBoundedAndSurfacesIdentityFailure(t *testing.T) {
 	}
 }
 
+func TestScannerRejectsCopyRegisteredToDifferentPoolNameOrNode(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*volume.CopyIdentity)
+	}{
+		{name: "pool name", mutate: func(identity *volume.CopyIdentity) { identity.PoolName = "other-pool" }},
+		{name: "node", mutate: func(identity *volume.CopyIdentity) { identity.NodeName = "other-node" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := t.TempDir()
+			root := filepath.Join(host, "pool")
+			if err := os.Mkdir(root, 0755); err != nil {
+				t.Fatal(err)
+			}
+			identity := volume.CopyIdentity{
+				InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
+				VolumeID: "shiftpv-44444444444444444444444444444444", VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: "node-a", Role: volume.RoleServing,
+			}
+			test.mutate(&identity)
+			if err := ownership.PrepareServing(context.Background(), root, identity, func(context.Context) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			pool := volumeapi.Pool{Name: "pool-a", UID: identity.PoolUID, NodeName: "node-a", MountPath: "/pool"}
+			result := (&Scanner{HostRoot: host, TargetRoot: "/kubelet/pods", Installation: installation{id: identity.InstallationID}, Publications: publications{}, Limit: 256}).Scan(context.Background(), pool, time.Now())
+			if result.Valid || result.Message != "CopyObservationProblem" || len(result.Copies) != 1 || result.Copies[0].Problem != "PoolIdentityMismatch" {
+				t.Fatalf("cross-pool identity accepted: %#v", result)
+			}
+		})
+	}
+}
+
 func TestScannerDoesNotTruncateAtExactLimit(t *testing.T) {
 	host := t.TempDir()
 	root := filepath.Join(host, "pool")

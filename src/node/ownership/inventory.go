@@ -97,7 +97,13 @@ func (i *Inventory) readPlacement(name string) (placement, error) {
 	if envelope.Value.Identity.Validate() != nil || name != placementMarker(envelope.Value.Identity.CopyID) {
 		return placement{}, ErrIdentity
 	}
+	if envelope.Value.Identity.InstallationID != i.store.pool.InstallationID || envelope.Value.Identity.PoolUID != i.store.pool.PoolUID {
+		return placement{}, ErrIdentity
+	}
 	if err := i.store.checkPlacementMarker(envelope.Value.Identity.CopyID, envelope.Value); err != nil {
+		return placement{}, err
+	}
+	if err := i.store.checkMarker(copyMarker(envelope.Value.Identity.CopyID), envelope.Value.Identity); err != nil {
 		return placement{}, err
 	}
 	return envelope.Value, nil
