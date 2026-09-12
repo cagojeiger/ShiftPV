@@ -479,7 +479,7 @@ func runCleanup(arguments []string) error {
 		approved.Status.Executor.JobUID != jobUID || approved.Status.Executor.NodeName != approved.Spec.Target.NodeName {
 		return fmt.Errorf("cleanup executor is not authorized")
 	}
-	authority := func(checkCtx context.Context) error {
+	authority := func(checkCtx context.Context, effectStarted bool) error {
 		current, err := cleanups.Get(checkCtx, approved.Name)
 		if err != nil || current.UID != approved.UID || current.Spec != approved.Spec || current.Status.Phase != cleanupapi.PhaseRunning ||
 			current.Status.Executor == nil || current.Status.Executor.JobUID != jobUID {
@@ -493,9 +493,9 @@ func runCleanup(arguments []string) error {
 		if err != nil || pool.Name != approved.Spec.Target.PoolName || pool.UID != approved.Spec.Target.PoolUID {
 			return fmt.Errorf("Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 		}
-		return verifyCleanupAuthority(checkCtx, client, registry, *namespace, approved, *poolReadinessStaleAfter)
+		return verifyCleanupAuthority(checkCtx, client, registry, *namespace, approved, *poolReadinessStaleAfter, effectStarted)
 	}
-	localReceipt, digest, err := ownership.Reclaim(ctx, *root, approved.Spec.Target, approved.Spec.OperationID, authority)
+	localReceipt, digest, err := ownership.ReclaimWithResume(ctx, *root, approved.Spec.Target, approved.Spec.OperationID, authority)
 	if err != nil {
 		return err
 	}
@@ -509,7 +509,7 @@ func runCleanup(arguments []string) error {
 	})
 }
 
-func verifyCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup, freshness time.Duration) error {
+func verifyCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup, freshness time.Duration, effectStarted bool) error {
 	switch cleanup.Spec.Authority.Kind {
 	case "ShiftPVVolume":
 		state, err := registry.Get(ctx, cleanup.Spec.Authority.Name)
@@ -532,13 +532,13 @@ func verifyCleanupAuthority(ctx context.Context, client kubernetes.Interface, re
 		}
 		return nil
 	case "Namespace":
-		return verifyOrphanCleanupAuthority(ctx, client, registry, namespace, cleanup, freshness)
+		return verifyOrphanCleanupAuthority(ctx, client, registry, namespace, cleanup, freshness, effectStarted)
 	default:
 		return fmt.Errorf("cleanup authority %q is not implemented", cleanup.Spec.Authority.Kind)
 	}
 }
 
-func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup, poolReadinessStaleAfter time.Duration) error {
+func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup, poolReadinessStaleAfter time.Duration, effectStarted bool) error {
 	if client == nil || namespace == "" || cleanup.Spec.Reason != "OrphanReclaim" || !cleanup.Spec.Approved ||
 		cleanup.Spec.Authority.Name != "kube-system" || cleanup.Spec.Authority.UID != cleanup.Spec.Target.InstallationID {
 		return fmt.Errorf("orphan cleanup authority is incomplete: %w", volumeapi.ErrStateConflict)
@@ -589,22 +589,24 @@ func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interfa
 	if ready, reason := pool.CleanupReadyAt(now, poolReadinessStaleAfter); !ready {
 		return fmt.Errorf("orphan Pool is not available for cleanup (%s): %w", reason, volumeapi.ErrStateConflict)
 	}
-	if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.ObservedAt.IsZero() ||
-		now.Before(pool.Status.Inventory.ObservedAt.Time) || now.Sub(pool.Status.Inventory.ObservedAt.Time) > poolReadinessStaleAfter {
-		return fmt.Errorf("orphan inventory is unavailable or stale: %w", volumeapi.ErrStateConflict)
-	}
-	observed := false
-	for _, candidate := range pool.Status.Inventory.Copies {
-		if candidate.Identity == nil || *candidate.Identity != cleanup.Spec.Target {
-			continue
+	if !effectStarted {
+		if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.ObservedAt.IsZero() ||
+			now.Before(pool.Status.Inventory.ObservedAt.Time) || now.Sub(pool.Status.Inventory.ObservedAt.Time) > poolReadinessStaleAfter {
+			return fmt.Errorf("orphan inventory is unavailable or stale: %w", volumeapi.ErrStateConflict)
 		}
-		observed = true
-		if !candidate.Present || candidate.Published || candidate.Problem != "" {
-			return fmt.Errorf("orphan copy is absent, published, or invalid: %w", volumeapi.ErrStateConflict)
+		observed := false
+		for _, candidate := range pool.Status.Inventory.Copies {
+			if candidate.Identity == nil || *candidate.Identity != cleanup.Spec.Target {
+				continue
+			}
+			observed = true
+			if !candidate.Present || candidate.Published || candidate.Problem != "" {
+				return fmt.Errorf("orphan copy is absent, published, or invalid: %w", volumeapi.ErrStateConflict)
+			}
 		}
-	}
-	if !observed {
-		return fmt.Errorf("orphan copy is not present in the exact Pool inventory: %w", volumeapi.ErrStateConflict)
+		if !observed {
+			return fmt.Errorf("orphan copy is not present in the exact Pool inventory: %w", volumeapi.ErrStateConflict)
+		}
 	}
 	reservationVolumeUID := cleanup.Spec.Target.VolumeUID
 	if authority == volumeapi.CopyAuthoritySuperseded {

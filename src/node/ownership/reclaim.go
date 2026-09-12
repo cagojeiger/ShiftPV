@@ -20,7 +20,20 @@ import (
 // Reclaim retires and purges exactly one API-authorized copy. Retries use the
 // same operation ID and local intent, including after rename or response loss.
 func Reclaim(ctx context.Context, root string, target volume.CopyIdentity, operationID string, authority func(context.Context) error) (Receipt, string, error) {
+	if authority == nil {
+		return Receipt{}, "", ErrIdentity
+	}
+	if err := authority(ctx); err != nil {
+		return Receipt{}, "", err
+	}
 	return reclaim(ctx, root, target, operationID, authority, preflightPurge, purgeRetired)
+}
+
+// ReclaimWithResume distinguishes a fresh destructive effect from replay of an
+// exact locally journaled effect. Callers may relax only observation checks
+// that the effect itself necessarily invalidated; API ownership stays required.
+func ReclaimWithResume(ctx context.Context, root string, target volume.CopyIdentity, operationID string, authority func(context.Context, bool) error) (Receipt, string, error) {
+	return reclaimWithState(ctx, root, target, operationID, authority, preflightPurge, purgeRetired)
 }
 
 func reclaim(
@@ -32,11 +45,20 @@ func reclaim(
 	preflight func(*Store) error,
 	purge func(context.Context, *Store, localIntent) error,
 ) (Receipt, string, error) {
+	return reclaimWithState(ctx, root, target, operationID, func(ctx context.Context, _ bool) error { return authority(ctx) }, preflight, purge)
+}
+
+func reclaimWithState(
+	ctx context.Context,
+	root string,
+	target volume.CopyIdentity,
+	operationID string,
+	authority func(context.Context, bool) error,
+	preflight func(*Store) error,
+	purge func(context.Context, *Store, localIntent) error,
+) (Receipt, string, error) {
 	if authority == nil || !volume.ValidIdentityToken(operationID) || target.Validate() != nil {
 		return Receipt{}, "", ErrIdentity
-	}
-	if err := authority(ctx); err != nil {
-		return Receipt{}, "", err
 	}
 	store, err := OpenExisting(root, PoolIdentity{InstallationID: target.InstallationID, PoolUID: target.PoolUID})
 	if err != nil {
@@ -48,13 +70,13 @@ func reclaim(
 		return Receipt{}, "", err
 	}
 	defer lock.Close()
-	if err := authority(ctx); err != nil {
-		return Receipt{}, "", err
-	}
 	var completed Receipt
 	if err := store.readMarker(operationMarker("receipt", operationID), &completed); err == nil {
 		if completed.OperationID != operationID || completed.Target != target || !completed.Retired || !completed.Purged {
 			return Receipt{}, "", ErrIdentity
+		}
+		if err := authority(ctx, true); err != nil {
+			return Receipt{}, "", err
 		}
 		if err := store.verifyAbsent(target); err != nil {
 			return Receipt{}, "", err
@@ -67,21 +89,43 @@ func reclaim(
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Receipt{}, "", err
 	}
-	if err := store.checkMarker(copyMarker(target.CopyID), target); err != nil {
-		return Receipt{}, "", fmt.Errorf("verify copy identity: %w", err)
-	}
-	placement, err := store.readPlacement(target.CopyID)
-	if err != nil || placement.Identity != target {
-		return Receipt{}, "", fmt.Errorf("verify copy placement: %w", errors.Join(err, ErrIdentity))
-	}
-	intent, err := store.ensureLocalIntent(target, operationID, placement)
+	intent, intentExists, err := store.localIntent(target, operationID)
 	if err != nil {
-		return Receipt{}, "", fmt.Errorf("persist local cleanup intent: %w", err)
+		return Receipt{}, "", fmt.Errorf("read local cleanup intent: %w", err)
+	}
+	effectStarted := false
+	if intentExists {
+		effectStarted, err = store.cleanupEffectStarted(target, intent)
+		if err != nil {
+			return Receipt{}, "", fmt.Errorf("inspect local cleanup effect: %w", err)
+		}
+	}
+	if err := authority(ctx, effectStarted); err != nil {
+		return Receipt{}, "", err
+	}
+	if !effectStarted {
+		if err := store.checkMarker(copyMarker(target.CopyID), target); err != nil {
+			return Receipt{}, "", fmt.Errorf("verify copy identity: %w", err)
+		}
+		placement, err := store.readPlacement(target.CopyID)
+		if err != nil || placement.Identity != target {
+			return Receipt{}, "", fmt.Errorf("verify copy placement: %w", errors.Join(err, ErrIdentity))
+		}
+		if intentExists {
+			if intent.Device != placement.Device || intent.Inode != placement.Inode {
+				return Receipt{}, "", ErrIdentity
+			}
+		} else {
+			intent, err = store.ensureLocalIntent(target, operationID, placement)
+			if err != nil {
+				return Receipt{}, "", fmt.Errorf("persist local cleanup intent: %w", err)
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return Receipt{}, "", err
 	}
-	if err := authority(ctx); err != nil {
+	if err := authority(ctx, effectStarted); err != nil {
 		return Receipt{}, "", fmt.Errorf("recheck cleanup authority before filesystem effect: %w", err)
 	}
 	if err := preflight(store); err != nil {
@@ -152,6 +196,68 @@ func (s *Store) ensureLocalIntent(target volume.CopyIdentity, operationID string
 		return localIntent{}, err
 	}
 	return intent, nil
+}
+
+func (s *Store) localIntent(target volume.CopyIdentity, operationID string) (localIntent, bool, error) {
+	var intent localIntent
+	err := s.readMarker(operationMarker("cleanup", operationID), &intent)
+	if errors.Is(err, os.ErrNotExist) {
+		return localIntent{}, false, nil
+	}
+	if err != nil {
+		return localIntent{}, false, err
+	}
+	if intent.OperationID != operationID || intent.Target != target {
+		return localIntent{}, false, ErrIdentity
+	}
+	return intent, true, nil
+}
+
+func (s *Store) cleanupEffectStarted(target volume.CopyIdentity, intent localIntent) (bool, error) {
+	sourceParent, sourceName, closeParent, err := s.openRoleParent(target)
+	if err != nil && !errors.Is(err, unix.ENOENT) {
+		return false, err
+	}
+	if closeParent && err == nil {
+		defer unix.Close(sourceParent)
+	}
+	sourcePresent := false
+	if err == nil {
+		sourcePresent, err = exactDirectoryPresent(sourceParent, sourceName, intent)
+		if err != nil {
+			return false, err
+		}
+	}
+	if target.Role == volume.RoleRetired {
+		return !sourcePresent, nil
+	}
+	retiredParent, err := unix.Openat(int(s.control.Fd()), "retired", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil && !errors.Is(err, unix.ENOENT) {
+		return false, err
+	}
+	retiredPresent := false
+	if err == nil {
+		defer unix.Close(retiredParent)
+		retiredPresent, err = exactDirectoryPresent(retiredParent, target.CopyID, intent)
+		if err != nil {
+			return false, err
+		}
+	}
+	if sourcePresent && retiredPresent {
+		return false, ErrIdentity
+	}
+	return !sourcePresent || retiredPresent, nil
+}
+
+func exactDirectoryPresent(parent int, name string, intent localIntent) (bool, error) {
+	fd, err := openIdentityDirectory(parent, name, intent)
+	if errors.Is(err, unix.ENOENT) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, unix.Close(fd)
 }
 
 func (s *Store) retire(target volume.CopyIdentity, intent localIntent) error {

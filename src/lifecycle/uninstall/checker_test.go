@@ -137,6 +137,38 @@ func TestCheckPoolDeleteAllowsExactEmptyPoolWhileOtherPoolsRemainActive(t *testi
 	}
 }
 
+func TestCheckPoolDeleteAllowsEmptyDuplicateWhenLiveVolumeIdentifiesOtherPool(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 10, 0, 0, 0, time.UTC)
+	target := volumeapi.Pool{
+		Name: "pool-empty-duplicate", UID: "pool-empty-uid", NodeName: "node-a", Generation: 1,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1,
+			Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionIdentityReleased, Status: metav1.ConditionTrue, ObservedGeneration: 1, Reason: "PoolIdentityReleased"}},
+			Inventory:  &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true}},
+	}
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	currentCopy := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool-surviving", PoolUID: "pool-surviving-uid", VolumeID: volumeID,
+		VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: target.NodeName, Role: volume.RoleServing,
+	}
+	client := fake.NewClientset(
+		shiftPVPersistentVolumeOnNode(volumeID, target.NodeName),
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "shiftpv-system", Labels: map[string]string{
+			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
+		}}, Data: map[string]string{"volumeID": volumeID, "volumeUID": currentCopy.VolumeUID, "nodeName": target.NodeName}},
+	)
+	repository := &memoryRepository{
+		pools: []volumeapi.Pool{target, {Name: currentCopy.PoolName, UID: currentCopy.PoolUID, NodeName: target.NodeName}},
+		volumes: map[string]volumeapi.State{volumeID: {
+			UID: currentCopy.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: target.NodeName, CurrentCopy: &currentCopy, PublishedNodes: []string{target.NodeName},
+		}},
+	}
+	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanupRepository{}, Namespace: "shiftpv-system", Now: func() time.Time { return now }}
+	report, err := checker.CheckPoolDeleteAfter(context.Background(), target.Name, types.UID(target.UID), now.Add(-time.Second))
+	if err != nil || !report.Safe() {
+		t.Fatalf("exact other-Pool ownership blocked empty duplicate deletion: blockers=%#v err=%v", report.Blockers, err)
+	}
+}
+
 func TestCheckPoolDeleteBlocksEveryTargetPoolDependency(t *testing.T) {
 	now := time.Date(2026, time.September, 12, 7, 0, 0, 0, time.UTC)
 	target := volumeapi.Pool{

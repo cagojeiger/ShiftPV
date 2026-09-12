@@ -74,6 +74,7 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	container := created.Spec.Template.Spec.Containers[0]
 	if created.Name != cleanup.Name+"-effect" || created.Spec.Template.Spec.NodeName != cleanup.Spec.Target.NodeName ||
 		created.Spec.Template.Spec.ServiceAccountName != "shiftpv-controller" || container.Command[0] != "/shiftpv-volume-helper" ||
+		created.Spec.BackoffLimit == nil || *created.Spec.BackoffLimit < 1 || created.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever ||
 		!strings.Contains(strings.Join(container.Args, " "), "--cleanup-uid="+cleanup.UID) ||
 		!strings.Contains(strings.Join(container.Args, " "), "--pool-readiness-stale-after=7m0s") {
 		t.Fatalf("cleanup Job identity=%#v", created)

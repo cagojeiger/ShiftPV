@@ -19,6 +19,7 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 	"github.com/cagojeiger/ShiftPV/src/pool/capacity"
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 const (
@@ -134,6 +135,11 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 	}
 	report.Blockers = append(report.Blockers, poolInventoryBlockers(*target, now, maxAge, inventoryAfter.UTC())...)
 
+	volumes, err := c.Volumes.ListVolumes(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPVVolumes: %w", err)
+	}
+
 	persistentVolumes, err := c.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Report{}, fmt.Errorf("list PersistentVolumes: %w", err)
@@ -141,6 +147,14 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 	for _, persistentVolume := range persistentVolumes.Items {
 		if persistentVolume.Spec.CSI == nil || persistentVolume.Spec.CSI.Driver != DriverName {
 			continue
+		}
+		if state, exists := volumes[persistentVolume.Spec.CSI.VolumeHandle]; exists {
+			if usesPool, known := currentCopyUsesPool(persistentVolume.Spec.CSI.VolumeHandle, state, *target); known {
+				if usesPool {
+					report.Blockers = append(report.Blockers, Blocker{Kind: "PersistentVolume", Name: persistentVolume.Name, Reason: "pool=" + target.Name + " poolUID=" + target.UID})
+				}
+				continue
+			}
 		}
 		matches, known := persistentVolumeTargetsNode(persistentVolume, target.NodeName)
 		if !known || matches {
@@ -157,6 +171,18 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		return Report{}, fmt.Errorf("list ShiftPV volume reservations: %w", err)
 	}
 	for _, reservation := range reservations.Items {
+		volumeID := reservation.Data["volumeID"]
+		if state, exists := volumes[volumeID]; exists {
+			if usesPool, known := currentCopyUsesPool(volumeID, state, *target); known {
+				if usesPool {
+					report.Blockers = append(report.Blockers, Blocker{
+						Kind: "VolumeReservation", Namespace: reservation.Namespace, Name: reservation.Name,
+						Reason: "volume=" + volumeID + " pool=" + target.Name + " poolUID=" + target.UID,
+					})
+				}
+				continue
+			}
+		}
 		if reservation.Data["nodeName"] != target.NodeName {
 			continue
 		}
@@ -166,14 +192,12 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		})
 	}
 
-	volumes, err := c.Volumes.ListVolumes(ctx)
-	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPVVolumes: %w", err)
-	}
 	for volumeID, state := range volumes {
-		usesPool := state.CurrentCopy != nil && state.CurrentCopy.PoolName == target.Name && state.CurrentCopy.PoolUID == target.UID
-		usesPool = usesPool || contains(state.PublishedNodes, target.NodeName)
-		if !usesPool && state.OwnerNode != target.NodeName {
+		usesPool, known := currentCopyUsesPool(volumeID, state, *target)
+		if known && !usesPool {
+			continue
+		}
+		if !known && !contains(state.PublishedNodes, target.NodeName) && state.OwnerNode != target.NodeName {
 			continue
 		}
 		reason := "owner=" + state.OwnerNode
@@ -221,6 +245,14 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 
 func copyUsesPool(copy *cleanupapi.CopyIdentity, pool volumeapi.Pool) bool {
 	return copy != nil && copy.PoolName == pool.Name && copy.PoolUID == pool.UID
+}
+
+func currentCopyUsesPool(volumeID string, state volumeapi.State, pool volumeapi.Pool) (bool, bool) {
+	copy := state.CurrentCopy
+	if copy == nil || copy.Validate() != nil || copy.VolumeID != volumeID || copy.VolumeUID != state.UID || copy.NodeName != state.OwnerNode || copy.Role != volume.RoleServing {
+		return false, false
+	}
+	return copy.PoolName == pool.Name && copy.PoolUID == pool.UID, true
 }
 
 func persistentVolumeTargetsNode(persistentVolume corev1.PersistentVolume, nodeName string) (bool, bool) {
