@@ -24,7 +24,7 @@ func main() {
 	permitNamespace := flag.String("permit-namespace", os.Getenv("POD_NAMESPACE"), "namespace for the uninstall permit ConfigMap")
 	permitName := flag.String("permit-name", "shiftpv-uninstall-permit", "uninstall permit ConfigMap name")
 	validationWebhook := flag.String("validation-webhook", "shiftpv-lifecycle", "lifecycle ValidatingWebhookConfiguration name")
-	timeout := flag.Duration("timeout", 45*time.Second, "maximum Kubernetes inspection time")
+	timeout := flag.Duration("timeout", 90*time.Second, "maximum Kubernetes inspection time")
 	retry := flag.Bool("retry", false, "keep retrying quiesced inspection until teardown is safe")
 	retryInterval := flag.Duration("retry-interval", 5*time.Second, "delay between retry attempts")
 	flag.Parse()
@@ -64,7 +64,7 @@ func main() {
 	if runErr != nil {
 		deny("quiesce and inspect ShiftPV dependencies", runErr)
 	}
-	fmt.Println("ShiftPV uninstall allowed: provisioning is quiesced and no dependent PV, PVC, reservation, Volume, active Move, or unsettled Cleanup exists")
+	fmt.Println("ShiftPV uninstall allowed: provisioning is quiesced and no dependent PV, PVC, reservation, Volume, active Move, unsettled Cleanup, or physical Pool copy exists")
 }
 
 func runWithRetry(ctx context.Context, checker *uninstallcheck.Checker, permit *uninstallcheck.PermitStore, validationWebhook string, attemptTimeout, retryInterval time.Duration) error {
@@ -117,7 +117,7 @@ func run(ctx context.Context, checker *uninstallcheck.Checker, permit *uninstall
 	if err := permit.WaitForQuiesced(ctx, attempt); err != nil {
 		return fmt.Errorf("wait for controller quiesce: %w", err)
 	}
-	report, err := checker.Check(ctx)
+	report, err := checkAfterQuiesce(ctx, checker, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("inspect ShiftPV dependencies: %w", err)
 	}
@@ -132,6 +132,22 @@ func run(ctx context.Context, checker *uninstallcheck.Checker, permit *uninstall
 	}
 	completed = true
 	return nil
+}
+
+func checkAfterQuiesce(ctx context.Context, checker *uninstallcheck.Checker, inventoryAfter time.Time) (uninstallcheck.Report, error) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		report, err := checker.CheckAfter(ctx, inventoryAfter)
+		if err != nil || report.Safe() || !report.WaitingForInventory() {
+			return report, err
+		}
+		select {
+		case <-ctx.Done():
+			return uninstallcheck.Report{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func formatBlockers(report uninstallcheck.Report) string {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,8 +21,10 @@ import (
 type memoryRepository struct {
 	volumes    map[string]volumeapi.State
 	moves      []volumeapi.Move
+	pools      []volumeapi.Pool
 	volumesErr error
 	movesErr   error
+	poolsErr   error
 }
 
 type cleanupRepository struct {
@@ -53,6 +56,10 @@ func (m *memoryRepository) ListVolumes(context.Context) (map[string]volumeapi.St
 
 func (m *memoryRepository) ListMoves(context.Context) ([]volumeapi.Move, error) {
 	return m.moves, m.movesErr
+}
+
+func (m *memoryRepository) ListPools(context.Context) ([]volumeapi.Pool, error) {
+	return m.pools, m.poolsErr
 }
 
 func TestCheckAllowsEmptyCluster(t *testing.T) {
@@ -179,6 +186,68 @@ func TestCheckFailsClosedOnRepositoryError(t *testing.T) {
 	_, err := checker.Check(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "crd unavailable") {
 		t.Fatalf("Check() error = %v", err)
+	}
+}
+
+func TestCheckBlocksPhysicalPoolCopiesAndUncertainInventory(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 5, 0, 0, 0, time.UTC)
+	identity := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid", VolumeID: "shiftpv-0123456789abcdef0123456789abcdef",
+		VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: "node-a", Role: volume.RoleServing,
+	}
+	repository := &memoryRepository{pools: []volumeapi.Pool{{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/var/lib/shiftpv", Generation: 2,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{
+			ObservedAt: metav1.NewTime(now.Add(-4 * time.Minute)), Valid: false, Truncated: true, Message: "CopyObservationProblem",
+			Copies: []volumeapi.CopyObservation{{Marker: "copy-copy-id.json", Identity: &identity, Present: true, Published: true}},
+		}},
+	}}}
+	checker := &Checker{
+		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Now: func() time.Time { return now },
+	}
+
+	report, err := checker.Check(context.Background())
+	if err != nil || report.Safe() || len(report.Blockers) != 2 {
+		t.Fatalf("unsafe Pool inventory report=%#v err=%v", report, err)
+	}
+	joined := blockersText(report.Blockers)
+	for _, expected := range []string{
+		"ShiftPVPoolInventory//pool-a/generation=2 observedGeneration=1 valid=false truncated=true message=CopyObservationProblem observedAt=stale",
+		"ShiftPVPoolCopy//pool-a/marker=copy-copy-id.json present=true role=Serving volume=shiftpv-0123456789abcdef0123456789abcdef copy=copy-id published=true",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("Pool inventory blockers do not contain %q: %s", expected, joined)
+		}
+	}
+}
+
+func TestCheckRequiresEmptyInventoryObservedAfterQuiesce(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 5, 0, 0, 0, time.UTC)
+	pool := volumeapi.Pool{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/var/lib/shiftpv", Generation: 1,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now.Add(-time.Second)), Valid: true}},
+	}
+	repository := &memoryRepository{pools: []volumeapi.Pool{pool}}
+	checker := &Checker{
+		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Now: func() time.Time { return now },
+	}
+
+	report, err := checker.CheckAfter(context.Background(), now)
+	if err != nil || report.Safe() || !report.WaitingForInventory() {
+		t.Fatalf("pre-quiesce inventory report=%#v err=%v", report, err)
+	}
+	repository.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(now.Add(time.Second))
+	checker.Now = func() time.Time { return now.Add(2 * time.Second) }
+	report, err = checker.CheckAfter(context.Background(), now)
+	if err != nil || !report.Safe() || report.WaitingForInventory() {
+		t.Fatalf("post-quiesce empty inventory report=%#v err=%v", report, err)
+	}
+
+	repository.poolsErr = errors.New("Pool API unavailable")
+	if _, err := checker.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "Pool API unavailable") {
+		t.Fatalf("Pool API failure did not close uninstall gate: %v", err)
 	}
 }
 

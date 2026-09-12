@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -20,6 +21,7 @@ const DriverName = "csi.shiftpv.io"
 type VolumeRepository interface {
 	ListVolumes(context.Context) (map[string]volumeapi.State, error)
 	ListMoves(context.Context) ([]volumeapi.Move, error)
+	ListPools(context.Context) ([]volumeapi.Pool, error)
 }
 
 type CleanupRepository interface {
@@ -32,6 +34,8 @@ type Checker struct {
 	StorageClassName string
 	Namespace        string
 	Cleanups         CleanupRepository
+	Now              func() time.Time
+	InventoryMaxAge  time.Duration
 }
 
 type Blocker struct {
@@ -45,11 +49,17 @@ type Report struct {
 	Blockers []Blocker
 }
 
+const PoolInventoryBlockerKind = "ShiftPVPoolInventory"
+
 func (r Report) Safe() bool {
 	return len(r.Blockers) == 0
 }
 
 func (c *Checker) Check(ctx context.Context) (Report, error) {
+	return c.CheckAfter(ctx, time.Time{})
+}
+
+func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Report, error) {
 	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
 		return Report{}, fmt.Errorf("uninstall checker is not configured")
 	}
@@ -153,12 +163,92 @@ func (c *Checker) Check(ctx context.Context) (Report, error) {
 		report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVCleanup", Name: request.Name, Reason: reason})
 	}
 
+	pools, err := c.Volumes.ListPools(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPVPools: %w", err)
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	maxAge := c.InventoryMaxAge
+	if maxAge <= 0 {
+		maxAge = volumeapi.DefaultPoolReadinessStaleAfter
+	}
+	for _, pool := range pools {
+		report.Blockers = append(report.Blockers, poolInventoryBlockers(pool, now, maxAge, inventoryAfter.UTC())...)
+	}
+
 	sort.Slice(report.Blockers, func(left, right int) bool {
 		leftKey := blockerKey(report.Blockers[left])
 		rightKey := blockerKey(report.Blockers[right])
 		return leftKey < rightKey
 	})
 	return report, nil
+}
+
+func (r Report) WaitingForInventory() bool {
+	if len(r.Blockers) == 0 {
+		return false
+	}
+	for _, blocker := range r.Blockers {
+		if blocker.Kind != PoolInventoryBlockerKind {
+			return false
+		}
+	}
+	return true
+}
+
+func poolInventoryBlockers(pool volumeapi.Pool, now time.Time, maxAge time.Duration, observedAfter time.Time) []Blocker {
+	inventory := pool.Status.Inventory
+	if inventory == nil {
+		return []Blocker{{Kind: PoolInventoryBlockerKind, Name: pool.Name, Reason: "inventory=missing"}}
+	}
+	result := []Blocker{}
+	reasons := []string{}
+	if pool.Status.ObservedGeneration != pool.Generation {
+		reasons = append(reasons, fmt.Sprintf("generation=%d observedGeneration=%d", pool.Generation, pool.Status.ObservedGeneration))
+	}
+	if !inventory.Valid {
+		reasons = append(reasons, "valid=false")
+	}
+	if inventory.Truncated {
+		reasons = append(reasons, "truncated=true")
+	}
+	if inventory.Message != "" {
+		reasons = append(reasons, "message="+inventory.Message)
+	}
+	observedAt := inventory.ObservedAt.Time
+	switch {
+	case inventory.ObservedAt.IsZero():
+		reasons = append(reasons, "observedAt=missing")
+	case now.Before(observedAt):
+		reasons = append(reasons, "observedAt=future")
+	case now.Sub(observedAt) > maxAge:
+		reasons = append(reasons, "observedAt=stale")
+	case !observedAfter.IsZero() && !observedAt.After(observedAfter):
+		reasons = append(reasons, "observedAt=before-quiesce")
+	}
+	if len(reasons) > 0 {
+		result = append(result, Blocker{Kind: PoolInventoryBlockerKind, Name: pool.Name, Reason: strings.Join(reasons, " ")})
+	}
+	for _, observed := range inventory.Copies {
+		if !observed.Present {
+			continue
+		}
+		parts := []string{"marker=" + observed.Marker, "present=true"}
+		if observed.Identity != nil {
+			parts = append(parts, "role="+string(observed.Identity.Role), "volume="+observed.Identity.VolumeID, "copy="+observed.Identity.CopyID)
+		}
+		if observed.Published {
+			parts = append(parts, "published=true")
+		}
+		if observed.Problem != "" {
+			parts = append(parts, "problem="+observed.Problem)
+		}
+		result = append(result, Blocker{Kind: "ShiftPVPoolCopy", Name: pool.Name, Reason: strings.Join(parts, " ")})
+	}
+	return result
 }
 
 func blockerKey(blocker Blocker) string {

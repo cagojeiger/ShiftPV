@@ -38,6 +38,7 @@ type PoolRegistry interface {
 }
 
 var errPublicationIdentityUnavailable = errors.New("publication identity is no longer verifiable")
+var errPublicationObservationRetry = errors.New("publication observation must be retried")
 
 type Service struct {
 	csi.UnimplementedNodeServer
@@ -177,7 +178,13 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	}
 	copy := *state.CurrentCopy
 	pool, poolRoot, err := s.poolRoot(ctx)
-	if err != nil || !copyMatchesPool(copy, pool) {
+	if err != nil {
+		if poolIdentityUnavailable(err) {
+			return &csi.NodeUnpublishVolumeResponse{}, nil
+		}
+		return nil, status.Errorf(codes.Unavailable, "resolve node pool after unpublish: %v", err)
+	}
+	if !copyMatchesPool(copy, pool) {
 		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
 	source, err := volume.Path(poolRoot, req.GetVolumeId())
@@ -188,7 +195,13 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	err = ownership.WithLock(ctx, poolRoot, ownership.PoolIdentity{InstallationID: copy.InstallationID, PoolUID: copy.PoolUID}, req.GetVolumeId(), func(*ownership.Store) error {
 		enteredLock = true
 		freshPool, freshPoolRoot, poolErr := s.poolRoot(ctx)
-		if poolErr != nil || freshPoolRoot != poolRoot || !copyMatchesPool(copy, freshPool) {
+		if poolErr != nil {
+			if poolIdentityUnavailable(poolErr) {
+				return errPublicationIdentityUnavailable
+			}
+			return fmt.Errorf("%w: refresh node pool after unpublish: %v", errPublicationObservationRetry, poolErr)
+		}
+		if freshPoolRoot != poolRoot || !copyMatchesPool(copy, freshPool) {
 			return errPublicationIdentityUnavailable
 		}
 		fresh, getErr := s.Volumes.Get(ctx, req.GetVolumeId())
@@ -205,18 +218,26 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 		return s.Volumes.ReconcilePublished(ctx, req.GetVolumeId(), s.NodeName, copy, stillPublished)
 	})
 	if err != nil {
-		if errors.Is(err, errPublicationIdentityUnavailable) || (!enteredLock && !errors.Is(err, ownership.ErrBusy)) {
+		if errors.Is(err, errPublicationIdentityUnavailable) || !enteredLock &&
+			(errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview)) {
 			return &csi.NodeUnpublishVolumeResponse{}, nil
+		}
+		if !enteredLock {
+			return nil, status.Errorf(codes.Unavailable, "reconcile publication after unpublish: %v", err)
 		}
 		if errors.Is(err, volumeapi.ErrStateConflict) || errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview) {
 			return nil, status.Errorf(codes.FailedPrecondition, "unpublish identified volume: %v", err)
 		}
-		if apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+		if errors.Is(err, errPublicationObservationRetry) || errors.Is(err, ownership.ErrBusy) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
 			return nil, status.Errorf(codes.Unavailable, "unpublish identified volume: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "unpublish identified volume: %v", err)
 	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
+}
+
+func poolIdentityUnavailable(err error) bool {
+	return apierrors.IsNotFound(err) || errors.Is(err, volumeapi.ErrPoolNotFound) || errors.Is(err, volumeapi.ErrPoolConfiguration)
 }
 
 func (s *Service) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {

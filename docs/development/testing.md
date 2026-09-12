@@ -72,7 +72,7 @@ Unit test는 다음 고비용 경계를 포함한다.
 | Pool | directory/write/statfs readiness, freshness, reservation, concurrent admission |
 | Mobility | phase closure, exact copy identity, CAS, API response loss, recovery |
 | Cleanup | immutable intent, exact helper identity, receipt, bounded observation, review-only orphan |
-| Lifecycle | Cleanup 포함 dependency 검사, quiesce, read-only admission, provisioning drain |
+| Lifecycle | Cleanup·physical Pool copy dependency 검사, quiesce 이후 inventory barrier, read-only admission, provisioning drain |
 | Certificate | 최초 발급, 갱신, CA 전환, Secret 복구, hot reload |
 | Metrics | cached scrape 무 I/O, API 오류·freshness, 예약 회계, bounded label, HTTP 장애 분리 |
 | Chart | kubelet root, component 경계, StorageClass, webhook mode |

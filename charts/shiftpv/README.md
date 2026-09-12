@@ -396,6 +396,7 @@ sequenceDiagram
     G->>C: quiescing (CSIDriver UID)
     C->>C: CreateVolume 종료 + 진행 호출 drain
     C-->>G: acknowledged
+    G->>G: acknowledgement 이후 fresh Pool inventory 대기
     G->>G: dependency 검사
     G->>W: lifecycle validation 제거
     G-->>H: granted
@@ -404,7 +405,7 @@ sequenceDiagram
 
 | Mode | 동작 |
 |---|---|
-| `helm` | 한 번의 bounded 시도; blocker가 있으면 uninstall 실패 반환 |
+| `helm` | 최대 90초의 bounded 검사; Pool inventory 갱신을 기다리고 blocker가 있으면 실패 반환 |
 | `argocd` | Argo CD 3.3+ PreDelete가 dependency 해소까지 bounded 시도 반복 |
 
 | Dependency | 제거 준비 상태 |
@@ -415,6 +416,7 @@ sequenceDiagram
 | `ShiftPVVolume` | 해소 |
 | non-terminal `ShiftPVMove` | 해소 |
 | controller namespace의 정리 요청 | 완료 acknowledgement 확인; 미완료·손상된 기록은 보존·확인 |
+| 모든 Pool inventory | quiesce 이후 fresh·valid·complete이며 실제 copy 0개 |
 | Kubernetes API 검사 | 성공 |
 
 보호 대상은 labeled CSI Deployment, DaemonSet, Service, ServiceAccount, RBAC, StorageClass와

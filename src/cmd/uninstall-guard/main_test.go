@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,13 @@ type emptyVolumeRepository struct{}
 
 type emptyCleanupRepository struct{}
 
+type mutableVolumeRepository struct {
+	mu     sync.Mutex
+	once   sync.Once
+	listed chan struct{}
+	pools  []volumeapi.Pool
+}
+
 func (emptyCleanupRepository) List(context.Context) ([]cleanupapi.Cleanup, error) { return nil, nil }
 
 func (emptyVolumeRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
@@ -32,6 +40,43 @@ func (emptyVolumeRepository) ListVolumes(context.Context) (map[string]volumeapi.
 }
 func (emptyVolumeRepository) ListMoves(context.Context) ([]volumeapi.Move, error) {
 	return nil, nil
+}
+func (emptyVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, error) {
+	return nil, nil
+}
+
+func (m *mutableVolumeRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
+	return map[string]volumeapi.State{}, nil
+}
+
+func (m *mutableVolumeRepository) ListMoves(context.Context) ([]volumeapi.Move, error) {
+	return nil, nil
+}
+
+func (m *mutableVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := append([]volumeapi.Pool(nil), m.pools...)
+	for index := range result {
+		if result[index].Status.Inventory == nil {
+			continue
+		}
+		inventory := *result[index].Status.Inventory
+		inventory.Copies = append([]volumeapi.CopyObservation(nil), inventory.Copies...)
+		result[index].Status.Inventory = &inventory
+	}
+	m.once.Do(func() {
+		if m.listed != nil {
+			close(m.listed)
+		}
+	})
+	return result, nil
+}
+
+func (m *mutableVolumeRepository) observe(at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(at.UTC())
 }
 
 func TestRunCompletesQuiescedTeardown(t *testing.T) {
@@ -50,6 +95,31 @@ func TestRunCompletesQuiescedTeardown(t *testing.T) {
 	}
 	if _, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), "shiftpv-lifecycle", metav1.GetOptions{}); err == nil {
 		t.Fatal("lifecycle validation still exists")
+	}
+}
+
+func TestRunWaitsForEmptyPoolInventoryObservedAfterQuiesce(t *testing.T) {
+	client := uninstallClient()
+	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
+	gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = gate.Run(ctx) }()
+	repository := &mutableVolumeRepository{listed: make(chan struct{}), pools: []volumeapi.Pool{{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/var/lib/shiftpv", Generation: 1,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(time.Now().Add(-time.Minute)), Valid: true}},
+	}}}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
+	go func() {
+		<-repository.listed
+		repository.observe(time.Now())
+	}()
+
+	if err := run(ctx, checker, store, "shiftpv-lifecycle"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if granted, err := store.Granted(context.Background()); err != nil || !granted {
+		t.Fatalf("Granted = %v, %v", granted, err)
 	}
 }
 

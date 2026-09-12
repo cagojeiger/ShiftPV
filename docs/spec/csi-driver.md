@@ -131,9 +131,10 @@ flowchart TD
 Blocked, unknown, non-owner 상태는 즉시 publication을 닫는다. Placement coordination은 owner commit 뒤 destination
 Pod를 해제한다. CSI 호출은 bounded이며 polling loop나 Kubernetes watch를 소유하지 않는다.
 
-성공한 publish/unpublish는 `publishedNodes`를 갱신한다. Per-volume serialization과 실제 mount
-reference로 Pod 교체 중 겹치는 kubelet target을 처리한다. Owner field가 authority의 source of
-truth다.
+Publish는 mount 전에 `publishedNodes` intent를 기록한다. Unpublish는 검증된 kubelet target을 먼저
+해제하고 exact Pool·copy를 다시 증명한 뒤 실제 mount reference로 `publishedNodes`를 조정한다.
+일시적 Pool/API 실패는 target이 해제된 상태로 재시도하며, 삭제·교체된 Pool identity는 publication을
+추측해 지우지 않는다. Owner field가 authority의 source of truth다.
 
 Node Plugin은 host root를 `HostToContainer`, kubelet target을 `Bidirectional` propagation으로
 mount한다. Node Plugin 재시작 전후 host와 plugin mount namespace가 일치한다.

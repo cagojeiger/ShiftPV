@@ -172,8 +172,8 @@ if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_DENIAL}" ]]; then
 fi
 
 # Remove the Kubernetes owner records while Retain preserves the exact copy.
-# The reservation closes the discovery window: the guard must remain blocked
-# until the orphan cleanup contract is explicitly approved and settled.
+# The reservation and post-quiesce Pool inventory close the discovery window:
+# the guard stays blocked until the orphan cleanup contract is approved and settled.
 kubectl delete pod shiftpv-argocd-e2e --wait=true
 kubectl delete pvc shiftpv-argocd-e2e --wait=true
 kubectl wait --for=jsonpath='{.status.phase}'=Released "pv/${PV_NAME}" --timeout=2m
@@ -195,6 +195,7 @@ test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.reserva
 test -n "$(kubectl -n argocd get application shiftpv -o jsonpath='{.metadata.deletionTimestamp}')"
 GUARD_LOG=$(kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard)
 grep -Fq VolumeReservation <<<"${GUARD_LOG}"
+grep -Fq ShiftPVPoolCopy <<<"${GUARD_LOG}"
 grep -Fq "${VOLUME_ID}" <<<"${GUARD_LOG}"
 assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
 

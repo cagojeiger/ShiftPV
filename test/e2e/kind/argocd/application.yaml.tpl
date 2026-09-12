@@ -25,6 +25,9 @@ spec:
           enabled: false
         helperPod:
           image: __IMAGE_REPOSITORY__:__IMAGE_TAG__
+        poolReadiness:
+          interval: 2s
+          staleAfter: 10s
         lifecycle:
           uninstallMode: argocd
         node:

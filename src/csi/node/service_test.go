@@ -627,6 +627,30 @@ func TestNodeUnpublishRemovesTargetWhenPoolIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestNodeUnpublishRetriesPublicationAfterTransientPoolFailure(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	copy := *registry.state.CurrentCopy
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: copy.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+	service.Pools = fakePoolRegistry{err: apierrors.NewTimeoutError("Pool read timed out", 1)}
+
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("transient Pool failure code=%s err=%v", status.Code(err), err)
+	}
+	if binder.unpublished != request.TargetPath || registry.reconcileCalls.Load() != 0 {
+		t.Fatalf("transient Pool failure blocked target teardown or changed publication state: binder=%#v reconciles=%d", binder, registry.reconcileCalls.Load())
+	}
+
+	service.Pools = fakePoolRegistry{pool: volumeapi.Pool{Name: copy.PoolName, UID: copy.PoolUID, NodeName: copy.NodeName, MountPath: "/pool"}}
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatalf("retry after Pool recovery: %v", err)
+	}
+	if registry.reconcileCalls.Load() != 1 || registry.published {
+		t.Fatalf("retry did not reconcile publication state: reconciles=%d published=%v", registry.reconcileCalls.Load(), registry.published)
+	}
+}
+
 func TestNodeUnpublishRemovesTargetWhenPoolIdentityWasReplaced(t *testing.T) {
 	binder := &fakeBinder{}
 	service := configuredService(t, binder)
@@ -645,20 +669,35 @@ func TestNodeUnpublishRemovesTargetWhenPoolIdentityWasReplaced(t *testing.T) {
 	}
 }
 
-func TestNodeUnpublishRemovesTargetWhenLocalPoolIdentityCannotBeOpened(t *testing.T) {
+func TestNodeUnpublishRetriesPublicationWhenLocalPoolCannotBeOpened(t *testing.T) {
 	binder := &fakeBinder{}
 	service := configuredService(t, binder)
 	registry := service.Volumes.(*fakeVolumeRegistry)
-	if err := os.RemoveAll(filepath.Join(service.HostRoot, "pool", ".shiftpv")); err != nil {
+	copy := *registry.state.CurrentCopy
+	poolMarker := filepath.Join(service.HostRoot, "pool", ".shiftpv", "pool.json")
+	markerData, err := os.ReadFile(poolMarker)
+	if err != nil {
 		t.Fatal(err)
 	}
-	request := &csi.NodeUnpublishVolumeRequest{VolumeId: registry.state.CurrentCopy.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
-
-	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+	if err := os.Remove(poolMarker); err != nil {
 		t.Fatal(err)
+	}
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: copy.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("unavailable local Pool code=%s err=%v", status.Code(err), err)
 	}
 	if binder.unpublished != request.TargetPath || registry.reconcileCalls.Load() != 0 {
-		t.Fatalf("unverifiable local Pool blocked target teardown or changed publication state: binder=%#v reconciles=%d", binder, registry.reconcileCalls.Load())
+		t.Fatalf("unavailable local Pool blocked target teardown or changed publication state: binder=%#v reconciles=%d", binder, registry.reconcileCalls.Load())
+	}
+	if err := os.WriteFile(poolMarker, markerData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatalf("retry after local Pool recovery: %v", err)
+	}
+	if registry.reconcileCalls.Load() != 1 || registry.published {
+		t.Fatalf("retry did not reconcile publication state: reconciles=%d published=%v", registry.reconcileCalls.Load(), registry.published)
 	}
 }
 
