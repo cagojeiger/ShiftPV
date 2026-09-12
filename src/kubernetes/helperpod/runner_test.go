@@ -19,9 +19,16 @@ import (
 
 const testVolumeID = "shiftpv-0123456789abcdef0123456789abcdef"
 
-type fakePoolResolver struct{ pool volumeapi.Pool }
+type fakePoolResolver struct {
+	pool    volumeapi.Pool
+	nodeErr error
+}
 
 func (f fakePoolResolver) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+	return f.pool, f.nodeErr
+}
+
+func (f fakePoolResolver) PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error) {
 	return f.pool, nil
 }
 

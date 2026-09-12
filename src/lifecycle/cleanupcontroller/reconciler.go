@@ -24,7 +24,7 @@ type Operator interface {
 }
 
 type Inventory interface {
-	ListPools(context.Context) ([]volumeapi.Pool, error)
+	ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error)
 	ListVolumes(context.Context) (map[string]volumeapi.State, error)
 	ListMoves(context.Context) ([]volumeapi.Move, error)
 }
@@ -142,7 +142,7 @@ func (r *Reconciler) orphanSnapshot(ctx context.Context) (orphanSnapshot, error)
 	if r.Inventory == nil || r.Client == nil || r.Namespace == "" {
 		return orphanSnapshot{}, fmt.Errorf("orphan inventory is not configured")
 	}
-	pools, err := r.Inventory.ListPools(ctx)
+	pools, err := r.Inventory.ListPoolRegistrations(ctx)
 	if err != nil {
 		return orphanSnapshot{}, err
 	}

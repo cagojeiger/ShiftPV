@@ -43,9 +43,9 @@ type countingInventory struct {
 	moveCalls   int
 }
 
-func (i *countingInventory) ListPools(ctx context.Context) ([]volumeapi.Pool, error) {
+func (i *countingInventory) ListPoolRegistrations(ctx context.Context) ([]volumeapi.Pool, error) {
 	i.poolCalls++
-	return i.inventory.ListPools(ctx)
+	return i.inventory.ListPoolRegistrations(ctx)
 }
 
 func (i *countingInventory) ListVolumes(ctx context.Context) (map[string]volumeapi.State, error) {
@@ -74,7 +74,7 @@ func readyPool(identity volume.CopyIdentity, copies ...volumeapi.CopyObservation
 	}
 }
 
-func (i inventory) ListPools(context.Context) ([]volumeapi.Pool, error) {
+func (i inventory) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
 	if i.fail == "pools" {
 		return nil, errors.New("pool inventory unavailable")
 	}
@@ -820,6 +820,30 @@ func TestOrphanClassificationUsesConfiguredFreshnessWindow(t *testing.T) {
 	}
 	if ready, reason, _ := snapshot.classify(target, "", now, 3*time.Minute); ready || reason != "PoolUnavailable" {
 		t.Fatalf("expired freshness accepted cleanup: ready=%v reason=%s", ready, reason)
+	}
+}
+
+func TestOrphanSnapshotKeepsDuplicateRegistrationsForExactCleanup(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	target := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool-retiring", PoolUID: "pool-retiring-uid", VolumeID: "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: "node", Role: volume.RoleServing,
+	}
+	retiring := readyPool(target, volumeapi.CopyObservation{Marker: "copy", Identity: &target, Present: true})
+	activeIdentity := target
+	activeIdentity.PoolName = "pool-active"
+	activeIdentity.PoolUID = "pool-active-uid"
+	active := readyPool(activeIdentity)
+	reconciler := &Reconciler{
+		Client: orphanKubernetesClient(), Namespace: "shiftpv-system",
+		Inventory: inventory{pools: []volumeapi.Pool{active, retiring}, volumes: map[string]volumeapi.State{}},
+	}
+	snapshot, err := reconciler.orphanSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready, reason, _ := snapshot.classify(target, "", now, volumeapi.DefaultPoolReadinessStaleAfter); !ready || reason != "OrphanReady" {
+		t.Fatalf("exact cleanup did not converge across duplicate registrations: ready=%v reason=%s", ready, reason)
 	}
 }
 

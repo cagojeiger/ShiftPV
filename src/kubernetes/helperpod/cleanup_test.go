@@ -2,6 +2,7 @@ package helperpod
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +60,10 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	runner := validRunner(client)
 	runner.ServiceAccountName = "shiftpv-controller"
 	runner.PoolReadinessStaleAfter = 7 * time.Minute
-	runner.Pools = fakePoolResolver{pool: readyCleanupPool(volumeapi.Pool{Name: cleanup.Spec.Target.PoolName, UID: cleanup.Spec.Target.PoolUID, NodeName: cleanup.Spec.Target.NodeName, MountPath: "/mnt/shiftpv"})}
+	runner.Pools = fakePoolResolver{
+		pool:    readyCleanupPool(volumeapi.Pool{Name: cleanup.Spec.Target.PoolName, UID: cleanup.Spec.Target.PoolUID, NodeName: cleanup.Spec.Target.NodeName, MountPath: "/mnt/shiftpv"}),
+		nodeErr: fmt.Errorf("%w: duplicate node registration", volumeapi.ErrPoolConfiguration),
+	}
 	result, err := runner.Reclaim(ctx, cleanup, cleanups)
 	if err != nil {
 		t.Fatal(err)

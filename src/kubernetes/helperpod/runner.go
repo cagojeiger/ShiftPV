@@ -33,6 +33,7 @@ type Runner struct {
 	ServiceAccountName string
 	Pools              interface {
 		PoolForNode(context.Context, string) (volumeapi.Pool, error)
+		PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	}
 	Image                   string
 	Timeout                 time.Duration

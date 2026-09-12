@@ -35,8 +35,11 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 	if cleanup.Status.Phase == cleanupapi.PhaseNeedsReview {
 		return cleanupapi.Cleanup{}, fmt.Errorf("cleanup %q needs review: %s", cleanup.Name, cleanup.Status.Reason)
 	}
-	pool, err := r.Pools.PoolForNode(ctx, cleanup.Spec.Target.NodeName)
+	pool, err := r.Pools.PoolForIdentity(ctx, cleanup.Spec.Target.PoolName, cleanup.Spec.Target.PoolUID, cleanup.Spec.Target.NodeName)
 	if err != nil {
+		if errors.Is(err, volumeapi.ErrStateConflict) {
+			return cleanupapi.Cleanup{}, r.needsReview(ctx, store, cleanup, "PoolIdentityChanged", "registered Pool no longer matches the approved cleanup target")
+		}
 		return cleanupapi.Cleanup{}, classifyKubernetesAPIError(err)
 	}
 	if pool.Name != cleanup.Spec.Target.PoolName || pool.UID != cleanup.Spec.Target.PoolUID {

@@ -489,7 +489,7 @@ func runCleanup(arguments []string) error {
 		if err != nil || installationID != approved.Spec.Target.InstallationID {
 			return fmt.Errorf("installation authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 		}
-		pool, err := registry.PoolForNode(checkCtx, approved.Spec.Target.NodeName)
+		pool, err := registry.PoolForIdentity(checkCtx, approved.Spec.Target.PoolName, approved.Spec.Target.PoolUID, approved.Spec.Target.NodeName)
 		if err != nil || pool.Name != approved.Spec.Target.PoolName || pool.UID != approved.Spec.Target.PoolUID {
 			return fmt.Errorf("Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 		}
@@ -581,7 +581,7 @@ func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interfa
 			}
 		}
 	}
-	pool, err := registry.PoolForNode(ctx, cleanup.Spec.Target.NodeName)
+	pool, err := registry.PoolForIdentity(ctx, cleanup.Spec.Target.PoolName, cleanup.Spec.Target.PoolUID, cleanup.Spec.Target.NodeName)
 	if err != nil || pool.Name != cleanup.Spec.Target.PoolName || pool.UID != cleanup.Spec.Target.PoolUID {
 		return fmt.Errorf("orphan Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 	}

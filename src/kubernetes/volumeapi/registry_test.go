@@ -814,6 +814,8 @@ func TestRegistrySetPoolStatusUsesPoolIdentity(t *testing.T) {
 func TestRegistryPoolForNodeRejectsMissingAndDuplicateRegistration(t *testing.T) {
 	active := pool("pool-a", "node-a")
 	retiring := pool("pool-a-duplicate", "node-a")
+	active.SetUID("pool-a-uid")
+	retiring.SetUID("pool-a-duplicate-uid")
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", MoveResource: "ShiftPVMoveList",
 	}, active, retiring)
@@ -836,6 +838,13 @@ func TestRegistryPoolForNodeRejectsMissingAndDuplicateRegistration(t *testing.T)
 	lifecyclePool, err := registry.PoolForNodeLifecycle(context.Background(), "node-a")
 	if err != nil || lifecyclePool.Name != retiring.GetName() {
 		t.Fatalf("deleting duplicate lifecycle Pool=%#v err=%v", lifecyclePool, err)
+	}
+	exactPool, err := registry.PoolForIdentity(context.Background(), retiring.GetName(), string(retiring.GetUID()), "node-a")
+	if err != nil || exactPool.Name != retiring.GetName() {
+		t.Fatalf("exact duplicate lifecycle Pool=%#v err=%v", exactPool, err)
+	}
+	if _, err := registry.PoolForIdentity(context.Background(), retiring.GetName(), "replacement-uid", "node-a"); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("replacement Pool identity was accepted: %v", err)
 	}
 }
 

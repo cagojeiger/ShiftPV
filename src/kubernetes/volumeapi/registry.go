@@ -714,6 +714,36 @@ func (r *Registry) PoolForNodeLifecycle(ctx context.Context, nodeName string) (P
 	return Pool{}, fmt.Errorf("%w: multiple ShiftPVPools are registered for node %q", ErrPoolConfiguration, nodeName)
 }
 
+// PoolForIdentity resolves one exact Pool incarnation without applying the
+// node-wide duplicate-registration gate. Cleanup uses this path to settle data
+// owned by a terminating Pool while ordinary placement remains fail-closed.
+func (r *Registry) PoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
+	if err := r.validate(); err != nil {
+		return Pool{}, err
+	}
+	if name == "" || uid == "" || nodeName == "" {
+		return Pool{}, fmt.Errorf("%w: Pool name, UID, and node name are required", ErrPoolConfiguration)
+	}
+	object, err := r.Client.Resource(PoolResource).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q", ErrPoolNotFound, name)
+	}
+	if err != nil {
+		return Pool{}, fmt.Errorf("get ShiftPVPool %q: %w", name, err)
+	}
+	pool, err := poolFrom(object)
+	if err != nil {
+		return Pool{}, err
+	}
+	if pool.UID != uid || pool.NodeName != nodeName {
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q identity changed", ErrStateConflict, name)
+	}
+	if !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" {
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q has invalid mountPath", ErrPoolConfiguration, name)
+	}
+	return pool, nil
+}
+
 func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool, error) {
 	pool, err := r.PoolForNode(ctx, nodeName)
 	if err != nil {
