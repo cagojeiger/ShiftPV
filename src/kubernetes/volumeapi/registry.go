@@ -237,6 +237,21 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 	if err := r.validate(); err != nil {
 		return State{}, err
 	}
+	resource := r.Client.Resource(VolumeResource)
+	object, err := resource.Get(ctx, volumeID, metav1.GetOptions{})
+	create := apierrors.IsNotFound(err)
+	if err == nil {
+		state, stateErr := stateFrom(object)
+		if stateErr != nil {
+			return State{}, stateErr
+		}
+		if state.Phase != "" {
+			return r.resumeCreate(ctx, object, state, volumeID, ownerNode)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return State{}, fmt.Errorf("read ShiftPVVolume creation intent: %w", err)
+	}
+
 	installationID, err := r.InstallationID(ctx)
 	if err != nil {
 		return State{}, err
@@ -245,9 +260,7 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 	if err != nil {
 		return State{}, err
 	}
-	resource := r.Client.Resource(VolumeResource)
-	object, err := resource.Get(ctx, volumeID, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
+	if create {
 		object, err = resource.Create(ctx, &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": "shiftpv.io/v1alpha1",
 			"kind":       "ShiftPVVolume",
@@ -303,10 +316,30 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 			return State{}, err
 		}
 	}
-	if state.UID != string(object.GetUID()) || state.OwnerNode != ownerNode || state.CurrentCopy == nil ||
-		*state.CurrentCopy != copy || state.CreationOperationID != operationID ||
+	return r.resumeCreate(ctx, object, state, volumeID, ownerNode)
+}
+
+func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstructured, state State, volumeID, ownerNode string) (State, error) {
+	if object == nil || object.GetUID() == "" || state.UID != string(object.GetUID()) || state.OwnerNode != ownerNode ||
+		state.CurrentCopy == nil || state.CurrentCopy.Validate() != nil || state.CurrentCopy.VolumeID != volumeID ||
+		state.CurrentCopy.VolumeUID != state.UID || state.CurrentCopy.NodeName != ownerNode || state.CurrentCopy.Role != volume.RoleServing ||
 		(state.Phase != PhasePending && state.Phase != PhaseReady) {
 		return State{}, fmt.Errorf("%w: volume creation identity changed", ErrStateConflict)
+	}
+	operationID, err := CreationOperationID(state.UID)
+	if err != nil || state.CreationOperationID != operationID {
+		return State{}, fmt.Errorf("%w: volume creation operation changed", ErrStateConflict)
+	}
+	installationID, err := r.InstallationID(ctx)
+	if err != nil {
+		return State{}, err
+	}
+	pool, err := r.PoolForNode(ctx, ownerNode)
+	if err != nil {
+		return State{}, err
+	}
+	if state.CurrentCopy.InstallationID != installationID || state.CurrentCopy.PoolName != pool.Name || state.CurrentCopy.PoolUID != pool.UID {
+		return State{}, fmt.Errorf("%w: volume creation Pool identity changed", ErrStateConflict)
 	}
 	return state, nil
 }

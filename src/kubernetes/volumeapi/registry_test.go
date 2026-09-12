@@ -233,6 +233,53 @@ func TestBeginCreatePersistsIdentityBeforeReady(t *testing.T) {
 	}
 }
 
+func TestBeginCreateResumesExactPendingIdentityWithInvalidInventory(t *testing.T) {
+	ctx := context.Background()
+	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Namespace",
+		"metadata": map[string]any{"name": installationNamespace, "uid": "installation-uid"},
+	}}
+	registeredPool := pool("pool-a", "node-a")
+	registeredPool.SetUID("pool-uid")
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", namespaceResource: "NamespaceList",
+	}, clusterIdentity, registeredPool)
+	client.PrependReactor("create", "shiftpvvolumes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		object := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
+		object.SetUID("volume-uid")
+		return false, nil, nil
+	})
+	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
+	volumeID := "shiftpv-cccccccccccccccccccccccccccccccc"
+	pending, err := registry.BeginCreate(ctx, volumeID, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	currentPool, err := client.Resource(PoolResource).Get(ctx, registeredPool.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedField(currentPool.Object, false, "status", "inventory", "valid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Resource(PoolResource).Update(ctx, currentPool, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.ReadyPoolForNode(ctx, "node-a"); !errors.Is(err, ErrPoolNotReady) {
+		t.Fatalf("invalid inventory remained eligible: %v", err)
+	}
+
+	resumed, err := registry.BeginCreate(ctx, volumeID, "node-a")
+	if err != nil || !reflect.DeepEqual(resumed, pending) {
+		t.Fatalf("exact pending creation did not resume: state=%#v err=%v", resumed, err)
+	}
+	if _, err := registry.BeginCreate(ctx, "shiftpv-dddddddddddddddddddddddddddddddd", "node-a"); !errors.Is(err, ErrPoolNotReady) {
+		t.Fatalf("new creation bypassed invalid inventory: %v", err)
+	}
+}
+
 func TestBeginDeleteFencesPublicationAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-cccccccccccccccccccccccccccccccc"
