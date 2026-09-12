@@ -493,6 +493,47 @@ func TestApprovedOrphanConvergesAndReleasesExactReservation(t *testing.T) {
 	}
 }
 
+func TestApprovedOrphanConvergesWhilePoolDeregisters(t *testing.T) {
+	store, existing := fixture(t)
+	if err := store.UpdateStatus(context.Background(), existing.Name, existing.UID, cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview, Reason: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	target := existing.Spec.Target
+	target.CopyID = "deregistering-pool-orphan"
+	request, err := store.Ensure(context.Background(), cleanupapi.Spec{
+		OperationID: "review-deregistering-pool-orphan", Target: target, Reason: "OrphanReclaim", Approved: true,
+		Authority: cleanupapi.Authority{Kind: "Namespace", Name: "kube-system", UID: target.InstallationID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateStatus(context.Background(), request.Name, request.UID, cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview, Reason: "OrphanPreserved"}); err != nil {
+		t.Fatal(err)
+	}
+	pool := readyPool(target, volumeapi.CopyObservation{Marker: "orphan", Identity: &target, Present: true})
+	deletedAt := metav1.NewTime(time.Unix(1, 0))
+	pool.DeletionTimestamp = &deletedAt
+	pool.Status.Conditions = []metav1.Condition{
+		{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionFalse, ObservedGeneration: 1, LastTransitionTime: deletedAt, Reason: "PoolDeregistering", Message: "new placement is closed"},
+		{Type: volumeapi.PoolConditionAccessible, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: deletedAt, Reason: "PathAccessible", Message: "accessible"},
+		{Type: volumeapi.PoolConditionWritable, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: deletedAt, Reason: "PathWritable", Message: "writable"},
+		{Type: volumeapi.PoolConditionCapacityReadable, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: deletedAt, Reason: "CapacityReadable", Message: "capacity readable"},
+	}
+	worker := &operator{}
+	reconciler := &Reconciler{
+		Store: store, Operator: worker, Client: orphanKubernetesClient(), Namespace: "system", Interval: time.Second,
+		Now:       func() time.Time { return time.Unix(1, 0) },
+		Inventory: inventory{pools: []volumeapi.Pool{pool}, volumes: map[string]volumeapi.State{}},
+	}
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := store.Get(context.Background(), request.Name)
+	if err != nil || settled.Status.Phase != cleanupapi.PhaseCompleted || worker.calls != 1 {
+		t.Fatalf("deregistering Pool cleanup=%#v calls=%d err=%v", settled, worker.calls, err)
+	}
+}
+
 func TestApprovedSupersededCopyPreservesLiveVolumeReservation(t *testing.T) {
 	store, existing := fixture(t)
 	if err := store.UpdateStatus(context.Background(), existing.Name, existing.UID, cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview, Reason: "fixture"}); err != nil {

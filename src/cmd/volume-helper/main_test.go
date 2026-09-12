@@ -84,8 +84,13 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	now := metav1.NewTime(time.Now().UTC())
 	poolStatus := volumeapi.PoolStatus{
 		ObservedGeneration: 1, LastProbeTime: now,
-		Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "Ready", Message: "ready"}},
-		Inventory:  &volumeapi.PoolInventory{ObservedAt: now, Valid: true, Copies: []volumeapi.CopyObservation{{Marker: "copy", Identity: &target, Present: true}}},
+		Conditions: []metav1.Condition{
+			{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "Ready", Message: "ready"},
+			{Type: volumeapi.PoolConditionAccessible, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "PathAccessible", Message: "accessible"},
+			{Type: volumeapi.PoolConditionWritable, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "PathWritable", Message: "writable"},
+			{Type: volumeapi.PoolConditionCapacityReadable, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "CapacityReadable", Message: "capacity readable"},
+		},
+		Inventory: &volumeapi.PoolInventory{ObservedAt: now, Valid: true, Copies: []volumeapi.CopyObservation{{Marker: "copy", Identity: &target, Present: true}}},
 	}
 	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
 		t.Fatal(err)
@@ -138,6 +143,24 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	}
 	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup); err != nil {
 		t.Fatalf("superseded copy retained recovered Move or volume-wide authority: %v", err)
+	}
+	deletingPool, err := dynamicClient.Resource(volumeapi.PoolResource).Get(context.Background(), target.PoolName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletionTime := metav1.NewTime(time.Now().UTC())
+	deletingPool.SetDeletionTimestamp(&deletionTime)
+	if _, err := dynamicClient.Resource(volumeapi.PoolResource).Update(context.Background(), deletingPool, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	poolStatus.Conditions[0] = metav1.Condition{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionFalse, ObservedGeneration: 1, LastTransitionTime: deletionTime, Reason: "PoolDeregistering", Message: "new placement is closed"}
+	poolStatus.LastProbeTime = deletionTime
+	poolStatus.Inventory.ObservedAt = deletionTime
+	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup); err != nil {
+		t.Fatalf("terminating Pool rejected exact orphan cleanup: %v", err)
 	}
 	if err := dynamicClient.Resource(volumeapi.MoveResource).Delete(context.Background(), recoveredMove.GetName(), metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)

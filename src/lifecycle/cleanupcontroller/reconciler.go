@@ -205,8 +205,8 @@ func (s orphanSnapshot) classify(target volume.CopyIdentity, reservationUID stri
 	if pool == nil {
 		return false, "PoolIdentityUnavailable", "data is preserved until the exact Pool incarnation is registered again"
 	}
-	if ready, reason := pool.ReadyAt(now, volumeapi.DefaultPoolReadinessStaleAfter); !ready {
-		return false, "PoolUnavailable", "data is preserved until the exact Pool is ready again: " + reason
+	if ready, reason := pool.CleanupReadyAt(now, volumeapi.DefaultPoolReadinessStaleAfter); !ready {
+		return false, "PoolUnavailable", "data is preserved until the exact Pool is available for cleanup: " + reason
 	}
 	if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid {
 		return false, "ObservationUnavailable", "data is preserved until node inventory succeeds and the exact copy can be re-evaluated"

@@ -585,8 +585,8 @@ func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interfa
 		return fmt.Errorf("orphan Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 	}
 	now := time.Now().UTC()
-	if ready, reason := pool.ReadyAt(now, volumeapi.DefaultPoolReadinessStaleAfter); !ready {
-		return fmt.Errorf("orphan Pool is not ready (%s): %w", reason, volumeapi.ErrStateConflict)
+	if ready, reason := pool.CleanupReadyAt(now, volumeapi.DefaultPoolReadinessStaleAfter); !ready {
+		return fmt.Errorf("orphan Pool is not available for cleanup (%s): %w", reason, volumeapi.ErrStateConflict)
 	}
 	if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.ObservedAt.IsZero() ||
 		now.Before(pool.Status.Inventory.ObservedAt.Time) || now.Sub(pool.Status.Inventory.ObservedAt.Time) > volumeapi.DefaultPoolReadinessStaleAfter {

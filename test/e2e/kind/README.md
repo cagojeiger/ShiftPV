@@ -30,6 +30,10 @@ ordinary directory on the other worker. The terminal Move remains as history whi
 the deleted volume no longer blocks later capacity admission. It then overlays one Pool with a
 bounded tmpfs, proves that external filesystem consumption blocks admission,
 then proves that an empty PVC still consumes aggregate reservation until deletion.
+It also preserves an unreferenced copy as review-only while a Retain PV or mount
+still exists, then deletes the Pool and proves an explicitly approved exact
+orphan cleanup can finish through `PoolDeregistering`; the finalizer releases
+only after physical cleanup, and the same path accepts a new Pool identity.
 It creates a PVC without
 `storageClassName`, verifies Kubernetes defaults it to `shiftpv`, provisions it
 through `csi.shiftpv.io`, and starts a Pod that writes through the mounted RWO
@@ -72,6 +76,14 @@ Run only Pool capacity admission with:
 ```bash
 POOL_CAPACITY_ONLY=1 \
   CLUSTER_NAME=shiftpv-capacity-focused \
+  ./test/e2e/kind/run.sh
+```
+
+Run only orphan cleanup during Pool deregistration with:
+
+```bash
+ORPHAN_CLEANUP_ONLY=1 \
+  CLUSTER_NAME=shiftpv-orphan-focused \
   ./test/e2e/kind/run.sh
 ```
 

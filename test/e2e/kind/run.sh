@@ -119,6 +119,12 @@ run_orphan_cleanup() {
 
 install_shiftpv true
 
+if [[ "${ORPHAN_CLEANUP_ONLY:-0}" == "1" ]]; then
+	run_orphan_cleanup
+	echo "ShiftPV focused orphan cleanup during Pool deregistration E2E passed"
+	exit 0
+fi
+
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/metrics/prometheus.yaml"
 kubectl -n shiftpv-system rollout status deployment/metrics-test --timeout=3m
 

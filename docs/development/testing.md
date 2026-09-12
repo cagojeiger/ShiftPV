@@ -93,6 +93,7 @@ Unit test는 다음 고비용 경계를 포함한다.
 | authority 재확인 뒤 inode 고정 retire/purge | `src/node/ownership/reclaim_linux_test.go` |
 | Job·Pool 변경과 영구 실행 실패를 NeedsReview로 수렴 | `src/kubernetes/helperpod/cleanup_test.go` |
 | Pending 재개·receipt settlement·review-only orphan 발견 | `src/lifecycle/cleanupcontroller/reconciler_test.go` |
+| 삭제 중 Pool의 승인된 exact orphan cleanup 수렴 | `TestApprovedOrphanConvergesWhilePoolDeregisters` |
 | recovered Move의 superseded copy 발견과 cycle당 단일 authority snapshot | `src/lifecycle/cleanupcontroller/reconciler_test.go` |
 | create/copy/promotion marker 경계 crash 복구와 active Move 외 unrecorded path 비채택 | `src/node/ownership/{store,transfer}_test.go`, `src/kubernetes/volumeapi/registry_test.go`, `src/mobility/controller/reconciler_test.go` |
 | inventory exact-limit와 overflow admission | `src/node/observation/scanner_test.go`, `src/kubernetes/volumeapi/registry_test.go` |

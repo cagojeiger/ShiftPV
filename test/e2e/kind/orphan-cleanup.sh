@@ -17,6 +17,7 @@ PV_NAME=
 VOLUME_ID=
 CLEANUP_NAME=
 MOUNTED=0
+OLD_POOL_UID=
 
 cleanup() {
 	if [[ "${MOUNTED}" == "1" ]]; then
@@ -95,9 +96,18 @@ kubectl -n "${NAMESPACE}" delete pod/writer --wait=true
 kubectl -n "${NAMESPACE}" delete pvc/data --wait=true
 kubectl wait --for=jsonpath='{.status.phase}'=Released "pv/${PV_NAME}" --timeout=2m
 
-docker exec "${NODE}" mkdir -p "${MOUNT_TARGET}"
-docker exec "${NODE}" mount --bind "${POOL_PATH}/volumes/${VOLUME_ID}" "${MOUNT_TARGET}"
-MOUNTED=1
+for _ in {1..30}; do
+	if docker exec "${NODE}" sh -ec 'mkdir -p "$2" && mount --bind "$1" "$2"' sh \
+		"${POOL_PATH}/volumes/${VOLUME_ID}" "${MOUNT_TARGET}" >/dev/null 2>&1; then
+		MOUNTED=1
+		break
+	fi
+	sleep 1
+done
+if [[ "${MOUNTED}" != "1" ]]; then
+	echo "could not establish the synthetic kubelet publication mount" >&2
+	exit 1
+fi
 wait_for_inventory_publication true
 
 kubectl --as="system:serviceaccount:shiftpv-system:${CONTROLLER_SERVICE_ACCOUNT}" \
@@ -137,6 +147,16 @@ fi
 assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
 kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
 
+# Keep the Pool terminating while the approved orphan cleanup runs. New
+# placement is closed, but the exact cleanup must remain executable so the
+# physical copy blocker and Pool finalizer can converge.
+OLD_POOL_UID=$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.metadata.uid}')
+kubectl delete "shiftpvpool/${POOL}" --wait=false
+kubectl wait --for=condition=Ready=false "shiftpvpool/${POOL}" --timeout=2m
+test -n "$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.metadata.deletionTimestamp}')"
+test "$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.metadata.finalizers[0]}')" = shiftpv.io/pool-protection
+test "$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')" = PoolDeregistering
+
 docker exec "${NODE}" umount "${MOUNT_TARGET}"
 docker exec "${NODE}" rmdir "${MOUNT_TARGET}"
 MOUNTED=0
@@ -153,5 +173,26 @@ if kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null 2>&1; then
 	echo "exact orphan reservation remains after settled cleanup" >&2
 	exit 1
 fi
+kubectl wait --for=delete "shiftpvpool/${POOL}" --timeout=2m
 
-echo "ShiftPV exact orphan cleanup E2E passed: volume=${VOLUME_ID} cleanup=${CLEANUP_NAME} checksum=${CHECKSUM}"
+kubectl apply -f - <<EOF
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVPool
+metadata:
+  name: ${POOL}
+spec:
+  nodeName: ${NODE}
+  mountPath: ${POOL_PATH}
+  capacity:
+    limit: 10Gi
+EOF
+kubectl wait --for=condition=Ready "shiftpvpool/${POOL}" --timeout=2m
+kubectl wait --for=jsonpath='{.status.inventory.valid}'=true "shiftpvpool/${POOL}" --timeout=2m
+kubectl wait --for=jsonpath='{.metadata.finalizers[0]}'=shiftpv.io/pool-protection "shiftpvpool/${POOL}" --timeout=2m
+NEW_POOL_UID=$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.metadata.uid}')
+if [[ "${NEW_POOL_UID}" == "${OLD_POOL_UID}" ]]; then
+	echo "re-registered Pool kept the deleted identity: ${NEW_POOL_UID}" >&2
+	exit 1
+fi
+
+echo "ShiftPV exact orphan cleanup E2E passed during Pool deregistration: volume=${VOLUME_ID} cleanup=${CLEANUP_NAME} checksum=${CHECKSUM}"
