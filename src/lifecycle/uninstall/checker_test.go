@@ -64,6 +64,10 @@ func (m *memoryRepository) ListPools(context.Context) ([]volumeapi.Pool, error) 
 	return m.pools, m.poolsErr
 }
 
+func (m *memoryRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
+	return m.pools, m.poolsErr
+}
+
 func (m *memoryRepository) RemovePoolFinalizer(_ context.Context, name, uid string) error {
 	m.removed = append(m.removed, name+"/"+uid)
 	return nil
@@ -180,11 +184,31 @@ func TestCheckPoolDeleteBlocksEveryTargetPoolDependency(t *testing.T) {
 	}
 }
 
+func TestCheckPoolDeleteFencesMoveCandidateBeforeCapacityAdmission(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 9, 0, 0, 0, time.UTC)
+	target := volumeapi.Pool{
+		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true}},
+	}
+	repository := &memoryRepository{pools: []volumeapi.Pool{target}, moves: []volumeapi.Move{{
+		Name: "move-pending-capacity", Spec: volumeapi.MoveSpec{VolumeID: "volume", SourceNode: "node-source"},
+		Status: volumeapi.MoveStatus{Phase: "WaitingForCapacity", CandidateNodes: []string{target.NodeName}},
+	}}}
+	checker := &Checker{Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, Namespace: "shiftpv-system", Now: func() time.Time { return now }}
+	report, err := checker.CheckPoolDeleteAfter(context.Background(), target.Name, types.UID(target.UID), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := blockersText(report.Blockers); !strings.Contains(text, "ShiftPVMove//move-pending-capacity/") {
+		t.Fatalf("candidate move did not fence Pool deletion: %s", text)
+	}
+}
+
 func shiftPVPersistentVolumeOnNode(name, nodeName string) *corev1.PersistentVolume {
 	return &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: corev1.PersistentVolumeSpec{
 		PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: DriverName, VolumeHandle: name}},
 		NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-			MatchExpressions: []corev1.NodeSelectorRequirement{{Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{nodeName}}},
+			MatchExpressions: []corev1.NodeSelectorRequirement{{Key: topologyKey, Operator: corev1.NodeSelectorOpIn, Values: []string{nodeName}}},
 		}}}},
 	}}
 }

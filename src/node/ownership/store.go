@@ -303,7 +303,7 @@ func (s *Store) ensureServing(identity volume.CopyIdentity) error {
 				return err
 			}
 		}
-		if err := unix.Mkdirat(incoming, stageName, 0700); err != nil {
+		if err := unix.Mkdirat(incoming, stageName, 0755); err != nil {
 			if !errors.Is(err, unix.EEXIST) {
 				return err
 			}
@@ -311,6 +311,10 @@ func (s *Store) ensureServing(identity volume.CopyIdentity) error {
 		fd, openErr := unix.Openat(incoming, stageName, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if openErr != nil {
 			return openErr
+		}
+		if err := unix.Fchmod(fd, 0755); err != nil {
+			unix.Close(fd)
+			return err
 		}
 		record, err = placementFor(fd, identity)
 		unix.Close(fd)

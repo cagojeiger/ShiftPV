@@ -14,10 +14,11 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
 type Repository interface {
-	ListPools(context.Context) ([]volumeapi.Pool, error)
+	ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error)
 	EnsurePoolFinalizer(context.Context, string, string) error
 	RemovePoolFinalizer(context.Context, string, string) error
 	ApprovePoolIdentityRelease(context.Context, string, string) error
@@ -32,10 +33,11 @@ type QuiesceState interface {
 }
 
 type Reconciler struct {
-	Pools    Repository
-	Safety   SafetyChecker
-	Quiesce  QuiesceState
-	Interval time.Duration
+	Pools     Repository
+	Safety    SafetyChecker
+	Quiesce   QuiesceState
+	PoolLocks *poolcapacity.Locker
+	Interval  time.Duration
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -59,7 +61,7 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	pools, err := r.Pools.ListPools(ctx)
+	pools, err := r.Pools.ListPoolRegistrations(ctx)
 	if err != nil {
 		return err
 	}
@@ -78,23 +80,29 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 		if !slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) {
 			continue
 		}
+		unlock := r.PoolLocks.Lock(pool.NodeName)
 		report, checkErr := r.Safety.CheckPoolDeleteAfter(ctx, pool.Name, types.UID(pool.UID), pool.DeletionTimestamp.Time)
 		if checkErr != nil {
+			unlock()
 			result = errors.Join(result, fmt.Errorf("check deleting Pool %q: %w", pool.Name, checkErr))
 			continue
 		}
 		if !report.Safe() {
+			unlock()
 			continue
 		}
 		if pool.IdentityReleaseApproval != pool.UID {
 			result = errors.Join(result, r.Pools.ApprovePoolIdentityRelease(ctx, pool.Name, pool.UID))
+			unlock()
 			continue
 		}
 		released := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionIdentityReleased)
 		if released == nil || released.Status != metav1.ConditionTrue || released.ObservedGeneration != pool.Generation {
+			unlock()
 			continue
 		}
 		result = errors.Join(result, r.Pools.RemovePoolFinalizer(ctx, pool.Name, pool.UID))
+		unlock()
 	}
 	return result
 }
@@ -106,7 +114,7 @@ func (r *Reconciler) reconcileAndLog(ctx context.Context) {
 }
 
 func (r *Reconciler) validate() error {
-	if r == nil || r.Pools == nil || r.Safety == nil || r.Quiesce == nil || r.Interval <= 0 {
+	if r == nil || r.Pools == nil || r.Safety == nil || r.Quiesce == nil || r.PoolLocks == nil || r.Interval <= 0 {
 		return fmt.Errorf("Pool lifecycle reconciler configuration is incomplete")
 	}
 	return nil

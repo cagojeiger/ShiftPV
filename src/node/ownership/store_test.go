@@ -33,6 +33,13 @@ func TestPrepareServingPersistsIdentityAndIsIdempotent(t *testing.T) {
 	if err := store.VerifyServing(identity); err != nil {
 		t.Fatal(err)
 	}
+	info, err := os.Stat(filepath.Join(root, "volumes", identity.VolumeID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0755 {
+		t.Fatalf("serving root mode=%v, want 0755", info.Mode().Perm())
+	}
 	changed := identity
 	changed.VolumeUID = "replacement"
 	if err := store.VerifyServing(changed); !errors.Is(err, ErrIdentity) {

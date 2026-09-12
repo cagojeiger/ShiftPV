@@ -14,7 +14,7 @@ import (
 )
 
 type Repository interface {
-	PoolForNode(context.Context, string) (volumeapi.Pool, error)
+	PoolForNodeLifecycle(context.Context, string) (volumeapi.Pool, error)
 	SetPoolStatus(context.Context, string, string, string, volumeapi.PoolStatus) error
 }
 
@@ -54,7 +54,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	pool, err := r.Pools.PoolForNode(ctx, r.NodeName)
+	pool, err := r.Pools.PoolForNodeLifecycle(ctx, r.NodeName)
 	var result Result
 	if r.Observe != nil {
 		defer func() { r.Observe(pool, result, reconcileErr) }()

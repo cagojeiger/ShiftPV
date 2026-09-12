@@ -91,7 +91,10 @@ helm-template:
 		cmp -s "$$first" "$$second"; \
 		grep -q -- '--helper-image=busybox:1.37' "$$first"; \
 		grep -q -- '--mobility-helper-image=ghcr.io/cagojeiger/shiftpv-controller:0.1.11' "$$first"; \
-		! grep -q -- '--helper-service-account=' "$$first"
+		! grep -q -- '--helper-service-account=' "$$first"; \
+		! grep -q -- '--controller-service-account=' "$$first"; \
+		! grep -q -- 'name: shiftpv-helper' "$$first"
+	@! helm template shiftpv charts/shiftpv --namespace shiftpv-system --set controller.replicas=2 >/dev/null 2>&1
 	@set -e; rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
 		--set runtime.identityContract=true \
 		--set controller.image.repository=controller --set controller.image.tag=test \
@@ -100,7 +103,10 @@ helm-template:
 		printf '%s\n' "$$rendered" | grep -q 'image: "controller:test"'; \
 		printf '%s\n' "$$rendered" | grep -q 'image: "node:test"'; \
 		printf '%s\n' "$$rendered" | grep -q -- '--helper-image=controller:test'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--helper-service-account=shiftpv-controller'; \
+		printf '%s\n' "$$rendered" | grep -q -- '--helper-service-account=shiftpv-helper'; \
+		printf '%s\n' "$$rendered" | grep -q -- '--controller-service-account=shiftpv-controller'; \
+		printf '%s\n' "$$rendered" | grep -q 'name: shiftpv-helper'; \
+		printf '%s\n' "$$rendered" | grep -q 'resources: \["shiftpvcleanups/status"\]'; \
 		printf '%s\n' "$$rendered" | grep -q '"helm.sh/hook": pre-delete'; \
 		! printf '%s\n' "$$rendered" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
 		printf '%s\n' "$$rendered" | grep -q 'command: \["/shiftpv-uninstall-guard"\]'; \

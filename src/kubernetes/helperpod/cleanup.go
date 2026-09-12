@@ -309,6 +309,7 @@ func (r *Runner) cleanupJob(cleanup cleanupapi.Cleanup, poolRoot string) *batchv
 						Args: []string{
 							"cleanup", "--cleanup-name=" + cleanup.Name, "--cleanup-uid=" + cleanup.UID,
 							"--operation-id=" + cleanup.Spec.OperationID, "--namespace=" + r.Namespace,
+							"--pool-readiness-stale-after=" + r.poolReadinessStaleAfter().String(),
 						},
 						Env:       []corev1.EnvVar{{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}}},
 						Resources: r.Resources,
@@ -322,6 +323,13 @@ func (r *Runner) cleanupJob(cleanup cleanupapi.Cleanup, poolRoot string) *batchv
 			},
 		},
 	}
+}
+
+func (r *Runner) poolReadinessStaleAfter() time.Duration {
+	if r.PoolReadinessStaleAfter > 0 {
+		return r.PoolReadinessStaleAfter
+	}
+	return volumeapi.DefaultPoolReadinessStaleAfter
 }
 
 func sameCleanupJob(current, expected *batchv1.Job) bool {

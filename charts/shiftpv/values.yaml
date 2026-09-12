@@ -83,6 +83,9 @@ serviceAccount:
   controller:
     create: true
     name: ""
+  helper:
+    create: true
+    name: ""
   node:
     create: true
     name: ""

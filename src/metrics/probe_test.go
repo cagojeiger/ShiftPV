@@ -25,7 +25,7 @@ func (i *blockedInspector) Inspect(volumeapi.Pool) readiness.Result {
 
 type localPool struct{}
 
-func (localPool) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+func (localPool) PoolForNodeLifecycle(context.Context, string) (volumeapi.Pool, error) {
 	return volumeapi.Pool{Name: "pool", UID: "pool-uid", NodeName: "node"}, nil
 }
 func (localPool) SetPoolStatus(context.Context, string, string, string, volumeapi.PoolStatus) error {

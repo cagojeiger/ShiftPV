@@ -11,6 +11,7 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
 type memoryPools struct {
@@ -21,7 +22,7 @@ type memoryPools struct {
 	listError error
 }
 
-func (m *memoryPools) ListPools(context.Context) ([]volumeapi.Pool, error) {
+func (m *memoryPools) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
 	return m.pools, m.listError
 }
 
@@ -44,6 +45,7 @@ type memorySafety struct {
 	report uninstallcheck.Report
 	err    error
 	after  time.Time
+	called chan struct{}
 }
 
 type memoryQuiesce struct {
@@ -57,12 +59,15 @@ func (m memoryQuiesce) Quiescing(context.Context) (string, bool, error) {
 
 func (m *memorySafety) CheckPoolDeleteAfter(_ context.Context, _ string, _ types.UID, after time.Time) (uninstallcheck.Report, error) {
 	m.after = after
+	if m.called != nil {
+		m.called <- struct{}{}
+	}
 	return m.report, m.err
 }
 
 func TestReconcileProtectsActivePool(t *testing.T) {
 	pools := &memoryPools{pools: []volumeapi.Pool{{Name: "pool", UID: "pool-uid"}}}
-	reconciler := &Reconciler{Pools: pools, Safety: &memorySafety{}, Quiesce: memoryQuiesce{}, Interval: time.Second}
+	reconciler := &Reconciler{Pools: pools, Safety: &memorySafety{}, Quiesce: memoryQuiesce{}, PoolLocks: &poolcapacity.Locker{}, Interval: time.Second}
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -71,9 +76,23 @@ func TestReconcileProtectsActivePool(t *testing.T) {
 	}
 }
 
+func TestReconcileProtectsDuplicateRegistrationsIndependently(t *testing.T) {
+	pools := &memoryPools{pools: []volumeapi.Pool{
+		{Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a"},
+		{Name: "pool-duplicate", UID: "pool-duplicate-uid", NodeName: "node-a"},
+	}}
+	reconciler := &Reconciler{Pools: pools, Safety: &memorySafety{}, Quiesce: memoryQuiesce{}, PoolLocks: &poolcapacity.Locker{}, Interval: time.Second}
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.ensured) != 2 || pools.ensured[0] != "pool-a/pool-a-uid" || pools.ensured[1] != "pool-duplicate/pool-duplicate-uid" {
+		t.Fatalf("independent finalizers=%v", pools.ensured)
+	}
+}
+
 func TestReconcileDoesNotReinstallProtectionDuringUninstallQuiesce(t *testing.T) {
 	pools := &memoryPools{pools: []volumeapi.Pool{{Name: "pool", UID: "pool-uid"}}}
-	reconciler := &Reconciler{Pools: pools, Safety: &memorySafety{}, Quiesce: memoryQuiesce{quiescing: true}, Interval: time.Second}
+	reconciler := &Reconciler{Pools: pools, Safety: &memorySafety{}, Quiesce: memoryQuiesce{quiescing: true}, PoolLocks: &poolcapacity.Locker{}, Interval: time.Second}
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +106,7 @@ func TestReconcileWaitsForPostDeleteSafety(t *testing.T) {
 	pool := volumeapi.Pool{Name: "pool", UID: "pool-uid", DeletionTimestamp: &deletedAt, Finalizers: []string{volumeapi.PoolProtectionFinalizer}}
 	pools := &memoryPools{pools: []volumeapi.Pool{pool}}
 	safety := &memorySafety{report: uninstallcheck.Report{Blockers: []uninstallcheck.Blocker{{Kind: uninstallcheck.PoolInventoryBlockerKind, Name: pool.Name}}}}
-	reconciler := &Reconciler{Pools: pools, Safety: safety, Quiesce: memoryQuiesce{}, Interval: time.Second}
+	reconciler := &Reconciler{Pools: pools, Safety: safety, Quiesce: memoryQuiesce{}, PoolLocks: &poolcapacity.Locker{}, Interval: time.Second}
 
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
@@ -120,8 +139,37 @@ func TestReconcileFailsClosedOnObservationError(t *testing.T) {
 	pool := volumeapi.Pool{Name: "pool", UID: "pool-uid", DeletionTimestamp: &deletedAt, Finalizers: []string{volumeapi.PoolProtectionFinalizer}}
 	pools := &memoryPools{pools: []volumeapi.Pool{pool}}
 	safety := &memorySafety{err: errors.New("API unavailable")}
-	reconciler := &Reconciler{Pools: pools, Safety: safety, Quiesce: memoryQuiesce{}, Interval: time.Second}
+	reconciler := &Reconciler{Pools: pools, Safety: safety, Quiesce: memoryQuiesce{}, PoolLocks: &poolcapacity.Locker{}, Interval: time.Second}
 	if err := reconciler.ReconcileAll(context.Background()); err == nil || len(pools.removed) != 0 {
 		t.Fatalf("error=%v remove=%v", err, pools.removed)
+	}
+}
+
+func TestReconcileSerializesDeletionApprovalWithPoolAdmission(t *testing.T) {
+	deletedAt := metav1.Now()
+	pool := volumeapi.Pool{Name: "pool", UID: "pool-uid", NodeName: "node-a", DeletionTimestamp: &deletedAt, Finalizers: []string{volumeapi.PoolProtectionFinalizer}}
+	pools := &memoryPools{pools: []volumeapi.Pool{pool}}
+	safety := &memorySafety{called: make(chan struct{}, 1)}
+	locks := &poolcapacity.Locker{}
+	releaseAdmission := locks.Lock(pool.NodeName)
+	reconciler := &Reconciler{Pools: pools, Safety: safety, Quiesce: memoryQuiesce{}, PoolLocks: locks, Interval: time.Second}
+	done := make(chan error, 1)
+	go func() { done <- reconciler.ReconcileAll(context.Background()) }()
+	select {
+	case <-safety.called:
+		t.Fatal("Pool deletion inspected dependencies before in-flight admission released its fence")
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseAdmission()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Pool deletion did not resume after admission released its fence")
+	}
+	if len(pools.approved) != 1 {
+		t.Fatalf("identity release approval=%v", pools.approved)
 	}
 }

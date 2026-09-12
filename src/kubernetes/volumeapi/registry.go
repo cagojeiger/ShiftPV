@@ -564,6 +564,28 @@ func (r *Registry) Pools(ctx context.Context) ([]Pool, error) {
 
 // ListPools permits an empty registry for read-only inventory.
 func (r *Registry) ListPools(ctx context.Context) ([]Pool, error) {
+	pools, err := r.ListPoolRegistrations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nodes := make(map[string]struct{}, len(pools))
+	for _, pool := range pools {
+		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" {
+			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName or mountPath", ErrPoolConfiguration, pool.Name)
+		}
+		if _, duplicate := nodes[pool.NodeName]; duplicate {
+			return nil, fmt.Errorf("%w: multiple ShiftPVPools are registered for node %q", ErrPoolConfiguration, pool.NodeName)
+		}
+		nodes[pool.NodeName] = struct{}{}
+	}
+	sort.Slice(pools, func(left, right int) bool { return pools[left].NodeName < pools[right].NodeName })
+	return pools, nil
+}
+
+// ListPoolRegistrations returns each Pool incarnation independently. Lifecycle
+// protection uses this view so one invalid or duplicate registration cannot
+// prevent finalizers from being installed on every object.
+func (r *Registry) ListPoolRegistrations(ctx context.Context) ([]Pool, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
 	}
@@ -572,22 +594,14 @@ func (r *Registry) ListPools(ctx context.Context) ([]Pool, error) {
 		return nil, fmt.Errorf("list ShiftPVPool: %w", err)
 	}
 	result := make([]Pool, 0, len(list.Items))
-	nodes := make(map[string]struct{}, len(list.Items))
 	for index := range list.Items {
 		pool, poolErr := poolFrom(&list.Items[index])
 		if poolErr != nil {
 			return nil, poolErr
 		}
-		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" {
-			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName or mountPath", ErrPoolConfiguration, list.Items[index].GetName())
-		}
-		if _, duplicate := nodes[pool.NodeName]; duplicate {
-			return nil, fmt.Errorf("%w: multiple ShiftPVPools are registered for node %q", ErrPoolConfiguration, pool.NodeName)
-		}
-		nodes[pool.NodeName] = struct{}{}
 		result = append(result, pool)
 	}
-	sort.Slice(result, func(left, right int) bool { return result[left].NodeName < result[right].NodeName })
+	sort.Slice(result, func(left, right int) bool { return result[left].Name < result[right].Name })
 	return result, nil
 }
 
@@ -657,6 +671,47 @@ func (r *Registry) PoolForNode(ctx context.Context, nodeName string) (Pool, erro
 		return Pool{}, fmt.Errorf("%w: no ShiftPVPool is registered for node %q", ErrPoolNotFound, nodeName)
 	}
 	return result, nil
+}
+
+// PoolForNodeLifecycle selects one terminating registration ahead of active
+// duplicates. This lets the node prove an empty duplicate Pool and release its
+// exact identity while ordinary placement continues to reject duplicates.
+func (r *Registry) PoolForNodeLifecycle(ctx context.Context, nodeName string) (Pool, error) {
+	if nodeName == "" {
+		return Pool{}, fmt.Errorf("%w: node name is required", ErrPoolConfiguration)
+	}
+	pools, err := r.ListPoolRegistrations(ctx)
+	if err != nil {
+		return Pool{}, err
+	}
+	candidates := make([]Pool, 0, 2)
+	deleting := make([]Pool, 0, 1)
+	for _, pool := range pools {
+		if pool.NodeName != nodeName {
+			continue
+		}
+		candidates = append(candidates, pool)
+		if pool.DeletionTimestamp != nil {
+			deleting = append(deleting, pool)
+		}
+	}
+	if len(deleting) > 0 {
+		sort.Slice(deleting, func(left, right int) bool {
+			leftTime, rightTime := deleting[left].DeletionTimestamp.Time, deleting[right].DeletionTimestamp.Time
+			if leftTime.Equal(rightTime) {
+				return deleting[left].Name < deleting[right].Name
+			}
+			return leftTime.Before(rightTime)
+		})
+		return deleting[0], nil
+	}
+	if len(candidates) == 0 {
+		return Pool{}, fmt.Errorf("%w: no ShiftPVPool is registered for node %q", ErrPoolNotFound, nodeName)
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	return Pool{}, fmt.Errorf("%w: multiple ShiftPVPools are registered for node %q", ErrPoolConfiguration, nodeName)
 }
 
 func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool, error) {

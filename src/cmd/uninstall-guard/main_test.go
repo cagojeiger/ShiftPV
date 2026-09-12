@@ -46,6 +46,9 @@ func (emptyVolumeRepository) ListMoves(context.Context) ([]volumeapi.Move, error
 func (emptyVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, error) {
 	return nil, nil
 }
+func (emptyVolumeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
+	return nil, nil
+}
 func (emptyVolumeRepository) RemovePoolFinalizer(context.Context, string, string) error { return nil }
 
 func (m *mutableVolumeRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
@@ -74,6 +77,10 @@ func (m *mutableVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, 
 		}
 	})
 	return result, nil
+}
+
+func (m *mutableVolumeRepository) ListPoolRegistrations(ctx context.Context) ([]volumeapi.Pool, error) {
+	return m.ListPools(ctx)
 }
 
 func (m *mutableVolumeRepository) RemovePoolFinalizer(_ context.Context, name, uid string) error {

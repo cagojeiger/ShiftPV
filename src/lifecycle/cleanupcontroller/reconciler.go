@@ -30,13 +30,14 @@ type Inventory interface {
 }
 
 type Reconciler struct {
-	Store     *cleanupapi.Store
-	Operator  Operator
-	Client    kubernetes.Interface
-	Namespace string
-	Interval  time.Duration
-	Now       func() time.Time
-	Inventory Inventory
+	Store                   *cleanupapi.Store
+	Operator                Operator
+	Client                  kubernetes.Interface
+	Namespace               string
+	Interval                time.Duration
+	PoolReadinessStaleAfter time.Duration
+	Now                     func() time.Time
+	Inventory               Inventory
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -100,7 +101,7 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("re-evaluate approved orphan %s: orphan inventory is not configured", request.Name))
 				continue
 			}
-			ready, reason, message := snapshot.classify(request.Spec.Target, request.Spec.ReservationUID, r.now())
+			ready, reason, message := snapshot.classify(request.Spec.Target, request.Spec.ReservationUID, r.now(), r.staleAfter())
 			if !ready {
 				if err := r.review(ctx, request, reason, message); err != nil {
 					reconcileErrors = append(reconcileErrors, fmt.Errorf("preserve approved orphan %s: %w", request.Name, err))
@@ -176,7 +177,7 @@ func (r *Reconciler) orphanSnapshot(ctx context.Context) (orphanSnapshot, error)
 	return snapshot, nil
 }
 
-func (s orphanSnapshot) classify(target volume.CopyIdentity, reservationUID string, now time.Time) (bool, string, string) {
+func (s orphanSnapshot) classify(target volume.CopyIdentity, reservationUID string, now time.Time, staleAfter time.Duration) (bool, string, string) {
 	authority := volumeapi.ClassifyCopyAuthority(s.volumes, target)
 	if authority == volumeapi.CopyAuthorityCurrent || authority == volumeapi.CopyAuthorityUncertain {
 		return false, "VolumeAuthorityPresent", "data is preserved while a ShiftPVVolume incarnation can still own this copy; restore or retire that lifecycle first"
@@ -205,13 +206,13 @@ func (s orphanSnapshot) classify(target volume.CopyIdentity, reservationUID stri
 	if pool == nil {
 		return false, "PoolIdentityUnavailable", "data is preserved until the exact Pool incarnation is registered again"
 	}
-	if ready, reason := pool.CleanupReadyAt(now, volumeapi.DefaultPoolReadinessStaleAfter); !ready {
+	if ready, reason := pool.CleanupReadyAt(now, staleAfter); !ready {
 		return false, "PoolUnavailable", "data is preserved until the exact Pool is available for cleanup: " + reason
 	}
 	if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid {
 		return false, "ObservationUnavailable", "data is preserved until node inventory succeeds and the exact copy can be re-evaluated"
 	}
-	if pool.Status.Inventory.ObservedAt.IsZero() || now.Before(pool.Status.Inventory.ObservedAt.Time) || now.Sub(pool.Status.Inventory.ObservedAt.Time) > volumeapi.DefaultPoolReadinessStaleAfter {
+	if pool.Status.Inventory.ObservedAt.IsZero() || now.Before(pool.Status.Inventory.ObservedAt.Time) || now.Sub(pool.Status.Inventory.ObservedAt.Time) > staleAfter {
 		return false, "ObservationStale", "data is preserved until the exact Pool inventory is observed again"
 	}
 	observed := false
@@ -318,7 +319,7 @@ func (r *Reconciler) discover(ctx context.Context, snapshot orphanSnapshot) erro
 		if request.Spec.Reason != "OrphanReclaim" || request.Spec.Approved || request.Status.Phase == cleanupapi.PhaseCompleted || request.Status.Executor != nil {
 			continue
 		}
-		_, reason, message := snapshot.classify(request.Spec.Target, request.Spec.ReservationUID, r.now())
+		_, reason, message := snapshot.classify(request.Spec.Target, request.Spec.ReservationUID, r.now(), r.staleAfter())
 		if err := r.review(ctx, request, reason, message); err != nil {
 			return err
 		}
@@ -370,7 +371,7 @@ func (r *Reconciler) discover(ctx context.Context, snapshot orphanSnapshot) erro
 				return err
 			}
 			if request.Status.Phase == "" || request.Status.Phase == cleanupapi.PhasePending {
-				_, reason, message := snapshot.classify(identity, reservationUID, r.now())
+				_, reason, message := snapshot.classify(identity, reservationUID, r.now(), r.staleAfter())
 				if reason == "OrphanReady" {
 					reason = "OrphanPreserved"
 					message = "exact copy is unreferenced and preserved; set spec.approved=true after review to authorize cleanup"
@@ -420,6 +421,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, request cleanupapi.Cleanup) 
 		Phase: cleanupapi.PhaseCompleted, Executor: request.Status.Executor, Receipt: request.Status.Receipt,
 		SettledAt: now.Format(time.RFC3339Nano),
 	})
+}
+
+func (r *Reconciler) staleAfter() time.Duration {
+	if r.PoolReadinessStaleAfter > 0 {
+		return r.PoolReadinessStaleAfter
+	}
+	return volumeapi.DefaultPoolReadinessStaleAfter
 }
 
 func (r *Reconciler) releaseReservation(ctx context.Context, request cleanupapi.Cleanup) error {

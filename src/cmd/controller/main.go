@@ -140,11 +140,12 @@ func main() {
 	poolLocks := &poolcapacity.Locker{}
 	cleanupReconciler := &cleanupcontroller.Reconciler{
 		Store: cleanupStore, Operator: operator, Client: client, Namespace: *namespace, Inventory: volumeRegistry, Interval: 30 * time.Second,
+		PoolReadinessStaleAfter: *poolReadinessStaleAfter,
 	}
 	lifecycleChecker := &uninstallcheck.Checker{
 		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassName: *storageClassName, Namespace: *namespace,
 	}
-	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, Interval: 2 * time.Second}
+	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	controllerService := &controllercsi.Service{
 		Client: client, Namespace: *namespace, Operator: operator, Volumes: volumeRegistry,
 		CapacityPools: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,

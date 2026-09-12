@@ -31,6 +31,7 @@ type VolumeRepository interface {
 	ListVolumes(context.Context) (map[string]volumeapi.State, error)
 	ListMoves(context.Context) ([]volumeapi.Move, error)
 	ListPools(context.Context) ([]volumeapi.Pool, error)
+	ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error)
 	RemovePoolFinalizer(context.Context, string, string) error
 }
 
@@ -60,6 +61,7 @@ type Report struct {
 }
 
 const PoolInventoryBlockerKind = "ShiftPVPoolInventory"
+const topologyKey = "topology.csi.shiftpv.io/node"
 
 func (r Report) Safe() bool {
 	return len(r.Blockers) == 0
@@ -73,7 +75,7 @@ func (c *Checker) ReleasePoolProtection(ctx context.Context) error {
 	if c == nil || c.Volumes == nil {
 		return fmt.Errorf("uninstall checker is not configured")
 	}
-	pools, err := c.Volumes.ListPools(ctx)
+	pools, err := c.Volumes.ListPoolRegistrations(ctx)
 	if err != nil {
 		return fmt.Errorf("list ShiftPVPools: %w", err)
 	}
@@ -103,7 +105,7 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		return Report{}, fmt.Errorf("ShiftPV namespace is required")
 	}
 
-	pools, err := c.Volumes.ListPools(ctx)
+	pools, err := c.Volumes.ListPoolRegistrations(ctx)
 	if err != nil {
 		return Report{}, fmt.Errorf("list ShiftPVPools: %w", err)
 	}
@@ -192,7 +194,8 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		if phase == fsm.PhaseSucceeded || phase == fsm.PhaseBlocked {
 			continue
 		}
-		usesPool := move.Spec.SourceNode == target.NodeName || move.Status.DestinationPoolUID == target.UID ||
+		usesPool := move.Spec.SourceNode == target.NodeName || move.Status.DestinationNode == target.NodeName ||
+			contains(move.Status.CandidateNodes, target.NodeName) || move.Status.DestinationPoolUID == target.UID ||
 			copyUsesPool(move.Status.SourceCopy, *target) || copyUsesPool(move.Status.IncomingCopy, *target) || copyUsesPool(move.Status.DestinationCopy, *target)
 		if usesPool {
 			report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVMove", Name: move.Name, Reason: fmt.Sprintf("phase=%s volume=%s", phase, move.Spec.VolumeID)})
@@ -229,7 +232,7 @@ func persistentVolumeTargetsNode(persistentVolume corev1.PersistentVolume, nodeN
 		known := false
 		matches := false
 		for _, expression := range term.MatchExpressions {
-			if expression.Key != corev1.LabelHostname {
+			if expression.Key != topologyKey {
 				continue
 			}
 			switch expression.Operator {

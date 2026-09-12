@@ -812,15 +812,30 @@ func TestRegistrySetPoolStatusUsesPoolIdentity(t *testing.T) {
 }
 
 func TestRegistryPoolForNodeRejectsMissingAndDuplicateRegistration(t *testing.T) {
+	active := pool("pool-a", "node-a")
+	retiring := pool("pool-a-duplicate", "node-a")
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", MoveResource: "ShiftPVMoveList",
-	}, pool("pool-a", "node-a"), pool("pool-a-duplicate", "node-a"))
+	}, active, retiring)
 	registry := &Registry{Client: client}
+	registrations, err := registry.ListPoolRegistrations(context.Background())
+	if err != nil || len(registrations) != 2 {
+		t.Fatalf("raw lifecycle registrations=%v err=%v", registrations, err)
+	}
 	if _, err := registry.PoolForNode(context.Background(), "node-b"); err == nil {
 		t.Fatal("missing node registration was accepted")
 	}
 	if _, err := registry.PoolForNode(context.Background(), "node-a"); err == nil {
 		t.Fatal("duplicate node registration was accepted")
+	}
+	deletedAt := metav1.Now()
+	retiring.SetDeletionTimestamp(&deletedAt)
+	if _, err := client.Resource(PoolResource).Update(context.Background(), retiring, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	lifecyclePool, err := registry.PoolForNodeLifecycle(context.Background(), "node-a")
+	if err != nil || lifecyclePool.Name != retiring.GetName() {
+		t.Fatalf("deleting duplicate lifecycle Pool=%#v err=%v", lifecyclePool, err)
 	}
 }
 

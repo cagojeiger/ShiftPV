@@ -58,6 +58,7 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	})
 	runner := validRunner(client)
 	runner.ServiceAccountName = "shiftpv-controller"
+	runner.PoolReadinessStaleAfter = 7 * time.Minute
 	runner.Pools = fakePoolResolver{pool: readyCleanupPool(volumeapi.Pool{Name: cleanup.Spec.Target.PoolName, UID: cleanup.Spec.Target.PoolUID, NodeName: cleanup.Spec.Target.NodeName, MountPath: "/mnt/shiftpv"})}
 	result, err := runner.Reclaim(ctx, cleanup, cleanups)
 	if err != nil {
@@ -69,7 +70,8 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	container := created.Spec.Template.Spec.Containers[0]
 	if created.Name != cleanup.Name+"-effect" || created.Spec.Template.Spec.NodeName != cleanup.Spec.Target.NodeName ||
 		created.Spec.Template.Spec.ServiceAccountName != "shiftpv-controller" || container.Command[0] != "/shiftpv-volume-helper" ||
-		!strings.Contains(strings.Join(container.Args, " "), "--cleanup-uid="+cleanup.UID) {
+		!strings.Contains(strings.Join(container.Args, " "), "--cleanup-uid="+cleanup.UID) ||
+		!strings.Contains(strings.Join(container.Args, " "), "--pool-readiness-stale-after=7m0s") {
 		t.Fatalf("cleanup Job identity=%#v", created)
 	}
 	started, err := client.BatchV1().Jobs(runner.Namespace).Get(ctx, created.Name, metav1.GetOptions{})

@@ -158,15 +158,16 @@ permission failure, stale probe, truncated inventory는 신규 provisioning과 �
 |---|---|---|
 | `runtime.identityContract` | identity-aware helper와 node inventory 계약 활성화 | `false` |
 | `controller.image.*` | Controller image | 공개 controller |
-| `controller.resources` | Controller resource 정책 | `{}` |
+| `controller.replicas`, `controller.resources` | 단일 lifecycle writer와 Controller resource 정책 | `1`, `{}` |
 | `node.image.*` | Node Plugin image | 공개 node |
 | `node.kubeletRootDir` | kubelet state root | `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | 참여 node | empty |
 | `node.resources` | Node Plugin resource 정책 | `{}` |
 | `helperPod.image` | create/delete/GC helper image | `busybox:1.37` |
 | `helperPod.timeout`, `helperPod.resources` | helper 실행 제한 | `2m`, 최소 requests/limits |
+| `serviceAccount.helper.*` | identity helper 전용 최소권한 ServiceAccount | chart가 생성 |
 | `poolReadiness.interval` | node-local probe 주기 | `1m` |
-| `poolReadiness.staleAfter` | Controller freshness window | `3m` |
+| `poolReadiness.staleAfter` | provisioning, mobility, GC의 공통 freshness window | `3m` |
 | `mobility.enabled`, `mobility.webhookPort` | cordon mobility와 admission endpoint | `true`, `9443` |
 | `mobility.interval` | event watch를 보완하는 safety interval | `30s` |
 | `mobility.helperImage` | copy/promote helper image | 공개 controller |
@@ -176,7 +177,7 @@ permission failure, stale probe, truncated inventory는 신규 provisioning과 �
 | `sidecars.*` | CSI sidecar image와 resource | pinned image |
 
 `poolReadiness.staleAfter`는 한 번의 probe interval과 Kubernetes API 지연을 포함한다. 고정 driver
-이름과 cluster-scoped resource에 따라 cluster마다 ShiftPV release 하나를 운영한다.
+이름과 cluster-scoped resource에 따라 cluster마다 ShiftPV release 하나와 Controller replica 하나를 운영한다.
 
 ## Mobility and admission
 

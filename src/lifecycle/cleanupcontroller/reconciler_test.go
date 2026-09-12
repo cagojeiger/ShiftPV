@@ -796,11 +796,30 @@ func TestOrphanClassificationPreservesEveryUnprovenBoundary(t *testing.T) {
 			if test.mutate != nil {
 				test.mutate(&snapshot)
 			}
-			ready, reason, message := snapshot.classify(target, test.reservationUID, now)
+			ready, reason, message := snapshot.classify(target, test.reservationUID, now, volumeapi.DefaultPoolReadinessStaleAfter)
 			if ready != test.ready || reason != test.reason || message == "" {
 				t.Fatalf("classification ready=%v reason=%q message=%q", ready, reason, message)
 			}
 		})
+	}
+}
+
+func TestOrphanClassificationUsesConfiguredFreshnessWindow(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 9, 0, 0, 0, time.UTC)
+	target := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid", VolumeID: "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: "node", Role: volume.RoleServing,
+	}
+	pool := readyPool(target, volumeapi.CopyObservation{Marker: "copy", Identity: &target, Present: true})
+	observedAt := metav1.NewTime(now.Add(-5 * time.Minute))
+	pool.Status.LastProbeTime = observedAt
+	pool.Status.Inventory.ObservedAt = observedAt
+	snapshot := orphanSnapshot{pools: []volumeapi.Pool{pool}, volumes: map[string]volumeapi.State{}, volumesByPV: map[string]struct{}{}, reservations: map[string]corev1.ConfigMap{}}
+	if ready, reason, _ := snapshot.classify(target, "", now, 10*time.Minute); !ready || reason != "OrphanReady" {
+		t.Fatalf("configured freshness rejected cleanup: ready=%v reason=%s", ready, reason)
+	}
+	if ready, reason, _ := snapshot.classify(target, "", now, 3*time.Minute); ready || reason != "PoolUnavailable" {
+		t.Fatalf("expired freshness accepted cleanup: ready=%v reason=%s", ready, reason)
 	}
 }
 

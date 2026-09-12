@@ -40,13 +40,13 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy}); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup, volumeapi.DefaultPoolReadinessStaleAfter); err == nil {
 		t.Fatal("Ready volume was accepted without a deletion fence")
 	}
 	if _, err := registry.BeginDelete(context.Background(), volumeID, copy.VolumeUID, copy); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup); err != nil {
+	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup, volumeapi.DefaultPoolReadinessStaleAfter); err != nil {
 		t.Fatalf("durably fenced deletion was rejected: %v", err)
 	}
 	state, err := registry.Get(context.Background(), volumeID)
@@ -57,7 +57,7 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 	if err := registry.SetState(context.Background(), volumeID, state); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup, volumeapi.DefaultPoolReadinessStaleAfter); err == nil {
 		t.Fatal("published volume crossed deletion authority")
 	}
 }
@@ -141,7 +141,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	if _, err := client.CoreV1().PersistentVolumes().Create(context.Background(), persistentVolume, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup); err != nil {
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter); err != nil {
 		t.Fatalf("superseded copy retained recovered Move or volume-wide authority: %v", err)
 	}
 	deletingPool, err := dynamicClient.Resource(volumeapi.PoolResource).Get(context.Background(), target.PoolName, metav1.GetOptions{})
@@ -159,8 +159,22 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup); err != nil {
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter); err != nil {
 		t.Fatalf("terminating Pool rejected exact orphan cleanup: %v", err)
+	}
+	withinConfiguredWindow := metav1.NewTime(time.Now().UTC().Add(-5 * time.Minute))
+	poolStatus.LastProbeTime = withinConfiguredWindow
+	poolStatus.Inventory.ObservedAt = withinConfiguredWindow
+	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, 10*time.Minute); err != nil {
+		t.Fatalf("configured helper freshness rejected exact orphan cleanup: %v", err)
+	}
+	poolStatus.LastProbeTime = metav1.Now()
+	poolStatus.Inventory.ObservedAt = poolStatus.LastProbeTime
+	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
+		t.Fatal(err)
 	}
 	if err := dynamicClient.Resource(volumeapi.MoveResource).Delete(context.Background(), recoveredMove.GetName(), metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
@@ -168,7 +182,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	if err := dynamicClient.Resource(volumeapi.VolumeResource).Delete(context.Background(), volumeID, metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter); err == nil {
 		t.Fatal("PersistentVolume without exact current-copy proof did not revoke orphan cleanup authority")
 	}
 	if err := client.CoreV1().PersistentVolumes().Delete(context.Background(), persistentVolume.Name, metav1.DeleteOptions{}); err != nil {
@@ -178,7 +192,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter); err == nil {
 		t.Fatal("published mount did not revoke orphan cleanup authority")
 	}
 	poolStatus.Inventory.Copies[0].Published = false
@@ -196,7 +210,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	if _, err := client.CoreV1().ConfigMaps("system").Create(context.Background(), replacement, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter); err == nil {
 		t.Fatal("replacement reservation did not revoke orphan cleanup authority")
 	}
 }

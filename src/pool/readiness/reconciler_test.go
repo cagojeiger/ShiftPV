@@ -26,7 +26,7 @@ type fakeRepository struct {
 	statusSets int
 }
 
-func (f *fakeRepository) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+func (f *fakeRepository) PoolForNodeLifecycle(context.Context, string) (volumeapi.Pool, error) {
 	return f.pool, f.err
 }
 

@@ -437,10 +437,11 @@ func runCleanup(arguments []string) error {
 	operationID := flags.String("operation-id", "", "cleanup operation identity")
 	namespace := flags.String("namespace", "", "helper Pod namespace")
 	root := flags.String("pool-root", "/pool", "mounted Pool root")
+	poolReadinessStaleAfter := flags.Duration("pool-readiness-stale-after", volumeapi.DefaultPoolReadinessStaleAfter, "maximum age of the Pool readiness and inventory observation")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if *cleanupName == "" || *cleanupUID == "" || !volume.ValidIdentityToken(*operationID) || *namespace == "" || os.Getenv("POD_NAME") == "" {
+	if *cleanupName == "" || *cleanupUID == "" || !volume.ValidIdentityToken(*operationID) || *namespace == "" || os.Getenv("POD_NAME") == "" || *poolReadinessStaleAfter <= 0 {
 		return fmt.Errorf("cleanup helper identity is incomplete")
 	}
 	config, err := rest.InClusterConfig()
@@ -492,7 +493,7 @@ func runCleanup(arguments []string) error {
 		if err != nil || pool.Name != approved.Spec.Target.PoolName || pool.UID != approved.Spec.Target.PoolUID {
 			return fmt.Errorf("Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 		}
-		return verifyCleanupAuthority(checkCtx, client, registry, *namespace, approved)
+		return verifyCleanupAuthority(checkCtx, client, registry, *namespace, approved, *poolReadinessStaleAfter)
 	}
 	localReceipt, digest, err := ownership.Reclaim(ctx, *root, approved.Spec.Target, approved.Spec.OperationID, authority)
 	if err != nil {
@@ -508,7 +509,7 @@ func runCleanup(arguments []string) error {
 	})
 }
 
-func verifyCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup) error {
+func verifyCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup, freshness time.Duration) error {
 	switch cleanup.Spec.Authority.Kind {
 	case "ShiftPVVolume":
 		state, err := registry.Get(ctx, cleanup.Spec.Authority.Name)
@@ -531,13 +532,13 @@ func verifyCleanupAuthority(ctx context.Context, client kubernetes.Interface, re
 		}
 		return nil
 	case "Namespace":
-		return verifyOrphanCleanupAuthority(ctx, client, registry, namespace, cleanup)
+		return verifyOrphanCleanupAuthority(ctx, client, registry, namespace, cleanup, freshness)
 	default:
 		return fmt.Errorf("cleanup authority %q is not implemented", cleanup.Spec.Authority.Kind)
 	}
 }
 
-func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup) error {
+func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup, poolReadinessStaleAfter time.Duration) error {
 	if client == nil || namespace == "" || cleanup.Spec.Reason != "OrphanReclaim" || !cleanup.Spec.Approved ||
 		cleanup.Spec.Authority.Name != "kube-system" || cleanup.Spec.Authority.UID != cleanup.Spec.Target.InstallationID {
 		return fmt.Errorf("orphan cleanup authority is incomplete: %w", volumeapi.ErrStateConflict)
@@ -585,11 +586,11 @@ func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interfa
 		return fmt.Errorf("orphan Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 	}
 	now := time.Now().UTC()
-	if ready, reason := pool.CleanupReadyAt(now, volumeapi.DefaultPoolReadinessStaleAfter); !ready {
+	if ready, reason := pool.CleanupReadyAt(now, poolReadinessStaleAfter); !ready {
 		return fmt.Errorf("orphan Pool is not available for cleanup (%s): %w", reason, volumeapi.ErrStateConflict)
 	}
 	if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.ObservedAt.IsZero() ||
-		now.Before(pool.Status.Inventory.ObservedAt.Time) || now.Sub(pool.Status.Inventory.ObservedAt.Time) > volumeapi.DefaultPoolReadinessStaleAfter {
+		now.Before(pool.Status.Inventory.ObservedAt.Time) || now.Sub(pool.Status.Inventory.ObservedAt.Time) > poolReadinessStaleAfter {
 		return fmt.Errorf("orphan inventory is unavailable or stale: %w", volumeapi.ErrStateConflict)
 	}
 	observed := false

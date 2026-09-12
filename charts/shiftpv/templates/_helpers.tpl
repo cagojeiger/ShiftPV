@@ -46,6 +46,10 @@ shiftpv.io/uninstall-protected: "true"
 {{- default (printf "%s-node" (include "shiftpv.fullname" .)) .Values.serviceAccount.node.name }}
 {{- end }}
 
+{{- define "shiftpv.helperServiceAccount" -}}
+{{- default (printf "%s-helper" (include "shiftpv.fullname" .)) .Values.serviceAccount.helper.name }}
+{{- end }}
+
 {{- define "shiftpv.uninstallGuardName" -}}
 {{- printf "%s-uninstall-guard" (include "shiftpv.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
