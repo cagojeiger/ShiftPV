@@ -241,11 +241,15 @@ func (s orphanSnapshot) classify(target volume.CopyIdentity, reservationUID stri
 		if reservationUID != "" {
 			return false, "LiveReservationOwnershipConflict", "data is preserved because cleanup cannot own the active volume reservation"
 		}
+		liveVolume, liveVolumeExists := s.volumes[target.VolumeID]
+		if !liveVolumeExists {
+			return false, "LiveReservationIdentityChanged", "data is preserved because the active volume identity is unavailable"
+		}
 		if !reservationExists {
 			return false, "LiveReservationMissing", "data is preserved until the active volume capacity reservation is restored"
 		}
 		if reservation.Labels["app.kubernetes.io/name"] != "shiftpv" || reservation.Labels["app.kubernetes.io/component"] != "volume-reservation" ||
-			reservation.Data["volumeID"] != target.VolumeID || reservation.Data["volumeUID"] != target.VolumeUID {
+			reservation.Data["volumeID"] != target.VolumeID || reservation.Data["volumeUID"] != liveVolume.UID {
 			return false, "LiveReservationIdentityChanged", "data is preserved because the active volume capacity reservation identity is invalid"
 		}
 	} else if reservationUID == "" {

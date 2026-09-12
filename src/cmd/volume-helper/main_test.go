@@ -64,8 +64,9 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 
 func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservation(t *testing.T) {
 	const (
-		volumeID       = "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-		reservationUID = "reservation-uid"
+		volumeID             = "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		reservationUID       = "reservation-uid"
+		replacementVolumeUID = "replacement-volume-uid"
 	)
 	target := volume.CopyIdentity{
 		InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid", VolumeID: volumeID,
@@ -93,7 +94,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 		ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "system", UID: types.UID(reservationUID), Labels: map[string]string{
 			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
 		}},
-		Data: map[string]string{"volumeID": volumeID, "volumeUID": target.VolumeUID},
+		Data: map[string]string{"volumeID": volumeID, "volumeUID": replacementVolumeUID},
 	}
 	client := fake.NewClientset(
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kube-system", UID: types.UID(target.InstallationID)}}, reservation,
@@ -116,16 +117,16 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 		t.Fatal(err)
 	}
 	current := target
-	current.CopyID, current.NodeName, current.Role = "current-copy", "node-b", volume.RoleServing
+	current.VolumeUID, current.CopyID, current.NodeName, current.Role = replacementVolumeUID, "current-copy", "node-b", volume.RoleServing
 	volumeObject := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
-		"metadata": map[string]any{"name": volumeID, "uid": target.VolumeUID},
+		"metadata": map[string]any{"name": volumeID, "uid": replacementVolumeUID},
 		"spec":     map[string]any{"volumeID": volumeID},
 	}}
 	if _, err := dynamicClient.Resource(volumeapi.VolumeResource).Create(context.Background(), volumeObject, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{UID: target.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: current.NodeName, CurrentCopy: &current}); err != nil {
+	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{UID: replacementVolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: current.NodeName, CurrentCopy: &current}); err != nil {
 		t.Fatal(err)
 	}
 	persistentVolume := &corev1.PersistentVolume{

@@ -605,10 +605,18 @@ func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interfa
 	if !observed {
 		return fmt.Errorf("orphan copy is not present in the exact Pool inventory: %w", volumeapi.ErrStateConflict)
 	}
-	return verifyOrphanReservation(ctx, client, namespace, cleanup, authority)
+	reservationVolumeUID := cleanup.Spec.Target.VolumeUID
+	if authority == volumeapi.CopyAuthoritySuperseded {
+		liveVolume, exists := volumes[cleanup.Spec.Target.VolumeID]
+		if !exists {
+			return fmt.Errorf("active volume identity is unavailable: %w", volumeapi.ErrStateConflict)
+		}
+		reservationVolumeUID = liveVolume.UID
+	}
+	return verifyOrphanReservation(ctx, client, namespace, cleanup, authority, reservationVolumeUID)
 }
 
-func verifyOrphanReservation(ctx context.Context, client kubernetes.Interface, namespace string, cleanup cleanupapi.Cleanup, authority volumeapi.CopyAuthority) error {
+func verifyOrphanReservation(ctx context.Context, client kubernetes.Interface, namespace string, cleanup cleanupapi.Cleanup, authority volumeapi.CopyAuthority, reservationVolumeUID string) error {
 	reservation, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, cleanup.Spec.Target.VolumeID, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		if authority == volumeapi.CopyAuthoritySuperseded {
@@ -620,7 +628,7 @@ func verifyOrphanReservation(ctx context.Context, client kubernetes.Interface, n
 		return fmt.Errorf("read orphan capacity reservation: %w", err)
 	}
 	if reservation.Labels["app.kubernetes.io/name"] != "shiftpv" || reservation.Labels["app.kubernetes.io/component"] != "volume-reservation" ||
-		reservation.Data["volumeID"] != cleanup.Spec.Target.VolumeID || reservation.Data["volumeUID"] != cleanup.Spec.Target.VolumeUID {
+		reservation.Data["volumeID"] != cleanup.Spec.Target.VolumeID || reservation.Data["volumeUID"] != reservationVolumeUID {
 		return fmt.Errorf("orphan capacity reservation identity changed: %w", volumeapi.ErrStateConflict)
 	}
 	if authority == volumeapi.CopyAuthoritySuperseded {

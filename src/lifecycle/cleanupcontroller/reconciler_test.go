@@ -501,15 +501,15 @@ func TestApprovedSupersededCopyPreservesLiveVolumeReservation(t *testing.T) {
 	target := existing.Spec.Target
 	target.CopyID, target.Role = "superseded-copy", volume.RoleRetired
 	current := target
-	current.PoolName, current.PoolUID, current.CopyID, current.NodeName, current.Role = "current-pool", "current-pool-uid", "current-copy", "current-node", volume.RoleServing
-	state := volumeapi.State{UID: target.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: current.NodeName, CurrentCopy: &current}
+	current.PoolName, current.PoolUID, current.VolumeUID, current.CopyID, current.NodeName, current.Role = "current-pool", "current-pool-uid", "replacement-volume-uid", "current-copy", "current-node", volume.RoleServing
+	state := volumeapi.State{UID: current.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: current.NodeName, CurrentCopy: &current}
 	const reservationUID = "live-reservation-uid"
 	reservation := corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: target.VolumeID, Namespace: "system", UID: types.UID(reservationUID), Labels: map[string]string{
 			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
 		}},
 		Data: map[string]string{
-			"requestName": "live-volume", "volumeID": target.VolumeID, "volumeUID": target.VolumeUID,
+			"requestName": "live-volume", "volumeID": target.VolumeID, "volumeUID": current.VolumeUID,
 			"nodeName": target.NodeName, "capacity": "64",
 		},
 	}
@@ -715,14 +715,14 @@ func TestOrphanClassificationPreservesEveryUnprovenBoundary(t *testing.T) {
 		}, ready: true, reason: "OrphanReady"},
 		"superseded volume and persistent volume released exact copy": {mutate: func(s *orphanSnapshot) {
 			current := target
-			current.CopyID, current.NodeName, current.Role = "current-copy", "other-node", volume.RoleServing
-			s.volumes[target.VolumeID] = volumeapi.State{UID: target.VolumeUID, CurrentCopy: &current}
+			current.VolumeUID, current.CopyID, current.NodeName, current.Role = "replacement-volume-uid", "current-copy", "other-node", volume.RoleServing
+			s.volumes[target.VolumeID] = volumeapi.State{UID: current.VolumeUID, CurrentCopy: &current}
 			s.volumesByPV[target.VolumeID] = struct{}{}
 			s.reservations[target.VolumeID] = corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 				Name: target.VolumeID, UID: "live-reservation", Labels: map[string]string{
 					"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
 				},
-			}, Data: map[string]string{"volumeID": target.VolumeID, "volumeUID": target.VolumeUID}}
+			}, Data: map[string]string{"volumeID": target.VolumeID, "volumeUID": current.VolumeUID}}
 		}, ready: true, reason: "OrphanReady"},
 		"superseded copy missing live reservation": {mutate: func(s *orphanSnapshot) {
 			current := target
