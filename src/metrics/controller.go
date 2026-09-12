@@ -118,6 +118,7 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 		values = append(values, sample{"moves", float64(counts[phase]), []string{phase}})
 	}
 	cleanupCounts := map[string]int{}
+	cleanupPhases := []string{cleanupapi.PhasePending, cleanupapi.PhaseRunning, cleanupapi.PhaseVerifying, cleanupapi.PhaseNeedsReview, cleanupapi.PhaseCompleted, "Unknown"}
 	var cleanupContracts []cleanupapi.Cleanup
 	if c.Cleanups != nil {
 		cleanups, err := c.Cleanups.List(ctx)
@@ -126,10 +127,14 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 		}
 		cleanupContracts = cleanups
 		for _, request := range cleanups {
-			cleanupCounts[request.Status.Phase]++
+			phase := request.Status.Phase
+			if phase == "" {
+				phase = cleanupapi.PhasePending
+			}
+			cleanupCounts[bounded(phase, cleanupPhases)]++
 		}
 	}
-	for _, state := range []string{cleanupapi.PhasePending, cleanupapi.PhaseRunning, cleanupapi.PhaseVerifying, cleanupapi.PhaseNeedsReview, cleanupapi.PhaseCompleted, "Unknown"} {
+	for _, state := range cleanupPhases {
 		values = append(values, sample{"cleanup_requests", float64(cleanupCounts[state]), []string{state}})
 	}
 	values = append(values, copyObservationSamples(pools, volumes, moves, cleanupContracts)...)

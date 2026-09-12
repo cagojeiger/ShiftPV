@@ -460,11 +460,21 @@ func TestDedicatedMetricFamilyContract(t *testing.T) {
 
 func TestCleanupContractMetricsExposeVerifyingAndFailClosed(t *testing.T) {
 	c, _ := fixture()
-	c.Cleanups = cleanupInventory{items: []cleanupapi.Cleanup{{Status: cleanupapi.Status{Phase: cleanupapi.PhaseVerifying}}, {Status: cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview}}}}
+	c.Cleanups = cleanupInventory{items: []cleanupapi.Cleanup{
+		{},
+		{Status: cleanupapi.Status{Phase: cleanupapi.PhaseVerifying}},
+		{Status: cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview}},
+		{Status: cleanupapi.Status{Phase: "Invalid"}},
+	}}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	contains(t, output(t, c.Exporter), `shiftpv_cleanup_requests{state="Verifying"} 1`, `shiftpv_cleanup_requests{state="NeedsReview"} 1`)
+	contains(t, output(t, c.Exporter),
+		`shiftpv_cleanup_requests{state="Pending"} 1`,
+		`shiftpv_cleanup_requests{state="Verifying"} 1`,
+		`shiftpv_cleanup_requests{state="NeedsReview"} 1`,
+		`shiftpv_cleanup_requests{state="Unknown"} 1`,
+	)
 	c.Cleanups = cleanupInventory{err: errors.New("cleanup inventory unavailable")}
 	if err := c.Refresh(context.Background()); err == nil {
 		t.Fatal("cleanup inventory failure was hidden")
