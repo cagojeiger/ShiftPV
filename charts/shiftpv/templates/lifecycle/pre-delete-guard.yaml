@@ -24,7 +24,7 @@ spec:
   {{- if eq $uninstallMode "argocd" }}
   activeDeadlineSeconds: 86400
   {{- else }}
-  activeDeadlineSeconds: 60
+  activeDeadlineSeconds: 120
   {{- end }}
   template:
     metadata:
@@ -52,7 +52,7 @@ spec:
             - --permit-namespace={{ .Release.Namespace }}
             - --permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --validation-webhook={{ include "shiftpv.validationWebhookConfigurationName" . }}
-            - --timeout=45s
+            - --timeout=90s
             {{- if eq $uninstallMode "argocd" }}
             - --retry
             - --retry-interval=5s

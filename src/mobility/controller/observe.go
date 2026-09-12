@@ -12,6 +12,7 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 type observation struct {
@@ -48,7 +49,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		result.FSM.CompletionReady = completionAllowed(move, state, false)
 		return result, nil
 	}
-	result.FSM.OwnerCommitted = result.DestinationNode != "" && state.Phase == volumeapi.PhaseReady && state.OwnerNode == result.DestinationNode && state.ActiveMove == move.Name
+	result.FSM.OwnerCommitted = hasCommittedDestinationAuthority(move, state, false)
 
 	pools, err := r.Repository.Pools(ctx)
 	if err != nil {
@@ -68,19 +69,19 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	if err != nil {
 		return result, err
 	}
-	readyPoolNodes := make(map[string]struct{}, len(readyPools))
+	readyPoolNodes := make(map[string]volumeapi.Pool, len(readyPools))
 	for _, pool := range readyPools {
-		readyPoolNodes[pool.NodeName] = struct{}{}
+		readyPoolNodes[pool.NodeName] = pool
 	}
 	sourceNode, err := r.Client.CoreV1().Nodes().Get(ctx, move.Spec.SourceNode, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return result, fmt.Errorf("read source Node: %w", err)
 	}
-	_, sourceReady := readyPoolNodes[move.Spec.SourceNode]
-	sourceHealthy := err == nil && nodeReady(sourceNode) && sourceReady
+	sourcePool, sourceReady := readyPoolNodes[move.Spec.SourceNode]
+	sourceHealthy := err == nil && nodeReady(sourceNode) && sourceReady && sourceCopyPresent(sourcePool, state.CurrentCopy)
 	result.FSM.SourceHealthy = sourceHealthy
 	result.SourceCordoned = sourceNode != nil && sourceNode.Spec.Unschedulable
-	if !sourceHealthy {
+	if !sourceHealthy && !result.FSM.OwnerCommitted {
 		result.FSM.UnsafeReason = "SourceUnavailable"
 	}
 	// Discovery and Node updates are not atomic. A Move may be created from a
@@ -98,7 +99,8 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		if nodeName == move.Spec.SourceNode {
 			continue
 		}
-		if _, ready := readyPoolNodes[nodeName]; !ready {
+		readyPool, ready := readyPoolNodes[nodeName]
+		if !ready || volumeapi.PoolHasConflictingServingVolume(readyPool, move.Spec.VolumeID, move.Status.DestinationCopy) {
 			continue
 		}
 		node, nodeErr := r.Client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
@@ -295,13 +297,33 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	} else if placementErr != nil && !apierrors.IsNotFound(placementErr) {
 		return result, fmt.Errorf("read placement reservation Pod: %w", placementErr)
 	}
+	destinationRepair := false
 	if result.DestinationNode != "" {
-		_, ready := readyPoolNodes[result.DestinationNode]
+		readyPool, ready := readyPoolNodes[result.DestinationNode]
+		if !ready {
+			registeredPool, exists := poolNodes[result.DestinationNode]
+			staleAfter := r.PoolReadinessStaleAfter
+			if staleAfter <= 0 {
+				staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
+			}
+			if exists && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, state, r.now(), staleAfter) {
+				readyPool, ready, destinationRepair = registeredPool, true, true
+			}
+		}
+		copyConflict := ready && volumeapi.PoolHasConflictingServingVolume(readyPool, move.Spec.VolumeID, move.Status.DestinationCopy)
 		destinationNode, destinationErr := r.Client.CoreV1().Nodes().Get(ctx, result.DestinationNode, metav1.GetOptions{})
 		if destinationErr != nil && !apierrors.IsNotFound(destinationErr) {
 			return result, fmt.Errorf("read selected destination Node %q: %w", result.DestinationNode, destinationErr)
 		}
-		result.FSM.DestinationUnavailable = destinationErr != nil || !ready || !nodeReady(destinationNode)
+		result.FSM.DestinationUnavailable = destinationErr != nil || !ready || !nodeReady(destinationNode) || copyConflict
+		if copyConflict {
+			result.FSM.UnsafeReason = "DestinationServingCopyPresent"
+		}
+		if move.Status.CapacityApproved && ready &&
+			(move.Status.DestinationPoolUID == "" || readyPool.UID != move.Status.DestinationPoolUID) {
+			result.FSM.DestinationBlocked = true
+			result.FSM.UnsafeReason = "DestinationPoolIdentityChanged"
+		}
 	}
 	result.FSM.CopyComplete, result.FSM.CopyFailed, err = r.jobState(ctx, result.Names.CopyJob)
 	if err != nil {
@@ -311,6 +333,13 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	if err != nil {
 		return result, err
 	}
+	// A helper may repair its own exact unrecorded path, but a completed Job
+	// must still wait for the next ordinary valid inventory before authority can
+	// advance to promotion or owner commit.
+	if destinationRepair && (move.Status.Phase == string(fsm.PhaseCopying) && result.FSM.CopyComplete ||
+		move.Status.Phase == string(fsm.PhasePromoting) && result.FSM.PromotionComplete) {
+		result.FSM.DestinationUnavailable = true
+	}
 	result.FSM.PublishedOnDestination = result.DestinationNode != "" && contains(state.PublishedNodes, result.DestinationNode)
 	if move.Status.Phase == string(fsm.PhaseWaitingForDestinationPublish) || move.Status.Phase == string(fsm.PhaseCleaningSource) {
 		result.FSM.CleanupComplete, result.FSM.CleanupFailed, err = r.cleanupState(ctx, move)
@@ -319,6 +348,19 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		}
 	}
 	return result, nil
+}
+
+func sourceCopyPresent(pool volumeapi.Pool, copy *volume.CopyIdentity) bool {
+	if copy == nil || copy.Validate() != nil || copy.Role != volume.RoleServing ||
+		copy.PoolName != pool.Name || copy.PoolUID != pool.UID || copy.NodeName != pool.NodeName || pool.Status.Inventory == nil {
+		return false
+	}
+	for _, observed := range pool.Status.Inventory.Copies {
+		if observed.Identity != nil && *observed.Identity == *copy {
+			return observed.Present && observed.Problem == ""
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) jobState(ctx context.Context, name string) (complete, failed bool, err error) {

@@ -26,12 +26,28 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 shiftpv.io/uninstall-protected: "true"
 {{- end }}
 
+{{- define "shiftpv.controllerImage" -}}
+{{- printf "%s:%s" .Values.controller.image.repository .Values.controller.image.tag -}}
+{{- end }}
+
+{{- define "shiftpv.helperPodImage" -}}
+{{- default (include "shiftpv.controllerImage" .) .Values.helperPod.image -}}
+{{- end }}
+
+{{- define "shiftpv.mobilityHelperImage" -}}
+{{- default (include "shiftpv.controllerImage" .) .Values.mobility.helperImage -}}
+{{- end }}
+
 {{- define "shiftpv.controllerServiceAccount" -}}
 {{- default (printf "%s-controller" (include "shiftpv.fullname" .)) .Values.serviceAccount.controller.name }}
 {{- end }}
 
 {{- define "shiftpv.nodeServiceAccount" -}}
 {{- default (printf "%s-node" (include "shiftpv.fullname" .)) .Values.serviceAccount.node.name }}
+{{- end }}
+
+{{- define "shiftpv.helperServiceAccount" -}}
+{{- default (printf "%s-helper" (include "shiftpv.fullname" .)) .Values.serviceAccount.helper.name }}
 {{- end }}
 
 {{- define "shiftpv.uninstallGuardName" -}}

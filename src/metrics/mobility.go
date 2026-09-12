@@ -1,6 +1,6 @@
 package metrics
 
-var volumePhases = []string{"Ready", "Moving", "Blocked", "Unknown"}
+var volumePhases = []string{"Pending", "Ready", "Deleting", "Moving", "Blocked", "Unknown"}
 var movePhases = []string{"Pending", "Locking", "Evicting", "WaitingForUnpublish", "WaitingForReplacement", "WaitingForDestination", "WaitingForCapacity", "Copying", "Promoting", "Committing", "ReleasingDestination", "WaitingForDestinationPublish", "CleaningSource", "Completing", "Succeeded", "Blocked", "Unknown"}
 var deferredReasons = []string{
 	"SourceUnavailable", "SourceNotCordoned", "VolumeBindingMissing", "VolumeBindingMismatch", "OwnerMismatch", "AdmissionNotEnabled",

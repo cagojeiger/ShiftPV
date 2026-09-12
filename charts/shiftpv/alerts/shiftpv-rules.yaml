@@ -1,0 +1,64 @@
+groups:
+  - name: shiftpv.storage
+    interval: 30s
+    rules:
+      - alert: ShiftPVObservationFailed
+        expr: shiftpv_metrics_snapshot_success{shiftpv="true"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV observation is failing
+          description: The latest completed ShiftPV observation for this source failed for five minutes.
+      - alert: ShiftPVObservationStale
+        expr: |
+          time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"} > 300
+          or absent(shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"})
+          or up{shiftpv="true"} == 0
+          or (
+            max by (shiftpv, cluster, namespace, release, component, node, source) (
+              max_over_time(shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"}[15m])
+            )
+            unless on (shiftpv, cluster, namespace, release, component, node, source)
+            max by (shiftpv, cluster, namespace, release, component, node, source) (
+              shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"}
+            )
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV observation is stale
+          description: A ShiftPV source is failing, stale, or missing from the current scrape targets.
+      - alert: ShiftPVPoolAccountingInvalid
+        expr: shiftpv_pool_accounting_valid{shiftpv="true"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV Pool accounting is invalid
+          description: The Pool reservation snapshot cannot be used for capacity decisions.
+      - alert: ShiftPVPoolInventoryUnsafe
+        expr: shiftpv_pool_inventory_valid{shiftpv="true"} == 0 or shiftpv_pool_inventory_truncated{shiftpv="true"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV Pool copy inventory is incomplete
+          description: The Pool inventory is invalid or exceeded its fixed scan bound, so absence is not proven.
+      - alert: ShiftPVCleanupNeedsReview
+        expr: shiftpv_cleanup_requests{shiftpv="true",state="NeedsReview"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV cleanup needs operator review
+          description: At least one durable cleanup contract is preserving data pending operator action.
+      - alert: ShiftPVCopyNeedsReview
+        expr: shiftpv_copy_observations{shiftpv="true",state=~"OrphanPreserved|Missing|NeedsReview"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV copy placement needs review
+          description: A copy is orphan-preserved, missing from its expected placement, or has an unsafe identity observation.

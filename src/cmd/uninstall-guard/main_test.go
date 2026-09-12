@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,17 +17,84 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
 )
 
 type emptyVolumeRepository struct{}
 
+type emptyCleanupRepository struct{}
+
+type mutableVolumeRepository struct {
+	mu        sync.Mutex
+	once      sync.Once
+	listed    chan struct{}
+	pools     []volumeapi.Pool
+	removed   []string
+	removeErr error
+}
+
+func (emptyCleanupRepository) List(context.Context) ([]cleanupapi.Cleanup, error) { return nil, nil }
+
 func (emptyVolumeRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
 	return map[string]volumeapi.State{}, nil
 }
 func (emptyVolumeRepository) ListMoves(context.Context) ([]volumeapi.Move, error) {
 	return nil, nil
+}
+func (emptyVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, error) {
+	return nil, nil
+}
+func (emptyVolumeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
+	return nil, nil
+}
+func (emptyVolumeRepository) RemovePoolFinalizer(context.Context, string, string) error { return nil }
+
+func (m *mutableVolumeRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
+	return map[string]volumeapi.State{}, nil
+}
+
+func (m *mutableVolumeRepository) ListMoves(context.Context) ([]volumeapi.Move, error) {
+	return nil, nil
+}
+
+func (m *mutableVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := append([]volumeapi.Pool(nil), m.pools...)
+	for index := range result {
+		if result[index].Status.Inventory == nil {
+			continue
+		}
+		inventory := *result[index].Status.Inventory
+		inventory.Copies = append([]volumeapi.CopyObservation(nil), inventory.Copies...)
+		result[index].Status.Inventory = &inventory
+	}
+	m.once.Do(func() {
+		if m.listed != nil {
+			close(m.listed)
+		}
+	})
+	return result, nil
+}
+
+func (m *mutableVolumeRepository) ListPoolRegistrations(ctx context.Context) ([]volumeapi.Pool, error) {
+	return m.ListPools(ctx)
+}
+
+func (m *mutableVolumeRepository) RemovePoolFinalizer(_ context.Context, name, uid string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removed = append(m.removed, name+"/"+uid)
+	return m.removeErr
+}
+
+func (m *mutableVolumeRepository) observeEmpty(at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(at.UTC())
+	m.pools[0].Status.Inventory.Copies = nil
 }
 
 func TestRunCompletesQuiescedTeardown(t *testing.T) {
@@ -36,7 +104,7 @@ func TestRunCompletesQuiescedTeardown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	if err := run(ctx, checker, store, "shiftpv-lifecycle"); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -45,6 +113,72 @@ func TestRunCompletesQuiescedTeardown(t *testing.T) {
 	}
 	if _, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), "shiftpv-lifecycle", metav1.GetOptions{}); err == nil {
 		t.Fatal("lifecycle validation still exists")
+	}
+}
+
+func TestRunWaitsForEmptyPoolInventoryObservedAfterQuiesce(t *testing.T) {
+	client := uninstallClient()
+	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
+	gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = gate.Run(ctx) }()
+	repository := &mutableVolumeRepository{listed: make(chan struct{}), pools: []volumeapi.Pool{{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/var/lib/shiftpv", Generation: 1,
+		Finalizers: []string{volumeapi.PoolProtectionFinalizer},
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{
+			ObservedAt: metav1.NewTime(time.Now().Add(-time.Minute)), Valid: true,
+			Copies: []volumeapi.CopyObservation{{Marker: "copy-before-quiesce.json", Present: true}},
+		}},
+	}}}
+	checker := &uninstallcheck.Checker{
+		Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Now: func() time.Time { return time.Now().Add(2 * time.Minute) },
+	}
+	go func() {
+		<-repository.listed
+		repository.observeEmpty(time.Now())
+	}()
+
+	if err := run(ctx, checker, store, "shiftpv-lifecycle"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if granted, err := store.Granted(context.Background()); err != nil || !granted {
+		t.Fatalf("Granted = %v, %v", granted, err)
+	}
+	if len(repository.removed) != 1 || repository.removed[0] != "pool-a/pool-uid" {
+		t.Fatalf("removed Pool protections = %v", repository.removed)
+	}
+}
+
+func TestRunCancelsQuiesceWhenPoolProtectionReleaseFails(t *testing.T) {
+	client := uninstallClient()
+	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
+	gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() { _ = gate.Run(ctx) }()
+	repository := &mutableVolumeRepository{removeErr: fmt.Errorf("injected finalizer release failure"), pools: []volumeapi.Pool{{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/var/lib/shiftpv", Generation: 1,
+		Finalizers: []string{volumeapi.PoolProtectionFinalizer},
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{
+			ObservedAt: metav1.NewTime(time.Now().Add(time.Minute)), Valid: true,
+		}},
+	}}}
+	checker := &uninstallcheck.Checker{
+		Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Now: func() time.Time { return time.Now().Add(2 * time.Minute) },
+	}
+
+	err := run(ctx, checker, store, "shiftpv-lifecycle")
+	if err == nil || !strings.Contains(err.Error(), "injected finalizer release failure") {
+		t.Fatalf("run error = %v", err)
+	}
+	if _, quiescing, err := store.Quiescing(context.Background()); err != nil || quiescing {
+		t.Fatalf("quiesce after finalizer release failure = %v, %v", quiescing, err)
+	}
+	if len(repository.removed) != 1 || repository.removed[0] != "pool-a/pool-uid" {
+		t.Fatalf("removed Pool protections = %v", repository.removed)
 	}
 }
 
@@ -58,7 +192,7 @@ func TestRunCancelsQuiesceWhenDependenciesExist(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	err := run(ctx, checker, store, "shiftpv-lifecycle")
 	if err == nil || !strings.Contains(err.Error(), "PersistentVolume pv-data") {
 		t.Fatalf("run error = %v", err)
@@ -78,7 +212,7 @@ func TestRunCancelsQuiesceWhenValidationRemovalFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	err := run(ctx, checker, store, "shiftpv-lifecycle")
 	if err == nil || !strings.Contains(err.Error(), "injected validation delete failure") {
 		t.Fatalf("run error = %v", err)
@@ -115,7 +249,7 @@ func TestRunWithRetryCompletesAfterBlockerIsRemoved(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() { _ = gate.Run(ctx) }()
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 
 	if err := runWithRetry(ctx, checker, store, "shiftpv-lifecycle", time.Second, time.Millisecond); err != nil {
 		t.Fatalf("runWithRetry: %v", err)
@@ -131,7 +265,7 @@ func TestRunWithRetryCompletesAfterBlockerIsRemoved(t *testing.T) {
 func TestRunWithRetryValidatesDurationsAndStops(t *testing.T) {
 	client := uninstallClient()
 	store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
-	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, StorageClassName: "shiftpv"}
+	checker := &uninstallcheck.Checker{Client: client, Volumes: emptyVolumeRepository{}, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	if err := runWithRetry(context.Background(), checker, store, "shiftpv-lifecycle", 0, time.Millisecond); err == nil {
 		t.Fatal("zero attempt timeout was accepted")
 	}

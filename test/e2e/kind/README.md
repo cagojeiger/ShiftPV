@@ -23,11 +23,17 @@ ShiftPV marked as the default StorageClass. It first registers an ordinary
 directory inside a worker's root filesystem, proves the path is not a mount point,
 and verifies missing-path rejection followed by Pool readiness, provisioning,
 Pod write-through, Retain preservation followed by explicit Delete reclamation,
+Pool deregistration fencing until that retained copy is reclaimed, exact
+finalizer release, Pool re-registration with a new identity,
 and a checksum-preserving cordon move to an
 ordinary directory on the other worker. The terminal Move remains as history while
 the deleted volume no longer blocks later capacity admission. It then overlays one Pool with a
 bounded tmpfs, proves that external filesystem consumption blocks admission,
 then proves that an empty PVC still consumes aggregate reservation until deletion.
+It also preserves an unreferenced copy as review-only while a Retain PV or mount
+still exists, then deletes the Pool and proves an explicitly approved exact
+orphan cleanup can finish through `PoolDeregistering`; the finalizer releases
+only after physical cleanup, and the same path accepts a new Pool identity.
 It creates a PVC without
 `storageClassName`, verifies Kubernetes defaults it to `shiftpv`, provisions it
 through `csi.shiftpv.io`, and starts a Pod that writes through the mounted RWO
@@ -73,6 +79,14 @@ POOL_CAPACITY_ONLY=1 \
   ./test/e2e/kind/run.sh
 ```
 
+Run only orphan cleanup during Pool deregistration with:
+
+```bash
+ORPHAN_CLEANUP_ONLY=1 \
+  CLUSTER_NAME=shiftpv-orphan-focused \
+  ./test/e2e/kind/run.sh
+```
+
 Run only the ordinary directory Pool contract with:
 
 ```bash
@@ -80,19 +94,6 @@ DIRECTORY_POOL_ONLY=1 \
   CLUSTER_NAME=shiftpv-directory-focused \
   ./test/e2e/kind/run.sh
 ```
-
-Run only the published `0.1.3` to source-tree chart upgrade with:
-
-```bash
-UPGRADE_ONLY=1 \
-  CLUSTER_NAME=shiftpv-upgrade-focused \
-  ./test/e2e/kind/run.sh
-```
-
-This path proves the old Pool schema and StorageClass can be upgraded by applying
-the new CRDs, adding a limit to every Pool, and then upgrading the release. It
-also verifies that a pre-upgrade volume retains its checksum and that a new PVC
-can be provisioned by the upgraded controller.
 
 The cluster and its temporary host directories are removed on exit. Set
 `KEEP_CLUSTER=1` only while diagnosing a failure.

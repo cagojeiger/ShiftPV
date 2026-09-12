@@ -143,10 +143,10 @@ jobs:
           docker run --rm "${IMAGE}@${DIGEST}" --help
           if [[ "${COMPONENT}" == controller ]]; then
             docker run --rm --entrypoint /bin/sh "${IMAGE}@${DIGEST}" \
-              -ec "test -x /shiftpv-controller && test -x /shiftpv-uninstall-guard && test -x /shiftpv-cleanup-check && test ! -e /shiftpv-node"
+              -ec "test -x /shiftpv-controller && test -x /shiftpv-uninstall-guard && test -x /shiftpv-volume-helper && test ! -e /shiftpv-node"
           else
             docker run --rm --entrypoint /bin/sh "${IMAGE}@${DIGEST}" \
-              -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard && test ! -e /shiftpv-cleanup-check"
+              -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard && test ! -e /shiftpv-volume-helper"
           fi
 
       - name: Export digest

@@ -59,6 +59,9 @@ func (s *Service) reserveWithinPool(ctx context.Context, id, requestName, nodeNa
 		}
 		return kubernetesAPIError("read selected Pool", err)
 	}
+	if volumeapi.PoolHasServingVolume(pool, id) {
+		return status.Errorf(codes.FailedPrecondition, "Pool %q already contains a serving copy for volume %q; wait for orphan cleanup", pool.Name, id)
+	}
 	limitBytes, err := poolLimitBytes(pool)
 	if err != nil {
 		return status.Errorf(codes.FailedPrecondition, "Pool %q capacity limit is invalid: %v", pool.Name, err)

@@ -28,30 +28,52 @@ func (e retryableError) Unwrap() error { return e.err }
 func (retryableError) Retryable() bool { return true }
 
 type Runner struct {
-	Client    kubernetes.Interface
-	Namespace string
-	Pools     interface {
+	Client             kubernetes.Interface
+	Namespace          string
+	ServiceAccountName string
+	Pools              interface {
 		PoolForNode(context.Context, string) (volumeapi.Pool, error)
+		PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	}
-	Image     string
-	Timeout   time.Duration
-	Resources corev1.ResourceRequirements
+	Image                   string
+	Timeout                 time.Duration
+	Resources               corev1.ResourceRequirements
+	PoolReadinessStaleAfter time.Duration
 }
 
-func (r *Runner) Create(ctx context.Context, nodeName, volumeID string) error {
-	path, err := volume.Path(mountPath, volumeID)
+func (r *Runner) CreateCopy(ctx context.Context, identity volume.CopyIdentity) error {
+	if err := identity.Validate(); err != nil {
+		return err
+	}
+	operationID, err := volumeapi.CreationOperationID(identity.VolumeUID)
 	if err != nil {
 		return err
 	}
-	return r.run(ctx, nodeName, volumeID, []string{"mkdir", "-p", path})
+	_, err = r.runCreation(ctx, identity, operationID, []string{
+		"/shiftpv-volume-helper", "create",
+		"--operation-id=" + operationID,
+		"--installation-id=" + identity.InstallationID,
+		"--pool-name=" + identity.PoolName,
+		"--pool-uid=" + identity.PoolUID,
+		"--volume-id=" + identity.VolumeID,
+		"--volume-uid=" + identity.VolumeUID,
+		"--copy-id=" + identity.CopyID,
+		"--node-name=" + identity.NodeName,
+	})
+	return err
 }
 
-func (r *Runner) Delete(ctx context.Context, nodeName, volumeID string) error {
-	path, err := volume.Path(mountPath, volumeID)
+// FinalizeCreate removes only the exact, successfully terminated helper after
+// the controller has made the volume Ready. Absence is the settled state.
+func (r *Runner) FinalizeCreate(ctx context.Context, identity volume.CopyIdentity) error {
+	if err := identity.Validate(); err != nil {
+		return err
+	}
+	operationID, err := volumeapi.CreationOperationID(identity.VolumeUID)
 	if err != nil {
 		return err
 	}
-	return r.run(ctx, nodeName, volumeID, []string{"rm", "-rf", path})
+	return r.finalizeCreation(ctx, identity, operationID)
 }
 
 func (r *Runner) StatFS(ctx context.Context, nodeName string) (poolcapacity.Filesystem, error) {
@@ -86,11 +108,6 @@ func (r *Runner) VolumeUsage(ctx context.Context, nodeName, volumeID string) (in
 	return bytes, nil
 }
 
-func (r *Runner) run(ctx context.Context, nodeName, volumeID string, command []string) error {
-	_, err := r.runForResult(ctx, nodeName, volumeID, command)
-	return err
-}
-
 func (r *Runner) runForResult(ctx context.Context, nodeName, volumeID string, command []string) (string, error) {
 	if nodeName == "" {
 		return "", fmt.Errorf("node name is required")
@@ -109,41 +126,8 @@ func (r *Runner) runForResult(ctx context.Context, nodeName, volumeID string, co
 		return "", fmt.Errorf("helper Pod configuration is incomplete")
 	}
 
-	hostPathType := corev1.HostPathDirectory
 	zero := int64(0)
-	pod, err := r.Client.CoreV1().Pods(r.Namespace).Create(ctx, &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "shiftpv-volume-op-",
-			Labels: map[string]string{
-				"app.kubernetes.io/name":      "shiftpv",
-				"app.kubernetes.io/component": "volume-helper",
-				"shiftpv.io/volume-id":        volumeID,
-			},
-		},
-		Spec: corev1.PodSpec{
-			NodeName:      nodeName,
-			RestartPolicy: corev1.RestartPolicyNever,
-			Containers: []corev1.Container{{
-				Name:         "operation",
-				Image:        r.Image,
-				Command:      command,
-				Resources:    r.Resources,
-				VolumeMounts: []corev1.VolumeMount{{Name: "pool", MountPath: mountPath}},
-				SecurityContext: &corev1.SecurityContext{
-					AllowPrivilegeEscalation: boolPtr(false),
-					RunAsUser:                int64Ptr(0),
-					RunAsGroup:               int64Ptr(0),
-				},
-			}},
-			Volumes: []corev1.Volume{{
-				Name: "pool",
-				VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
-					Path: poolRoot,
-					Type: &hostPathType,
-				}},
-			}},
-		},
-	}, metav1.CreateOptions{})
+	pod, err := r.Client.CoreV1().Pods(r.Namespace).Create(ctx, r.helperPod(nodeName, volumeID, poolRoot, command), metav1.CreateOptions{})
 	if err != nil {
 		return "", fmt.Errorf("create helper Pod: %w", classifyKubernetesAPIError(err))
 	}
@@ -176,6 +160,44 @@ func (r *Runner) runForResult(ctx context.Context, nodeName, volumeID string, co
 		return "", fmt.Errorf("wait for helper Pod on node %q: %w", nodeName, err)
 	}
 	return result, nil
+}
+
+func (r *Runner) helperPod(nodeName, volumeID, poolRoot string, command []string) *corev1.Pod {
+	hostPathType := corev1.HostPathDirectory
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "shiftpv-volume-op-",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "shiftpv",
+				"app.kubernetes.io/component": "volume-helper",
+				"shiftpv.io/volume-id":        volumeID,
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName:           nodeName,
+			ServiceAccountName: r.ServiceAccountName,
+			RestartPolicy:      corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:         "operation",
+				Image:        r.Image,
+				Command:      command,
+				Resources:    r.Resources,
+				VolumeMounts: []corev1.VolumeMount{{Name: "pool", MountPath: mountPath}},
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: boolPtr(false),
+					RunAsUser:                int64Ptr(0),
+					RunAsGroup:               int64Ptr(0),
+				},
+			}},
+			Volumes: []corev1.Volume{{
+				Name: "pool",
+				VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+					Path: poolRoot,
+					Type: &hostPathType,
+				}},
+			}},
+		},
+	}
 }
 
 func (r *Runner) poolRoot(ctx context.Context, nodeName string) (string, error) {

@@ -21,7 +21,14 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 	unlock := r.PoolLocks.Lock(observed.DestinationNode)
 	defer unlock()
 
-	requested, logicalReserved, physicalPending, limit, err := r.destinationCapacity(ctx, *move, observed.DestinationNode)
+	pool, err := r.poolForNode(ctx, observed.DestinationNode, move.Spec.VolumeID)
+	if err != nil {
+		return err
+	}
+	if pool.UID == "" {
+		return fmt.Errorf("destination Pool identity is missing")
+	}
+	requested, logicalReserved, physicalPending, limit, err := r.destinationCapacityForPool(ctx, *move, pool)
 	if err != nil {
 		return err
 	}
@@ -39,6 +46,7 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 
 	previous := move.Status
 	move.Status.DestinationNode = observed.DestinationNode
+	move.Status.DestinationPoolUID = ""
 	move.Status.SourceBytes = sourceBytes
 	move.Status.CapacityApproved = false
 	move.Status.CapacityReason = ""
@@ -48,15 +56,21 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 		move.Status.CapacityReason = "DestinationFilesystemSpace"
 	} else {
 		move.Status.CapacityApproved = true
+		move.Status.DestinationPoolUID = pool.UID
 	}
 	return r.persistMoveStatus(ctx, move, previous)
 }
 
 func (r *Reconciler) destinationCapacity(ctx context.Context, current volumeapi.Move, destination string) (requested, logicalReserved, physicalPending, limit int64, err error) {
-	pool, err := r.poolForNode(ctx, destination)
+	pool, err := r.poolForNode(ctx, destination, current.Spec.VolumeID)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
+	return r.destinationCapacityForPool(ctx, current, pool)
+}
+
+func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current volumeapi.Move, pool volumeapi.Pool) (requested, logicalReserved, physicalPending, limit int64, err error) {
+	destination := pool.NodeName
 	quantity, err := resource.ParseQuantity(pool.CapacityLimit)
 	if err != nil {
 		return 0, 0, 0, 0, fmt.Errorf("parse destination Pool capacity limit: %w", err)
@@ -130,13 +144,16 @@ func (r *Reconciler) destinationCapacity(ctx context.Context, current volumeapi.
 	return requested, logicalReserved, physicalPending, limit, nil
 }
 
-func (r *Reconciler) poolForNode(ctx context.Context, nodeName string) (volumeapi.Pool, error) {
+func (r *Reconciler) poolForNode(ctx context.Context, nodeName, volumeID string) (volumeapi.Pool, error) {
 	pools, err := r.Repository.ReadyPools(ctx)
 	if err != nil {
 		return volumeapi.Pool{}, err
 	}
 	for _, pool := range pools {
 		if pool.NodeName == nodeName {
+			if volumeapi.PoolHasServingVolume(pool, volumeID) {
+				return volumeapi.Pool{}, fmt.Errorf("node %q Pool contains a serving copy for volume %q", nodeName, volumeID)
+			}
 			return pool, nil
 		}
 	}

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-argocd-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 ARGOCD_VERSION=${ARGOCD_VERSION:-v3.5.2}
@@ -9,6 +11,8 @@ ARGOCD_MANIFEST_SHA256=${ARGOCD_MANIFEST_SHA256:-9a87f2b3e14c278f12501eb0ef5c395
 IMAGE_REPOSITORY=${IMAGE_REPOSITORY:-shiftpv-argocd-e2e}
 IMAGE_TAG=${IMAGE_TAG:-dev}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
+NODE="${CLUSTER_NAME}-worker"
+POOL_PATH=/mnt/shiftpv
 
 for command in awk curl docker helm kind kubectl sed; do
 	command -v "${command}" >/dev/null || {
@@ -137,7 +141,33 @@ kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-argocd-e2e --tim
 
 PV_NAME=$(kubectl get pvc shiftpv-argocd-e2e -o jsonpath='{.spec.volumeName}')
 VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
+VOLUME_UID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
+COPY_ID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
+RESERVATION_UID=$(kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
 CHECKSUM_BEFORE=$(kubectl exec shiftpv-argocd-e2e -- sha256sum /data/payload | awk '{print $1}')
+CONTROLLER_SERVICE_ACCOUNT=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o jsonpath='{.spec.template.spec.serviceAccountName}')
+
+# Pool deletion is fenced by a controller-owned finalizer. This Application
+# test keeps the active Pool registered; directory-pool.sh proves terminating
+# Pools remain until exact storage dependencies converge.
+kubectl wait --for=jsonpath='{.metadata.finalizers[0]}'=shiftpv.io/pool-protection \
+	shiftpvpool/worker --timeout=2m
+if kubectl patch shiftpvpool/worker --type=json \
+	-p='[{"op":"remove","path":"/metadata/finalizers/0"}]'; then
+	echo "direct ShiftPVPool finalizer removal bypassed lifecycle admission" >&2
+	exit 1
+fi
+if kubectl delete customresourcedefinition/shiftpvpools.shiftpv.io --wait=false; then
+	echo "direct ShiftPVPool CRD deletion bypassed lifecycle admission" >&2
+	exit 1
+fi
+if kubectl delete "shiftpvvolume/${VOLUME_ID}" --wait=false; then
+	echo "direct ShiftPVVolume deletion bypassed lifecycle admission" >&2
+	exit 1
+fi
+kubectl get shiftpvpool/worker >/dev/null
+kubectl get customresourcedefinition/shiftpvpools.shiftpv.io >/dev/null
+kubectl get "shiftpvvolume/${VOLUME_ID}" >/dev/null
 
 kubectl -n argocd delete application shiftpv --wait=false
 kubectl -n shiftpv-system wait --for=create job/shiftpv-uninstall-guard --timeout=2m
@@ -164,12 +194,43 @@ if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_DENIAL}" ]]; then
 	exit 1
 fi
 
-# Remove all blockers. The running Argo CD guard must observe the safe state and
-# finish the same pending Application deletion without a manual hook restart.
+# Remove the Kubernetes owner records while Retain preserves the exact copy.
+# The reservation and post-quiesce Pool inventory close the discovery window:
+# the guard stays blocked until the orphan cleanup contract is approved and settled.
 kubectl delete pod shiftpv-argocd-e2e --wait=true
 kubectl delete pvc shiftpv-argocd-e2e --wait=true
+kubectl wait --for=jsonpath='{.status.phase}'=Released "pv/${PV_NAME}" --timeout=2m
+kubectl --as="system:serviceaccount:shiftpv-system:${CONTROLLER_SERVICE_ACCOUNT}" \
+	delete "shiftpvvolume/${VOLUME_ID}" --wait=true
 kubectl delete "pv/${PV_NAME}" --wait=true
-kubectl delete "shiftpvvolume/${VOLUME_ID}" --ignore-not-found --wait=true
+
+CLEANUP_NAME=
+for _ in {1..180}; do
+	CLEANUP_NAME=$(kubectl get shiftpvcleanups -o json | jq -r --arg volume "${VOLUME_ID}" \
+		'[.items[] | select(.spec.reason == "OrphanReclaim" and .spec.target.volumeID == $volume) | .metadata.name] | first // ""')
+	[[ -n "${CLEANUP_NAME}" ]] && break
+	sleep 1
+done
+test -n "${CLEANUP_NAME}"
+test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.approved}')" = false
+test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.target.volumeUID}')" = "${VOLUME_UID}"
+test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.target.copyID}')" = "${COPY_ID}"
+test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.reservationUID}')" = "${RESERVATION_UID}"
+test -n "$(kubectl -n argocd get application shiftpv -o jsonpath='{.metadata.deletionTimestamp}')"
+GUARD_LOG=$(kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard)
+grep -Fq VolumeReservation <<<"${GUARD_LOG}"
+grep -Fq ShiftPVPoolInventory <<<"${GUARD_LOG}"
+grep -Fq "${VOLUME_ID}" <<<"${GUARD_LOG}"
+assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
+
+kubectl patch "shiftpvcleanup/${CLEANUP_NAME}" --type merge -p '{"spec":{"approved":true}}'
+kubectl wait --for=jsonpath='{.status.phase}'=Completed "shiftpvcleanup/${CLEANUP_NAME}" --timeout=4m
+test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.receipt.operationID}')" = "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.operationID}')"
+test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.receipt.purged}')" = true
+test -n "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.settledAt}')"
+
+# The same pending Application deletion now completes without restarting its
+# PreDelete hook because the reservation and exact copy obligation are gone.
 kubectl -n argocd wait --for=delete application/shiftpv --timeout=5m
 
 if kubectl get storageclass shiftpv >/dev/null 2>&1; then
@@ -180,7 +241,13 @@ if kubectl get validatingwebhookconfiguration shiftpv-lifecycle >/dev/null 2>&1;
 	echo "Argo CD left lifecycle validation after a completed Application deletion" >&2
 	exit 1
 fi
-test -f "${WORKER_POOL}/volumes/${VOLUME_ID}/payload"
+assert_node_absent "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}"
+assert_node_absent "${NODE}" "${POOL_PATH}/.shiftpv/placements/placement-${COPY_ID}.json"
+assert_node_absent "${NODE}" "${POOL_PATH}/.shiftpv/copy-${COPY_ID}.json"
+if kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null 2>&1; then
+	echo "Argo CD deletion left the settled volume reservation" >&2
+	exit 1
+fi
 
 echo "ShiftPV Argo CD uninstall guard E2E passed"
-echo "ArgoCD=${ARGOCD_VERSION} PV=${PV_NAME} volume=${VOLUME_ID} checksum=${CHECKSUM_AFTER_DENIAL}"
+echo "ArgoCD=${ARGOCD_VERSION} PV=${PV_NAME} volume=${VOLUME_ID} cleanup=${CLEANUP_NAME} checksum=${CHECKSUM_AFTER_DENIAL}; exact copy and reservation settled before deletion"

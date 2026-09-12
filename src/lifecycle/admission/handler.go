@@ -23,8 +23,9 @@ type Permit interface {
 }
 
 type Handler struct {
-	Checker Checker
-	Permit  Permit
+	Checker           Checker
+	Permit            Permit
+	TrustedController string
 }
 
 func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -48,7 +49,20 @@ func (h *Handler) Admit(ctx context.Context, request *admissionv1.AdmissionReque
 	if request == nil {
 		return denied("AdmissionReview has no request", "")
 	}
+	if isPoolUpdate(request) {
+		protectedMetadataChanged, err := poolProtectedMetadataChanged(request)
+		if err != nil {
+			return denied(fmt.Sprintf("ShiftPV Pool update denied: %v", err), request.UID)
+		}
+		if !protectedMetadataChanged || (h.TrustedController != "" && request.UserInfo.Username == h.TrustedController) {
+			return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
+		}
+		return denied("ShiftPV Pool update denied: only the trusted controller may change lifecycle protection", request.UID)
+	}
 	if request.Operation != admissionv1.Delete {
+		return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
+	}
+	if trustedRuntimeDelete(request, h.TrustedController) {
 		return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
 	}
 	if h.Checker == nil || h.Permit == nil {
@@ -61,6 +75,16 @@ func (h *Handler) Admit(ctx context.Context, request *admissionv1.AdmissionReque
 	if granted {
 		return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
 	}
+	if isPoolDelete(request) {
+		protected, err := poolDeletionProtected(request)
+		if err != nil {
+			return denied(fmt.Sprintf("ShiftPV Pool deletion denied: %v", err), request.UID)
+		}
+		if protected {
+			return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
+		}
+		return denied("ShiftPV Pool deletion denied: wait for the controller to install deletion protection", request.UID)
+	}
 	report, err := h.Checker.Check(ctx)
 	if err != nil {
 		return denied(fmt.Sprintf("ShiftPV resource deletion denied: inspect dependencies: %v", err), request.UID)
@@ -69,6 +93,10 @@ func (h *Handler) Admit(ctx context.Context, request *admissionv1.AdmissionReque
 		return denied("ShiftPV resource deletion denied: use the Helm or Argo CD uninstall guard to begin a quiesced teardown", request.UID)
 	}
 
+	return denied("ShiftPV resource deletion denied: dependent storage exists: "+blockerNames(report), request.UID)
+}
+
+func blockerNames(report uninstallcheck.Report) string {
 	blockers := make([]string, 0, len(report.Blockers))
 	for _, blocker := range report.Blockers {
 		name := blocker.Name
@@ -77,7 +105,98 @@ func (h *Handler) Admit(ctx context.Context, request *admissionv1.AdmissionReque
 		}
 		blockers = append(blockers, fmt.Sprintf("%s %s", blocker.Kind, name))
 	}
-	return denied("ShiftPV resource deletion denied: dependent storage exists: "+strings.Join(blockers, ", "), request.UID)
+	return strings.Join(blockers, ", ")
+}
+
+func isPoolDelete(request *admissionv1.AdmissionRequest) bool {
+	return request.Operation == admissionv1.Delete && isPoolResource(request)
+}
+
+func isPoolUpdate(request *admissionv1.AdmissionRequest) bool {
+	return request.Operation == admissionv1.Update && isPoolResource(request)
+}
+
+func isPoolResource(request *admissionv1.AdmissionRequest) bool {
+	return request.Resource.Group == "shiftpv.io" && request.Resource.Resource == "shiftpvpools"
+}
+
+func poolDeletionProtected(request *admissionv1.AdmissionRequest) (bool, error) {
+	if request.Name == "" {
+		return false, fmt.Errorf("Pool name is missing")
+	}
+	var metadataOnly struct {
+		Metadata struct {
+			Finalizers []string `json:"finalizers"`
+		} `json:"metadata"`
+	}
+	if len(request.OldObject.Raw) == 0 {
+		return false, fmt.Errorf("Pool identity is missing")
+	}
+	if err := json.Unmarshal(request.OldObject.Raw, &metadataOnly); err != nil {
+		return false, fmt.Errorf("read Pool identity: %w", err)
+	}
+	for _, finalizer := range metadataOnly.Metadata.Finalizers {
+		if finalizer == uninstallcheck.PoolProtectionFinalizer {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func poolProtectedMetadataChanged(request *admissionv1.AdmissionRequest) (bool, error) {
+	oldMetadata, err := objectMetadata(request.OldObject.Raw)
+	if err != nil {
+		return false, fmt.Errorf("read previous Pool lifecycle metadata: %w", err)
+	}
+	newMetadata, err := objectMetadata(request.Object.Raw)
+	if err != nil {
+		return false, fmt.Errorf("read updated Pool lifecycle metadata: %w", err)
+	}
+	finalizerRemoved := contains(oldMetadata.Finalizers, uninstallcheck.PoolProtectionFinalizer) && !contains(newMetadata.Finalizers, uninstallcheck.PoolProtectionFinalizer)
+	approvalChanged := oldMetadata.Annotations[uninstallcheck.PoolIdentityReleaseAnnotation] != newMetadata.Annotations[uninstallcheck.PoolIdentityReleaseAnnotation]
+	return finalizerRemoved || approvalChanged, nil
+}
+
+type poolMetadata struct {
+	Finalizers  []string
+	Annotations map[string]string
+}
+
+func objectMetadata(raw []byte) (poolMetadata, error) {
+	if len(raw) == 0 {
+		return poolMetadata{}, fmt.Errorf("Pool object is missing")
+	}
+	var metadataOnly struct {
+		Metadata struct {
+			Finalizers  []string          `json:"finalizers"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(raw, &metadataOnly); err != nil {
+		return poolMetadata{}, err
+	}
+	return poolMetadata{Finalizers: metadataOnly.Metadata.Finalizers, Annotations: metadataOnly.Metadata.Annotations}, nil
+}
+
+func contains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func trustedRuntimeDelete(request *admissionv1.AdmissionRequest, trustedUsername string) bool {
+	if trustedUsername == "" || request.UserInfo.Username != trustedUsername || request.Resource.Group != "shiftpv.io" {
+		return false
+	}
+	switch request.Resource.Resource {
+	case "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups":
+		return true
+	default:
+		return false
+	}
 }
 
 func denied(message string, uid types.UID) *admissionv1.AdmissionResponse {

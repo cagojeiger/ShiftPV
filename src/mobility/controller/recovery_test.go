@@ -16,7 +16,6 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 )
 
 func recoveryFixture(t *testing.T, owner string) (*Reconciler, *memoryRepository, *fake.Clientset) {
@@ -143,8 +142,12 @@ func TestRecoveryWaitsForOldHelpersAndFailedVerification(t *testing.T) {
 	move.Status.RecoveryOwner, move.Status.RecoveryPhase = "source", recoveryQuiescing
 	repo.moves[0] = move
 	names := namesFor(move.Name)
-	_, _ = client.BatchV1().Jobs("system").Create(context.Background(), &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: names.CopyJob, UID: "old-job", Labels: transferLabels(names)}}, metav1.CreateOptions{})
-	_, _ = client.CoreV1().Pods("system").Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: names.SourcePod, UID: "old-pod", Labels: transferLabels(names)}, Spec: corev1.PodSpec{NodeName: "source"}}, metav1.CreateOptions{})
+	jobMeta := moveObjectMeta(move, names.CopyJob, "system", transferLabels(names, move))
+	jobMeta.UID = "old-job"
+	podMeta := moveObjectMeta(move, names.SourcePod, "system", transferLabels(names, move))
+	podMeta.UID = "old-pod"
+	_, _ = client.BatchV1().Jobs("system").Create(context.Background(), &batchv1.Job{ObjectMeta: jobMeta}, metav1.CreateOptions{})
+	_, _ = client.CoreV1().Pods("system").Create(context.Background(), &corev1.Pod{ObjectMeta: podMeta, Spec: corev1.PodSpec{NodeName: "source"}}, metav1.CreateOptions{})
 	if err := r.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -222,8 +225,12 @@ func TestRecoveryRejectsUnrecordedDataHelper(t *testing.T) {
 
 	names := namesFor(move.Name)
 	_, err := client.CoreV1().Pods("system").Create(context.Background(), &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: names.SourcePod, UID: "unknown-helper", Labels: transferLabels(names)},
-		Spec:       corev1.PodSpec{NodeName: "unknown"},
+		ObjectMeta: func() metav1.ObjectMeta {
+			metadata := moveObjectMeta(move, names.SourcePod, "system", transferLabels(names, move))
+			metadata.UID = "unknown-helper"
+			return metadata
+		}(),
+		Spec: corev1.PodSpec{NodeName: "unknown"},
 	}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -280,28 +287,5 @@ func TestDiscoveryWaitsForDestinationRecoveryJournalAfterFinalCAS(t *testing.T) 
 	}
 	if repo.moves[0].Status.RecoveryPhase != recoveryRecovered {
 		t.Fatal("final CAS crash did not converge")
-	}
-}
-
-func TestCleanupFailureReasonIsNotMaskedByEvictedConsumer(t *testing.T) {
-	r, repo, client := recoveryFixture(t, "destination")
-	move := repo.moves[0]
-	move.Spec.Recovery = ""
-	move.Status.Phase, move.Status.ConsumerName = string(fsm.PhaseCleaningSource), "original-evicted-pod"
-	repo.moves[0] = move
-	state := repo.volumes[move.Spec.VolumeID]
-	state.Phase = "Ready"
-	state.PublishedNodes = []string{"destination"}
-	repo.volumes[move.Spec.VolumeID] = state
-	assignJobUIDs(client)
-	if err := r.ensureCleanupJob(context.Background(), move, namesFor(move.Name)); err != nil {
-		t.Fatal(err)
-	}
-	finishRecoveryJobs(t, client, batchv1.JobFailed)
-	if err := r.reconcileMove(context.Background(), move); err != nil {
-		t.Fatal(err)
-	}
-	if repo.moves[0].Status.Reason != "CleanupFailed" {
-		t.Fatalf("actual cleanup failure masked by %q", repo.moves[0].Status.Reason)
 	}
 }

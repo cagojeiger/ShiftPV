@@ -13,6 +13,7 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 type progressSnapshot struct {
@@ -26,11 +27,17 @@ type progressSnapshot struct {
 	ReplacementName      string
 	ReplacementUID       string
 	DestinationNode      string
+	DestinationPoolUID   string
 	EvictionRequested    bool
 	CopyJobName          string
 	PromotionJobName     string
 	CleanupJobName       string
 	RecoveryOwner        string
+	CopyOperationID      string
+	PromotionOperationID string
+	SourceCopyID         string
+	IncomingCopyID       string
+	DestinationCopyID    string
 }
 
 func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move, previous volumeapi.MoveStatus) error {
@@ -44,7 +51,7 @@ func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move
 	if move.Status.LastProgressTime == "" || progressOf(previous) != progressOf(move.Status) {
 		move.Status.LastProgressTime = now
 	}
-	if err := r.Repository.SetMoveStatus(ctx, move.Name, move.Status); err != nil {
+	if err := r.Repository.SetMoveStatus(ctx, move.Name, move.UID, move.Status); err != nil {
 		return err
 	}
 	r.emitMoveEvent(*move, previous)
@@ -69,14 +76,23 @@ func (r *Reconciler) now() time.Time {
 }
 
 func progressOf(status volumeapi.MoveStatus) progressSnapshot {
+	copyID := func(identity *volume.CopyIdentity) string {
+		if identity == nil {
+			return ""
+		}
+		return identity.CopyID
+	}
 	return progressSnapshot{
 		Phase: status.Phase, RecoveryPhase: status.RecoveryPhase,
 		PersistentVolumeName: status.PersistentVolumeName, ClaimNamespace: status.ClaimNamespace,
 		ClaimName: status.ClaimName, ConsumerName: status.ConsumerName, ConsumerUID: status.ConsumerUID,
 		ReplacementName: status.ReplacementName, ReplacementUID: status.ReplacementUID, DestinationNode: status.DestinationNode,
-		EvictionRequested: status.EvictionRequested, CopyJobName: status.CopyJobName,
+		DestinationPoolUID: status.DestinationPoolUID,
+		EvictionRequested:  status.EvictionRequested, CopyJobName: status.CopyJobName,
 		PromotionJobName: status.PromotionJobName, CleanupJobName: status.CleanupJobName,
-		RecoveryOwner: status.RecoveryOwner,
+		RecoveryOwner:   status.RecoveryOwner,
+		CopyOperationID: status.CopyOperationID, PromotionOperationID: status.PromotionOperationID,
+		SourceCopyID: copyID(status.SourceCopy), IncomingCopyID: copyID(status.IncomingCopy), DestinationCopyID: copyID(status.DestinationCopy),
 	}
 }
 

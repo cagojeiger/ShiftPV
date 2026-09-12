@@ -16,8 +16,8 @@ import (
 func (r *Reconciler) quiesceMove(ctx context.Context, move volumeapi.Move) (bool, error) {
 	names := namesFor(move.Name)
 	quiet := true
-	for _, name := range []string{names.CopyJob, names.PromotionJob, names.CleanupJob} {
-		gone, err := r.removeJob(ctx, name, names.Base, "")
+	for _, name := range []string{names.CopyJob, names.PromotionJob} {
+		gone, err := r.removeJob(ctx, name, names.Base, move.UID)
 		if err != nil {
 			return false, err
 		}
@@ -31,6 +31,9 @@ func (r *Reconciler) quiesceMove(ctx context.Context, move volumeapi.Move) (bool
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		if !moveOwned(pod.OwnerReferences, move.UID) || pod.Labels["shiftpv.io/move-uid"] != move.UID {
+			return false, fmt.Errorf("helper Pod %q is not owned by ShiftPVMove UID %q", pod.Name, move.UID)
+		}
 		placement := pod.Name == names.PlacementPod && pod.Labels["shiftpv.io/role"] == placementRole
 		if placement {
 			if err := validatePlacementIdentity(pod, move, names); err != nil {
@@ -56,7 +59,7 @@ func (r *Reconciler) quiesceMove(ctx context.Context, move volumeapi.Move) (bool
 	if !quiet {
 		return false, nil
 	}
-	if err := r.deleteTransferResources(ctx, names); err != nil {
+	if err := r.deleteTransferResources(ctx, move, names); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -67,40 +70,41 @@ func recoveryNames(move volumeapi.Move) resourceNames {
 }
 
 func (r *Reconciler) recoveryJob(ctx context.Context, move volumeapi.Move, verify bool) (bool, error) {
+	if !verify {
+		// Non-owner copies are classified and reclaimed by the bounded cleanup
+		// inventory. Recovery only proves the copy that will resume ownership.
+		return true, nil
+	}
 	names := recoveryNames(move)
 	node := move.Status.RecoveryOwner
-	name, script := names.Base+"-verify", recoveryVerifyScript
-	if !verify {
-		node = move.Status.DestinationNode
-		if move.Status.RecoveryOwner != move.Spec.SourceNode {
-			node = move.Spec.SourceNode
-		}
-		if node == "" {
-			return true, nil
-		}
-		if node == move.Status.RecoveryOwner {
-			return false, fmt.Errorf("refusing to retire current owner")
-		}
-		name, script = names.Base+"-retire", recoveryRetireScript
-	}
+	name := names.Base + "-verify"
 	job, err := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		job, err = r.operationJob(ctx, name, node, names, script, []corev1.EnvVar{
-			{Name: "MOVE_NAME", Value: move.Name}, {Name: "VOLUME_ID", Value: move.Spec.VolumeID},
-			{Name: "COMMITTED", Value: fmt.Sprint(move.Status.RecoveryOwner != move.Spec.SourceNode)},
-		}, nil, nil)
+		job, err = r.operationJob(ctx, name, node, names, nil, nil, nil)
 		if err != nil {
 			return false, err
 		}
+		if state, stateErr := r.Repository.Get(ctx, move.Spec.VolumeID); stateErr != nil {
+			return false, stateErr
+		} else if state.CurrentCopy == nil || state.CurrentCopy.NodeName != node || state.CurrentCopy.Role != "Serving" {
+			return false, fmt.Errorf("recovery owner copy identity is missing")
+		}
+		job.Spec.Template.Spec.Containers[0].Command = []string{"/shiftpv-volume-helper"}
+		job.Spec.Template.Spec.Containers[0].Args = []string{
+			"verify-owner", "--move-name=" + move.Name, "--move-uid=" + move.UID,
+			"--operation-id=verify-" + move.UID, "--namespace=" + r.Namespace,
+		}
+		job.Spec.Template.Spec.Containers[0].Env = podNameEnvironment()
 		// Preserve completion evidence across long controller outages. Only the
 		// recovery controller removes these Jobs after durable phase advancement.
 		job.Spec.TTLSecondsAfterFinished = nil
 		zeroRetries := int32(0)
 		job.Spec.BackoffLimit = &zeroRetries
-		job.OwnerReferences = []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: move.Name, UID: types.UID(move.UID)}}
-		if verify {
-			job.Spec.Template.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
-		}
+		controller := true
+		job.OwnerReferences = []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: move.Name, UID: types.UID(move.UID), Controller: &controller}}
+		job.Labels["shiftpv.io/move-uid"] = move.UID
+		job.Spec.Template.Labels["shiftpv.io/move-uid"] = move.UID
+		job.Spec.Template.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
 		_, err = r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
 			err = nil
@@ -112,6 +116,24 @@ func (r *Reconciler) recoveryJob(ctx context.Context, move volumeapi.Move, verif
 	}
 	if job.Labels["shiftpv.io/move"] != names.Base || !recoveryOwned(job, move.UID) || job.Spec.Template.Spec.NodeName != node || job.DeletionTimestamp != nil {
 		return false, fmt.Errorf("recovery Job %q identity or node mismatch", name)
+	}
+	expected, buildErr := r.operationJob(ctx, name, node, names, nil, nil, nil)
+	if buildErr != nil {
+		return false, buildErr
+	}
+	controller := true
+	expected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: move.Name, UID: types.UID(move.UID), Controller: &controller}}
+	expected.Labels["shiftpv.io/move-uid"] = move.UID
+	expected.Spec.Template.Labels["shiftpv.io/move-uid"] = move.UID
+	expected.Spec.Template.Spec.Containers[0].Command = []string{"/shiftpv-volume-helper"}
+	expected.Spec.Template.Spec.Containers[0].Args = []string{"verify-owner", "--move-name=" + move.Name, "--move-uid=" + move.UID, "--operation-id=verify-" + move.UID, "--namespace=" + r.Namespace}
+	expected.Spec.Template.Spec.Containers[0].Env = podNameEnvironment()
+	expected.Spec.TTLSecondsAfterFinished = nil
+	zeroRetries := int32(0)
+	expected.Spec.BackoffLimit = &zeroRetries
+	expected.Spec.Template.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
+	if !sameOperationJob(job, expected) {
+		return false, fmt.Errorf("recovery Job %q execution identity changed", name)
 	}
 	for _, condition := range job.Status.Conditions {
 		if condition.Status != corev1.ConditionTrue {
@@ -167,57 +189,17 @@ func (r *Reconciler) removeJob(ctx context.Context, name, label, moveUID string)
 }
 
 func recoveryOwned(job *batchv1.Job, uid string) bool {
-	for _, ref := range job.OwnerReferences {
-		if ref.Kind == "ShiftPVMove" && ref.APIVersion == "shiftpv.io/v1alpha1" && string(ref.UID) == uid && uid != "" {
+	return moveOwned(job.OwnerReferences, uid)
+}
+
+func moveOwned(references []metav1.OwnerReference, uid string) bool {
+	if uid == "" {
+		return false
+	}
+	for _, ref := range references {
+		if ref.Kind == "ShiftPVMove" && ref.APIVersion == "shiftpv.io/v1alpha1" && string(ref.UID) == uid {
 			return true
 		}
 	}
 	return false
 }
-
-const recoveryVerifyScript = `set -eu
-test ! -L /pool/volumes
-final="/pool/volumes/${VOLUME_ID}"
-test ! -L "${final}"
-test -d "${final}"
-test -r "${final}"
-if test "${COMMITTED}" = true; then
-  test ! -L "${final}/.shiftpv-move-id"
-  test "$(cat "${final}/.shiftpv-move-id")" = "${MOVE_NAME}"
-fi
-`
-
-// Rename, never delete or overwrite. A completed rename is an idempotent retry;
-// finding both the original and quarantine paths is ambiguous and must fail.
-const recoveryRetireScript = `set -eu
-for path in /pool/volumes /pool/.shiftpv /pool/.shiftpv/incoming /pool/.shiftpv/aborted /pool/.shiftpv/retired; do
-  test ! -L "${path}"
-done
-mkdir -p /pool/.shiftpv/aborted
-retire() {
-  source=$1
-  target=$2
-  test ! -L "${source}"
-  test ! -L "${target}"
-  if test -e "${source}"; then
-    test -d "${source}"
-    test ! -e "${target}"
-    test "$(stat -c %d "${source}")" = "$(stat -c %d /pool/.shiftpv/aborted)"
-    mv -T "${source}" "${target}"
-  elif test -e "${target}"; then
-    test -d "${target}"
-  fi
-}
-final="/pool/volumes/${VOLUME_ID}"
-test ! -L "${final}"
-test ! -L "/pool/.shiftpv/retired/${MOVE_NAME}"
-if test -e "/pool/.shiftpv/retired/${MOVE_NAME}"; then
-  test -d "/pool/.shiftpv/retired/${MOVE_NAME}"
-fi
-if test -e "${final}" && test "${COMMITTED}" = false; then
-  test ! -L "${final}/.shiftpv-move-id"
-  test "$(cat "${final}/.shiftpv-move-id")" = "${MOVE_NAME}"
-fi
-retire "${final}" "/pool/.shiftpv/aborted/${MOVE_NAME}-final"
-retire "/pool/.shiftpv/incoming/${MOVE_NAME}" "/pool/.shiftpv/aborted/${MOVE_NAME}-incoming"
-`

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${TEST_DIR}/node-path.sh"
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORKER_B_POOL:?WORKER_B_POOL is required}"
 
@@ -94,9 +96,10 @@ wait_for_not_ready_event() {
 }
 
 # Overlay the fault worker pool with a byte-sufficient tmpfs and exhaust only
-# its inodes. Pool byte admission passes, then mkdir must still hit ENOSPC.
+# its inodes. The write probe must reject the Pool even though byte statfs alone
+# would pass; the statfs-to-I/O race is covered separately by controller tests.
 docker exec "${FAULT_NODE}" mount \
-	-t tmpfs -o size=128m,nr_inodes=8 shiftpv-enospc "${FAULT_POOL_PATH}"
+	-t tmpfs -o size=128m,nr_inodes=64 shiftpv-enospc "${FAULT_POOL_PATH}"
 MOUNT_STATE=enospc
 docker exec "${FAULT_NODE}" sh -ec '
   mkdir -p /srv/shiftpv-b/volumes
@@ -185,7 +188,7 @@ kubectl -n shiftpv-system wait --for=delete "configmap/${VOLUME_ID}" --timeout=2
 docker exec "${FAULT_NODE}" test ! -e "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}"
 docker exec "${FAULT_NODE}" umount "${FAULT_POOL_PATH}"
 MOUNT_STATE=normal
-test ! -e "${WORKER_B_POOL}/volumes/${VOLUME_ID}"
+assert_node_absent "${FAULT_NODE}" "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}"
 kubectl delete storageclass shiftpv-filesystem-fault --wait=true
 
 echo "ShiftPV filesystem fault recovery passed: volume=${VOLUME_ID} node=${FAULT_NODE}"

@@ -25,14 +25,16 @@ PDB 제거 후에는 같은 volume의 자동 이동 성공과 checksum 유지까
 ## Pre-commit failure and owner recovery
 
 1. portable Deployment/PVC를 만든다.
-2. source를 cordon하고 Move가 생성되면 해당 transaction의 destination staging 위치에
-   테스트 파일을 만들어 mkdir를 실제 실패시킨다. CR status는 주입하지 않는다.
-3. 정상 eviction/unpublish 후 copy가 실패하고 `Blocked/CopyFailed`로 끝나는지 확인한다.
-4. dynamic owner와 source payload가 유지되고 destination final directory가 생기지 않았는지
+2. destination staging 위치에 미등록 파일을 만든 뒤 source를 cordon한다.
+   Pool은 fail-closed가 되고 Move, volume lock, helper Job이 시작되지 않아야 한다.
+3. 미등록 파일을 제거하면 자동 재개되는지 확인한다. 이어서 테스트 전용 helper image가
+   production helper 호출 직전에 실패하도록 해 실제 Job 실패를 만든다. CR status는 주입하지 않는다.
+4. 정상 eviction/unpublish 후 copy Job이 실패하고 `Blocked/CopyFailed`로 끝나는지 확인한다.
+5. dynamic owner와 source payload가 유지되고 destination final directory가 생기지 않았는지
    확인한다.
-5. fault 파일 제거와 uncordon 후 `spec.recovery=ResumeOwner`를 두 번 요청한다. 잘못된 enum과 요청 제거는
+6. fault sentinel 제거와 uncordon 후 `spec.recovery=ResumeOwner`를 두 번 요청한다. 잘못된 enum과 요청 제거는
    실제 CRD에서 거부해야 한다.
-6. 복구 Verifying 중 Controller를 재시작하고 Recovered, 같은 owner/PVC UID/checksum과
+7. 복구 Verifying 중 Controller를 재시작하고 Recovered, 같은 owner/PVC UID/checksum과
    activeMove 해제를 확인한다. 원래 Move.phase=Blocked 이력은 유지해야 한다.
 
 ## Successful transaction and restart recovery
@@ -46,15 +48,16 @@ PDB 제거 후에는 같은 volume의 자동 이동 성공과 checksum 유지까
    `Succeeded`까지 이어 가는지 확인한다.
 6. replacement Pod가 destination에서 Running인지, PVC UID/PV/volume handle/checksum이
    같은지, dynamic owner가 destination인지 확인한다.
-7. destination final payload가 있고 source final과 임시 retired 경로가 모두 없는지 확인한다.
+7. destination final payload가 있고 source final과 source `copyID`의 retired 경로가 모두 없는지 확인한다.
 
 ## Post-commit failure and owner recovery
 
-다시 반대 방향으로 이동시킨다. 테스트 전용 source pool의 `.shiftpv/retired/<move>`에 충돌 파일을
-만들어 cleanup 격리를 실제 실패시킨다. commit 이후 destination에서 새로운 payload를
-기록하고 복구를 요청한다. 복구 중 Controller 재시작 후에도 최신 destination 데이터,
-PVC/PV identity와 owner가 유지돼야 한다. 오래된 source는 aborted 경로에 보존 격리하며
-source owner로 rollback하면 실패다. 자세한 실행 절차는 `recovery.sh`를 따른다.
+다시 반대 방향으로 이동시킨다. 테스트 전용 helper가 production helper 호출 직전에 종료하도록 해
+Pool inventory를 오염시키지 않고 exact cleanup Job을 실제 실패시킨다. commit 이후 새 owner에 payload를 기록하고
+복구를 요청한다. 복구 중 Controller 재시작 후에도 최신 owner 데이터, PVC/PV identity와 owner가
+유지돼야 한다. 미완료 cleanup의 non-owner copy는 원래 경로에 보존되고 `ShiftPVCleanup`은
+`NeedsReview`로 수렴한다. Controller를 다시 재시작해도 effect Job을 재생하지 않으며 uninstall
+admission은 이 의무를 blocker로 보고한다. 자세한 실행 절차는 `recovery.sh`를 따른다.
 
 합격 시 다음 두 메시지를 출력한다.
 

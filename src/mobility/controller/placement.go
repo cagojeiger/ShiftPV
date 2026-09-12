@@ -61,7 +61,7 @@ func (r *Reconciler) placementPod(move volumeapi.Move, replacement *corev1.Pod, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      names.PlacementPod,
 			Namespace: r.Namespace,
-			Labels:    placementLabels(names),
+			Labels:    placementLabels(names, move),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: move.Name,
 				UID: types.UID(move.UID), Controller: &controller, BlockOwnerDeletion: &blockOwnerDeletion,
@@ -222,8 +222,8 @@ func validatePlacementIdentity(pod *corev1.Pod, move volumeapi.Move, names resou
 	return fmt.Errorf("placement reservation Pod %q is not owned by move %q", pod.Name, move.Name)
 }
 
-func placementLabels(names resourceNames) map[string]string {
-	labels := transferLabels(names)
+func placementLabels(names resourceNames, moves ...volumeapi.Move) map[string]string {
+	labels := transferLabels(names, moves...)
 	labels["shiftpv.io/role"] = placementRole
 	return labels
 }

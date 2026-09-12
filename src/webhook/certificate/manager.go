@@ -34,17 +34,19 @@ const (
 	tlsCertificateKey = corev1.TLSCertKey
 	tlsPrivateKeyKey  = corev1.TLSPrivateKeyKey
 
-	nameLabel             = "app.kubernetes.io/name"
-	managedByLabel        = "app.kubernetes.io/managed-by"
-	componentLabel        = "app.kubernetes.io/component"
-	nameValue             = "shiftpv"
-	managedByValue        = "shiftpv-controller"
-	secretComponent       = "webhook-certificate"
-	webhookComponent      = "mobility-admission"
-	validationComponent   = "lifecycle-admission"
-	webhookName           = "mobility.shiftpv.io"
-	validationWebhookName = "lifecycle.shiftpv.io"
-	protectedLabel        = "shiftpv.io/uninstall-protected"
+	nameLabel                = "app.kubernetes.io/name"
+	managedByLabel           = "app.kubernetes.io/managed-by"
+	componentLabel           = "app.kubernetes.io/component"
+	nameValue                = "shiftpv"
+	managedByValue           = "shiftpv-controller"
+	secretComponent          = "webhook-certificate"
+	webhookComponent         = "mobility-admission"
+	validationComponent      = "lifecycle-admission"
+	webhookName              = "mobility.shiftpv.io"
+	validationWebhookName    = "lifecycle.shiftpv.io"
+	validationCRWebhookName  = "lifecycle-crs.shiftpv.io"
+	validationCRDWebhookName = "lifecycle-crds.shiftpv.io"
+	protectedLabel           = "shiftpv.io/uninstall-protected"
 )
 
 type Config struct {
@@ -372,25 +374,81 @@ func (m *Manager) ensureValidationWebhook(ctx context.Context, owner *storagev1.
 			},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: "storage.k8s.io/v1", Kind: "CSIDriver", Name: owner.Name, UID: owner.UID}},
 		},
-		Webhooks: []admissionv1.ValidatingWebhook{{
-			Name:                    validationWebhookName,
-			AdmissionReviewVersions: []string{"v1"},
-			SideEffects:             &sideEffects,
-			FailurePolicy:           &failurePolicy,
-			MatchPolicy:             &matchPolicy,
-			TimeoutSeconds:          &timeout,
-			ClientConfig: admissionv1.WebhookClientConfig{
-				Service:  &admissionv1.ServiceReference{Namespace: m.Config.Namespace, Name: m.Config.ServiceName, Path: &path, Port: &port},
-				CABundle: append([]byte(nil), caBundle...),
+		Webhooks: []admissionv1.ValidatingWebhook{
+			{
+				Name:                    validationWebhookName,
+				AdmissionReviewVersions: []string{"v1"},
+				SideEffects:             &sideEffects,
+				FailurePolicy:           &failurePolicy,
+				MatchPolicy:             &matchPolicy,
+				TimeoutSeconds:          &timeout,
+				ClientConfig: admissionv1.WebhookClientConfig{
+					Service:  &admissionv1.ServiceReference{Namespace: m.Config.Namespace, Name: m.Config.ServiceName, Path: &path, Port: &port},
+					CABundle: append([]byte(nil), caBundle...),
+				},
+				Rules: []admissionv1.RuleWithOperations{
+					{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"services", "serviceaccounts"}}},
+					{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{"apps"}, APIVersions: []string{"v1"}, Resources: []string{"deployments", "daemonsets"}}},
+					{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{"rbac.authorization.k8s.io"}, APIVersions: []string{"v1"}, Resources: []string{"roles", "rolebindings", "clusterroles", "clusterrolebindings"}}},
+					{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{"storage.k8s.io"}, APIVersions: []string{"v1"}, Resources: []string{"storageclasses", "csidrivers"}}},
+				},
+				ObjectSelector: &metav1.LabelSelector{MatchLabels: map[string]string{protectedLabel: "true"}},
 			},
-			Rules: []admissionv1.RuleWithOperations{
-				{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"services", "serviceaccounts"}}},
-				{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{"apps"}, APIVersions: []string{"v1"}, Resources: []string{"deployments", "daemonsets"}}},
-				{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{"rbac.authorization.k8s.io"}, APIVersions: []string{"v1"}, Resources: []string{"roles", "rolebindings", "clusterroles", "clusterrolebindings"}}},
-				{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{"storage.k8s.io"}, APIVersions: []string{"v1"}, Resources: []string{"storageclasses", "csidrivers"}}},
+			{
+				Name:                    validationCRWebhookName,
+				AdmissionReviewVersions: []string{"v1"},
+				SideEffects:             &sideEffects,
+				FailurePolicy:           &failurePolicy,
+				MatchPolicy:             &matchPolicy,
+				TimeoutSeconds:          &timeout,
+				ClientConfig: admissionv1.WebhookClientConfig{
+					Service:  &admissionv1.ServiceReference{Namespace: m.Config.Namespace, Name: m.Config.ServiceName, Path: &path, Port: &port},
+					CABundle: append([]byte(nil), caBundle...),
+				},
+				Rules: []admissionv1.RuleWithOperations{
+					{
+						Operations: []admissionv1.OperationType{admissionv1.Delete},
+						Rule: admissionv1.Rule{
+							APIGroups:   []string{"shiftpv.io"},
+							APIVersions: []string{"v1alpha1"},
+							Resources:   []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups"},
+						},
+					},
+					{
+						Operations: []admissionv1.OperationType{admissionv1.Update},
+						Rule: admissionv1.Rule{
+							APIGroups:   []string{"shiftpv.io"},
+							APIVersions: []string{"v1alpha1"},
+							Resources:   []string{"shiftpvpools"},
+						},
+					},
+				},
 			},
-			ObjectSelector: &metav1.LabelSelector{MatchLabels: map[string]string{protectedLabel: "true"}},
-		}},
+			{
+				Name:                    validationCRDWebhookName,
+				AdmissionReviewVersions: []string{"v1"},
+				SideEffects:             &sideEffects,
+				FailurePolicy:           &failurePolicy,
+				MatchPolicy:             &matchPolicy,
+				TimeoutSeconds:          &timeout,
+				ClientConfig: admissionv1.WebhookClientConfig{
+					Service:  &admissionv1.ServiceReference{Namespace: m.Config.Namespace, Name: m.Config.ServiceName, Path: &path, Port: &port},
+					CABundle: append([]byte(nil), caBundle...),
+				},
+				Rules: []admissionv1.RuleWithOperations{{
+					Operations: []admissionv1.OperationType{admissionv1.Delete},
+					Rule: admissionv1.Rule{
+						APIGroups:   []string{"apiextensions.k8s.io"},
+						APIVersions: []string{"v1"},
+						Resources:   []string{"customresourcedefinitions"},
+					},
+				}},
+				MatchConditions: []admissionv1.MatchCondition{{
+					Name:       "shiftpv-crd",
+					Expression: "request.name in ['shiftpvpools.shiftpv.io', 'shiftpvvolumes.shiftpv.io', 'shiftpvmoves.shiftpv.io', 'shiftpvcleanups.shiftpv.io']",
+				}},
+			},
+		},
 	}
 	webhooks := m.Client.AdmissionregistrationV1().ValidatingWebhookConfigurations()
 	existing, err := webhooks.Get(ctx, desired.Name, metav1.GetOptions{})

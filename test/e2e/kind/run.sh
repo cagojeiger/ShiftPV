@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
@@ -72,13 +74,6 @@ docker build \
   "${ROOT_DIR}"
 kind load docker-image shiftpv:dev --name "${CLUSTER_NAME}"
 
-if [[ "${UPGRADE_ONLY:-0}" == "1" ]]; then
-	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
-		"${ROOT_DIR}/test/e2e/kind/upgrade.sh"
-	echo "ShiftPV focused chart upgrade E2E passed"
-	exit 0
-fi
-
 install_shiftpv() {
 	local default_class=${1:-true}
 	helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
@@ -117,7 +112,18 @@ run_directory_pool() {
 		"${ROOT_DIR}/test/e2e/kind/directory-pool.sh"
 }
 
+run_orphan_cleanup() {
+	CLUSTER_NAME="${CLUSTER_NAME}" WORKER_A_POOL="${WORKER_A_POOL}" \
+		"${ROOT_DIR}/test/e2e/kind/orphan-cleanup.sh"
+}
+
 install_shiftpv true
+
+if [[ "${ORPHAN_CLEANUP_ONLY:-0}" == "1" ]]; then
+	run_orphan_cleanup
+	echo "ShiftPV focused orphan cleanup during Pool deregistration E2E passed"
+	exit 0
+fi
 
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/metrics/prometheus.yaml"
 kubectl -n shiftpv-system rollout status deployment/metrics-test --timeout=3m
@@ -132,6 +138,7 @@ if [[ "${DIRECTORY_POOL_ONLY:-0}" == "1" ]]; then
 fi
 
 run_pool_capacity
+run_orphan_cleanup
 
 if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
 	echo "ShiftPV focused Pool capacity E2E passed"
@@ -290,11 +297,11 @@ kubectl get "pv/${PV_NAME}" >/dev/null
 kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
 
 case "${OWNER_NODE}" in
-  "${CLUSTER_NAME}-worker") DATA_ROOT=${WORKER_A_POOL} ;;
-  "${CLUSTER_NAME}-worker2") DATA_ROOT=${WORKER_B_POOL} ;;
+  "${CLUSTER_NAME}-worker") DATA_MOUNT=/mnt/shiftpv ;;
+  "${CLUSTER_NAME}-worker2") DATA_MOUNT=/srv/shiftpv-b ;;
   *) echo "unexpected owner node: ${OWNER_NODE}" >&2; exit 1 ;;
 esac
-test -f "${DATA_ROOT}/volumes/${VOLUME_ID}/payload"
+assert_node_file "${OWNER_NODE}" "${DATA_MOUNT}/volumes/${VOLUME_ID}/payload"
 
 install_shiftpv true
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"

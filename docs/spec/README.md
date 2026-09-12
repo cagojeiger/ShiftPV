@@ -7,7 +7,7 @@
 | [csi-driver.md](csi-driver.md) | CSI RPC, topology, provision/publish와 mount 동작 |
 | [storage-class.md](storage-class.md) | StorageClass, 기본 클래스 설정과 용량 의미 |
 | [volume-mobility.md](volume-mobility.md) | 정상 cordon cold migration과 안전 경계 |
-| [source-cleanup.md](source-cleanup.md) | 원본 정리 의무·읽기 전용 확인·완료 기록 수명 |
+| [source-cleanup.md](source-cleanup.md) | exact copy cleanup·GC 관찰·receipt 수렴 |
 | [metrics.md](metrics.md) | Pool·이동·CSI 관측 지표와 freshness |
 
 ## Current scope
@@ -21,6 +21,7 @@
 | Mobility | 정상인 cordon owner의 계획된 cold migration |
 | Authority | owner node 하나와 active Move 하나 |
 | Recovery | 재시작 후 reconcile과 명시적 `ResumeOwner` |
+| Cleanup / GC | 승인된 exact copy만 삭제; orphan과 불명확한 상태는 `NeedsReview` 보존 |
 | Replication, HA, unavailable-node failover | 외부 storage architecture |
 | Snapshot과 backup | 외부 data-protection system |
 | RWX, raw block, volume expansion | 현재 제품 범위 밖 |

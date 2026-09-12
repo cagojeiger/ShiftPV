@@ -14,6 +14,8 @@ spec:
     helm:
       releaseName: shiftpv
       valuesObject:
+        runtime:
+          identityContract: true
         controller:
           image:
             repository: __IMAGE_REPOSITORY__
@@ -21,6 +23,11 @@ spec:
             pullPolicy: Never
         mobility:
           enabled: false
+        helperPod:
+          image: __IMAGE_REPOSITORY__:__IMAGE_TAG__
+        poolReadiness:
+          interval: 2s
+          staleAfter: 10s
         lifecycle:
           uninstallMode: argocd
         node:

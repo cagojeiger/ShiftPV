@@ -2,6 +2,11 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+runtime:
+  # Enable only when both controller and node images implement the identity-aware
+  # lifecycle contract. The v0.3.0 chart release enables this with v0.3.0 images.
+  identityContract: false
+
 metrics:
   enabled: false
   port: 8080
@@ -10,6 +15,9 @@ metrics:
     enabled: false
     labels:
       grafana_dashboard: "1"
+  prometheusRule:
+    enabled: false
+    additionalLabels: {}
   serviceMonitor:
     enabled: false
     interval: 30s
@@ -73,6 +81,9 @@ storageClass:
 
 serviceAccount:
   controller:
+    create: true
+    name: ""
+  helper:
     create: true
     name: ""
   node:

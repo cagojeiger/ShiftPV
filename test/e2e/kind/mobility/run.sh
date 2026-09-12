@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-mobility-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
@@ -100,12 +102,19 @@ docker build \
 	-f "${ROOT_DIR}/build/package/Dockerfile" \
 	-t shiftpv:dev \
 	"${ROOT_DIR}"
+docker build \
+	-f "${ROOT_DIR}/test/e2e/kind/mobility/fault-helper.Dockerfile" \
+	-t shiftpv-mobility-fault:dev \
+	"${ROOT_DIR}/test/e2e/kind/mobility"
 kind load docker-image shiftpv:dev --name "${CLUSTER_NAME}"
+kind load docker-image shiftpv-mobility-fault:dev --name "${CLUSTER_NAME}"
 
 helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--namespace shiftpv-system \
 	--create-namespace \
 	--values "${ROOT_DIR}/test/e2e/kind/values.yaml" \
+	--set helperPod.image=shiftpv-mobility-fault:dev \
+	--set mobility.helperImage=shiftpv-mobility-fault:dev \
 	--set mobility.interval=10s \
 	--wait \
 	--timeout 5m
@@ -141,32 +150,51 @@ kubectl -n shiftpv-mobility-blocked rollout status deployment/source-only --time
 kubectl -n shiftpv-mobility-blocked wait --for=jsonpath='{.status.phase}'=Bound pvc/source-only --timeout=2m
 BLOCKED_PV=$(kubectl -n shiftpv-mobility-blocked get pvc source-only -o jsonpath='{.spec.volumeName}')
 BLOCKED_VOLUME=$(kubectl get "pv/${BLOCKED_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
-kubectl uncordon "${CLUSTER_NAME}-worker2"
+COPY_FAULT_NODE="${CLUSTER_NAME}-worker2"
+UNRECORDED_PATH="$(pool_mount_for_node "${COPY_FAULT_NODE}")/.shiftpv/incoming/e2e-unrecorded-path"
+docker exec "${COPY_FAULT_NODE}" mkdir -p -- "$(dirname "${UNRECORDED_PATH}")"
+docker exec "${COPY_FAULT_NODE}" test ! -e "${UNRECORDED_PATH}"
+docker exec "${COPY_FAULT_NODE}" touch -- "${UNRECORDED_PATH}"
+kubectl wait shiftpvpool/worker-b --for=jsonpath='{.status.inventory.valid}'=false --timeout=120s
+COPY_FAULT_SENTINEL="$(pool_mount_for_node "${COPY_FAULT_NODE}")/.shiftpv-e2e-fail-copy"
+docker exec "${COPY_FAULT_NODE}" touch -- "${COPY_FAULT_SENTINEL}"
+
+# Unknown data must fail closed before discovery can lock the volume or start a
+# helper. The sentinel is outside managed directories and remains invisible to
+# Pool inventory while the second half exercises the failed-Job contract.
+kubectl uncordon "${COPY_FAULT_NODE}"
 kubectl cordon "${BLOCKED_SOURCE_NODE}"
-for _ in {1..300}; do
+FAIL_CLOSED_DEADLINE=$((SECONDS + 25))
+while ((SECONDS < FAIL_CLOSED_DEADLINE)); do
+	test -z "$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${BLOCKED_VOLUME}')].metadata.name}" 2>/dev/null || true)"
+	test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.phase}')" = Ready
+	test -z "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.activeMove}')"
+	sleep 2
+done
+echo "ShiftPV unknown destination data fail-closed E2E passed: volume=${BLOCKED_VOLUME}"
+
+docker exec "${COPY_FAULT_NODE}" rm -- "${UNRECORDED_PATH}"
+kubectl wait shiftpvpool/worker-b --for=jsonpath='{.status.inventory.valid}'=true --timeout=120s
+for _ in {1..120}; do
 	BLOCKED_MOVE=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${BLOCKED_VOLUME}')].metadata.name}" 2>/dev/null || true)
-	if [[ -n "${BLOCKED_MOVE}" ]]; then
-		if [[ -z "${COPY_FAULT_PATH:-}" ]]; then
-			COPY_FAULT_NODE="${CLUSTER_NAME}-worker2"
-			COPY_FAULT_PATH="$(pool_mount_for_node "${COPY_FAULT_NODE}")/.shiftpv/incoming/${BLOCKED_MOVE}"
-			docker exec "${COPY_FAULT_NODE}" mkdir -p -- "$(dirname "${COPY_FAULT_PATH}")"
-			docker exec "${COPY_FAULT_NODE}" test ! -e "${COPY_FAULT_PATH}"
-			docker exec "${COPY_FAULT_NODE}" touch -- "${COPY_FAULT_PATH}"
-		fi
-		BLOCKED_PHASE=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-		[[ "${BLOCKED_PHASE}" == "Blocked" ]] && break
-	fi
+	[[ -n "${BLOCKED_MOVE}" ]] && break
 	sleep 1
 done
+test -n "${BLOCKED_MOVE:-}"
+kubectl wait "shiftpvmove/${BLOCKED_MOVE}" --for=jsonpath='{.status.phase}'=Blocked --timeout=300s
+BLOCKED_PHASE=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.phase}')
 test "${BLOCKED_PHASE:-}" = "Blocked"
 test "$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.reason}')" = "CopyFailed"
 assert_move_diagnostics "${BLOCKED_MOVE}" Blocked CopyFailed CopyFailed
+BLOCKED_COPY_JOB=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.copyJobName}')
+test -n "${BLOCKED_COPY_JOB}"
+kubectl -n shiftpv-system logs "job/${BLOCKED_COPY_JOB}" | grep -Fq 'injected copy failure before filesystem mutation'
 test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.phase}')" = "Blocked"
 test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.ownerNode}')" = "${BLOCKED_SOURCE_NODE}"
-test -f "${WORKER_A_POOL}/volumes/${BLOCKED_VOLUME}/payload"
-test ! -e "${WORKER_B_POOL}/volumes/${BLOCKED_VOLUME}"
+assert_node_file "${BLOCKED_SOURCE_NODE}" "/mnt/shiftpv/volumes/${BLOCKED_VOLUME}/payload"
+assert_node_absent "${CLUSTER_NAME}-worker2" "/srv/shiftpv-b/volumes/${BLOCKED_VOLUME}"
 kubectl uncordon "${BLOCKED_SOURCE_NODE}"
-docker exec "${COPY_FAULT_NODE}" rm -- "${COPY_FAULT_PATH}"
+docker exec "${COPY_FAULT_NODE}" rm -- "${COPY_FAULT_SENTINEL}"
 
 echo "ShiftPV blocked mobility E2E passed: volume=${BLOCKED_VOLUME} move=${BLOCKED_MOVE} reason=CopyFailed"
 recover_source_only
@@ -270,16 +298,13 @@ test "$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.spec.volume
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = "Ready"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
-if [[ "${DESTINATION_NODE}" == "${CLUSTER_NAME}-worker" ]]; then
-	DESTINATION_POOL="${WORKER_A_POOL}"
-	SOURCE_POOL="${WORKER_B_POOL}"
-else
-	DESTINATION_POOL="${WORKER_B_POOL}"
-	SOURCE_POOL="${WORKER_A_POOL}"
-fi
-test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
-test ! -e "${SOURCE_POOL}/volumes/${VOLUME_ID}"
-test ! -e "${SOURCE_POOL}/.shiftpv/retired/${MOVE_NAME}"
+DESTINATION_POOL=$(pool_mount_for_node "${DESTINATION_NODE}")
+SOURCE_POOL=$(pool_mount_for_node "${SOURCE_NODE}")
+assert_node_file "${DESTINATION_NODE}" "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
+assert_node_absent "${SOURCE_NODE}" "${SOURCE_POOL}/volumes/${VOLUME_ID}"
+SOURCE_COPY_ID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
+test -n "${SOURCE_COPY_ID}"
+assert_node_absent "${SOURCE_NODE}" "${SOURCE_POOL}/.shiftpv/retired/${SOURCE_COPY_ID}"
 test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
 
 recover_after_commit_failure

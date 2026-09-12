@@ -1,3 +1,6 @@
+{{- if ne (int .Values.controller.replicas) 1 -}}
+{{- fail "controller.replicas must be 1 because lifecycle and capacity admission share a single-writer fence" -}}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,14 +36,17 @@ spec:
       {{- end }}
       containers:
         - name: shiftpv-controller
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: "{{ include "shiftpv.controllerImage" . }}"
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           command: ["/shiftpv-controller"]
           args:
             - --endpoint=unix:///run/csi/csi.sock
             - --namespace=$(POD_NAMESPACE)
-            - --helper-image={{ .Values.helperPod.image }}
+            - --helper-image={{ include "shiftpv.helperPodImage" . }}
             - --helper-timeout={{ .Values.helperPod.timeout }}
+            {{- if .Values.runtime.identityContract }}
+            - --helper-service-account={{ include "shiftpv.helperServiceAccount" . }}
+            {{- end }}
             - --helper-cpu-request={{ .Values.helperPod.resources.requests.cpu }}
             - --helper-memory-request={{ .Values.helperPod.resources.requests.memory }}
             - --helper-cpu-limit={{ .Values.helperPod.resources.limits.cpu }}
@@ -55,12 +61,15 @@ spec:
             - --webhook-tls-secret-name={{ include "shiftpv.webhookSecretName" . }}
             - --webhook-configuration-name={{ include "shiftpv.webhookConfigurationName" . }}
             - --validation-webhook-configuration-name={{ include "shiftpv.validationWebhookConfigurationName" . }}
+            {{- if .Values.runtime.identityContract }}
+            - --controller-service-account={{ include "shiftpv.controllerServiceAccount" . }}
+            {{- end }}
             - --storage-class-name={{ .Values.storageClass.name }}
             - --uninstall-permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}
             {{- if .Values.mobility.enabled }}
             - --mobility-interval={{ .Values.mobility.interval }}
-            - --mobility-helper-image={{ .Values.mobility.helperImage }}
+            - --mobility-helper-image={{ include "shiftpv.mobilityHelperImage" . }}
             {{- end }}
             - --v={{ .Values.controller.logLevel }}
           env:

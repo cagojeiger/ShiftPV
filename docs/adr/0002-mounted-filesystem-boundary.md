@@ -18,7 +18,7 @@ cluster는 별도 mount와 root filesystem 하위 directory를 모두 저장소�
 | Pool 아래 volume directory, reservation, 가용량 판단 | ShiftPV |
 
 Pool directory는 기존 absolute directory이며 `/`보다 좁은 경계를 가진다. `spec.mountPath`는
-호환성을 위해 유지하며 node의 Pool directory를 뜻한다.
+node에서 사용할 Pool directory를 지정한다.
 
 ## Alternatives considered
 

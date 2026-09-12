@@ -44,8 +44,8 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 			repository := &memoryRepository{
 				volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name}},
 				pools: []volumeapi.Pool{
-					{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "128Mi"},
-					{Name: "destination", NodeName: "destination", MountPath: "/destination", CapacityLimit: test.limit},
+					{Name: "source", UID: "source-pool-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "128Mi"},
+					{Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: test.limit},
 				},
 				moves: []volumeapi.Move{move},
 			}
@@ -60,6 +60,13 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 			}
 			if move.Status.CapacityApproved != (test.want == "") || move.Status.CapacityReason != test.want || move.Status.SourceBytes != test.usage {
 				t.Fatalf("capacity status = %+v", move.Status)
+			}
+			wantPoolUID := ""
+			if test.want == "" {
+				wantPoolUID = "destination-pool-uid"
+			}
+			if move.Status.DestinationPoolUID != wantPoolUID {
+				t.Fatalf("destination Pool UID = %q, want %q", move.Status.DestinationPoolUID, wantPoolUID)
 			}
 			if _, err := client.BatchV1().Jobs("system").Get(context.Background(), namesFor(move.Name).CopyJob, metav1.GetOptions{}); err == nil {
 				t.Fatal("capacity admission created a copy Job")
@@ -176,7 +183,7 @@ func TestEnsureCapacityFailsClosedWhenDestinationPoolLimitIsMissing(t *testing.T
 		},
 		pools: []volumeapi.Pool{
 			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
-			{Name: "destination", NodeName: "destination", MountPath: "/destination"},
+			{Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination"},
 		},
 		moves: []volumeapi.Move{move},
 	}

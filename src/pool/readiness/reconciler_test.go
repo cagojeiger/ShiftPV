@@ -20,17 +20,18 @@ func (f fakeInspector) Inspect(volumeapi.Pool) Result { return f.result }
 
 type fakeRepository struct {
 	pool       volumeapi.Pool
+	currentUID string
 	err        error
 	status     volumeapi.PoolStatus
 	statusSets int
 }
 
-func (f *fakeRepository) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+func (f *fakeRepository) PoolForNodeLifecycle(context.Context, string) (volumeapi.Pool, error) {
 	return f.pool, f.err
 }
 
-func (f *fakeRepository) SetPoolStatus(_ context.Context, name, node string, status volumeapi.PoolStatus) error {
-	if name != f.pool.Name || node != f.pool.NodeName {
+func (f *fakeRepository) SetPoolStatus(_ context.Context, name, uid, node string, status volumeapi.PoolStatus) error {
+	if name != f.pool.Name || uid != f.pool.UID || node != f.pool.NodeName || f.currentUID != "" && uid != f.currentUID {
 		return errors.New("identity mismatch")
 	}
 	f.status = status
@@ -41,7 +42,7 @@ func (f *fakeRepository) SetPoolStatus(_ context.Context, name, node string, sta
 func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T) {
 	old := metav1.NewTime(testTime.Add(-time.Hour))
 	repository := &fakeRepository{pool: volumeapi.Pool{
-		Name: "pool-a", NodeName: "node-a", Generation: 3,
+		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 3,
 		Status: volumeapi.PoolStatus{Conditions: []metav1.Condition{
 			{
 				Type: volumeapi.PoolConditionAccessible, Status: metav1.ConditionTrue,
@@ -80,7 +81,7 @@ func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T
 }
 
 func TestReconcileRecordsFailureAndAllowsMissingRegistration(t *testing.T) {
-	repository := &fakeRepository{pool: volumeapi.Pool{Name: "pool-a", NodeName: "node-a", Generation: 1}}
+	repository := &fakeRepository{pool: volumeapi.Pool{Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1}}
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{
 			Accessible:       Check{OK: true, Known: true, Reason: "DirectoryAccessible", Message: "accessible"},
@@ -101,6 +102,87 @@ func TestReconcileRecordsFailureAndAllowsMissingRegistration(t *testing.T) {
 	}
 }
 
+func TestReconcileKeepsInventoryFreshWhilePoolDeregisters(t *testing.T) {
+	deletedAt := metav1.NewTime(testTime.Add(-time.Minute))
+	repository := &fakeRepository{pool: volumeapi.Pool{
+		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1, DeletionTimestamp: &deletedAt, IdentityReleaseApproval: "pool-a-uid",
+	}}
+	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
+	releases := 0
+	reconciler := &Reconciler{
+		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		Interval: time.Minute, Now: func() time.Time { return testTime },
+		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Valid: true}
+		},
+		Release: func(_ context.Context, pool volumeapi.Pool) error {
+			releases++
+			if pool.UID != "pool-a-uid" {
+				t.Fatalf("released Pool = %#v", pool)
+			}
+			return nil
+		},
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ready := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "PoolDeregistering" {
+		t.Fatalf("ready=%#v", ready)
+	}
+	if repository.status.Inventory == nil || !repository.status.Inventory.ObservedAt.Equal(&metav1.Time{Time: testTime}) {
+		t.Fatalf("inventory=%#v", repository.status.Inventory)
+	}
+	released := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionIdentityReleased)
+	if releases != 1 || released == nil || released.Status != metav1.ConditionTrue || released.Reason != "PoolIdentityReleased" {
+		t.Fatalf("releases=%d condition=%#v", releases, released)
+	}
+}
+
+func TestReconcilePreservesPoolIdentityUntilInventoryIsEmpty(t *testing.T) {
+	deletedAt := metav1.NewTime(testTime.Add(-time.Minute))
+	repository := &fakeRepository{pool: volumeapi.Pool{
+		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1, DeletionTimestamp: &deletedAt, IdentityReleaseApproval: "pool-a-uid",
+	}}
+	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
+	releases := 0
+	reconciler := &Reconciler{
+		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		Interval: time.Minute, Now: func() time.Time { return testTime },
+		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Valid: true, Copies: []volumeapi.CopyObservation{{Marker: "copy"}}}
+		},
+		Release: func(context.Context, volumeapi.Pool) error { releases++; return nil },
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	released := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionIdentityReleased)
+	if releases != 0 || released == nil || released.Status != metav1.ConditionFalse || released.Reason != "PoolIdentityRetained" {
+		t.Fatalf("releases=%d condition=%#v", releases, released)
+	}
+}
+
+func TestReconcileRejectsReplacementPoolBeforeStatusWrite(t *testing.T) {
+	repository := &fakeRepository{
+		pool:       volumeapi.Pool{Name: "pool-a", UID: "observed-uid", NodeName: "node-a", Generation: 1},
+		currentUID: "observed-uid",
+	}
+	reconciler := &Reconciler{
+		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{}, Interval: time.Minute,
+		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+			repository.currentUID = "replacement-uid"
+			return volumeapi.PoolInventory{Valid: true}
+		},
+	}
+	if err := reconciler.Reconcile(context.Background()); err == nil || err.Error() != "identity mismatch" {
+		t.Fatalf("replacement Pool status write error = %v", err)
+	}
+	if repository.statusSets != 0 {
+		t.Fatalf("replacement Pool received %d stale status writes", repository.statusSets)
+	}
+}
+
 func TestReconcilerValidatesConfiguration(t *testing.T) {
 	if err := (&Reconciler{}).Reconcile(context.Background()); err == nil {
 		t.Fatal("invalid configuration accepted")
@@ -108,7 +190,7 @@ func TestReconcilerValidatesConfiguration(t *testing.T) {
 }
 
 func TestReconcilerObserverReceivesExistingProbeAndErrors(t *testing.T) {
-	repository := &fakeRepository{pool: volumeapi.Pool{Name: "pool", NodeName: "node"}}
+	repository := &fakeRepository{pool: volumeapi.Pool{Name: "pool", UID: "pool-uid", NodeName: "node"}}
 	result := Result{CapacityReadable: Check{OK: true, Known: true}}
 	calls := 0
 	var observedErr error
