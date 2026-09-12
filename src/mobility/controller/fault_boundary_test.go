@@ -52,8 +52,8 @@ func (r *lostResponseRepository) CompareAndSetState(ctx context.Context, id, pha
 	return err
 }
 
-func (r *lostResponseRepository) SetMoveStatus(ctx context.Context, name string, status volumeapi.MoveStatus) error {
-	err := r.memoryRepository.SetMoveStatus(ctx, name, status)
+func (r *lostResponseRepository) SetMoveStatus(ctx context.Context, name, uid string, status volumeapi.MoveStatus) error {
+	err := r.memoryRepository.SetMoveStatus(ctx, name, uid, status)
 	if err == nil && r.statusResponses > 0 {
 		r.statusResponses--
 		return fmt.Errorf("API timeout after ShiftPVMove status update was accepted")

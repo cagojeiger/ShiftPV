@@ -110,7 +110,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	if _, err := dynamicClient.Resource(volumeapi.MoveResource).Create(context.Background(), recoveredMove, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), volumeapi.MoveStatus{
+	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), string(recoveredMove.GetUID()), volumeapi.MoveStatus{
 		Phase: "Blocked", RecoveryPhase: "Recovered", IncomingCopy: &target,
 	}); err != nil {
 		t.Fatal(err)
@@ -197,7 +197,7 @@ func TestMoveAuthorityRequiresExactMoveJobPoolAndSourceCopy(t *testing.T) {
 	}, moveObject, volumeObject, poolObject, clusterIdentity)
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	moveStatus := volumeapi.MoveStatus{Phase: "Copying", SourceCopy: &source, IncomingCopy: &incoming, CopyOperationID: "copy-operation", CopyJobName: jobName}
-	if err := registry.SetMoveStatus(context.Background(), moveName, moveStatus); err != nil {
+	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, moveStatus); err != nil {
 		t.Fatal(err)
 	}
 	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{UID: source.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: moveName, CurrentCopy: &source}); err != nil {
@@ -214,7 +214,7 @@ func TestMoveAuthorityRequiresExactMoveJobPoolAndSourceCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	moveStatus.CopyOperationID = "replacement"
-	if err := registry.SetMoveStatus(context.Background(), moveName, moveStatus); err == nil {
+	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, moveStatus); err == nil {
 		t.Fatal("immutable operation identity was replaced")
 	}
 	job.Labels["shiftpv.io/move-uid"] = "replacement"
@@ -243,7 +243,7 @@ func TestSourceAuthorityRequiresCurrentMoveOwnedPodAndUnpublishedCopy(t *testing
 	}, moveObject, volumeObject, poolObject, clusterIdentity)
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	status := volumeapi.MoveStatus{Phase: "Copying", SourceCopy: &identity, CopyOperationID: "copy-operation"}
-	if err := registry.SetMoveStatus(context.Background(), moveName, status); err != nil {
+	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, status); err != nil {
 		t.Fatal(err)
 	}
 	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{UID: identity.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: identity.NodeName, ActiveMove: moveName, CurrentCopy: &identity}); err != nil {

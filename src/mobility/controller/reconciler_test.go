@@ -117,9 +117,12 @@ func (m *memoryRepository) DeleteMove(_ context.Context, name, uid string) error
 	return nil
 }
 func (m *memoryRepository) ListMoves(context.Context) ([]volumeapi.Move, error) { return m.moves, nil }
-func (m *memoryRepository) SetMoveStatus(_ context.Context, name string, status volumeapi.MoveStatus) error {
+func (m *memoryRepository) SetMoveStatus(_ context.Context, name, uid string, status volumeapi.MoveStatus) error {
 	for index := range m.moves {
 		if m.moves[index].Name == name {
+			if m.moves[index].UID != uid {
+				return volumeapi.ErrStateConflict
+			}
 			m.moves[index].Status = status
 			return nil
 		}

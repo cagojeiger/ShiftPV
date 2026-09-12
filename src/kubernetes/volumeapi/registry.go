@@ -817,15 +817,21 @@ func (r *Registry) ListMoves(ctx context.Context) ([]Move, error) {
 	return result, nil
 }
 
-func (r *Registry) SetMoveStatus(ctx context.Context, name string, status MoveStatus) error {
+func (r *Registry) SetMoveStatus(ctx context.Context, name, uid string, status MoveStatus) error {
 	if err := r.validate(); err != nil {
 		return err
+	}
+	if name == "" || uid == "" {
+		return fmt.Errorf("ShiftPVMove name and UID are required for status update")
 	}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		resource := r.Client.Resource(MoveResource)
 		object, err := resource.Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("get ShiftPVMove for status update: %w", err)
+		}
+		if string(object.GetUID()) != uid {
+			return fmt.Errorf("%w: ShiftPVMove %q UID changed from %q to %q", ErrStateConflict, name, uid, object.GetUID())
 		}
 		current, err := moveStatusFrom(object)
 		if err != nil {

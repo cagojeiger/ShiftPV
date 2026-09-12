@@ -104,12 +104,12 @@ type rejectedStatusRepository struct {
 	rejectNext bool
 }
 
-func (r *rejectedStatusRepository) SetMoveStatus(ctx context.Context, name string, next volumeapi.MoveStatus) error {
+func (r *rejectedStatusRepository) SetMoveStatus(ctx context.Context, name, uid string, next volumeapi.MoveStatus) error {
 	if r.rejectNext {
 		r.rejectNext = false
 		return errors.New("status write rejected before persistence")
 	}
-	return r.memoryRepository.SetMoveStatus(ctx, name, next)
+	return r.memoryRepository.SetMoveStatus(ctx, name, uid, next)
 }
 
 func TestMoveActionSurvivesJournalFailureAndControllerRestart(t *testing.T) {

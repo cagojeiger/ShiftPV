@@ -31,7 +31,7 @@ type Repository interface {
 	CreateMove(context.Context, string, volumeapi.MoveSpec) (volumeapi.Move, error)
 	DeleteMove(context.Context, string, string) error
 	ListMoves(context.Context) ([]volumeapi.Move, error)
-	SetMoveStatus(context.Context, string, volumeapi.MoveStatus) error
+	SetMoveStatus(context.Context, string, string, volumeapi.MoveStatus) error
 }
 
 type CapacityProbe interface {

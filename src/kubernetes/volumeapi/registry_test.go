@@ -507,7 +507,7 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 	volumeID := "shiftpv-33333333333333333333333333333333"
 	moveObject := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
-		"metadata": map[string]any{"name": "move-test"},
+		"metadata": map[string]any{"name": "move-test", "uid": "move-uid"},
 		"spec":     map[string]any{"volumeID": volumeID, "sourceNode": "node-a"},
 	}}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
@@ -525,7 +525,10 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 		t.Fatal("stale state precondition was accepted")
 	}
 	status := MoveStatus{Phase: "Copying", DestinationNode: "node-b", DestinationPoolUID: "pool-b-uid", ReplacementUID: "replacement-uid", CandidateNodes: []string{"node-b"}, EvictionRequested: true, CopyJobName: "copy"}
-	if err := registry.SetMoveStatus(ctx, "move-test", status); err != nil {
+	if err := registry.SetMoveStatus(ctx, "move-test", "replacement-uid", status); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("replacement Move status error = %v", err)
+	}
+	if err := registry.SetMoveStatus(ctx, "move-test", "move-uid", status); err != nil {
 		t.Fatal(err)
 	}
 	move, err := registry.GetMove(ctx, "move-test")

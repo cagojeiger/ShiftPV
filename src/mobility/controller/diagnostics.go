@@ -51,7 +51,7 @@ func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move
 	if move.Status.LastProgressTime == "" || progressOf(previous) != progressOf(move.Status) {
 		move.Status.LastProgressTime = now
 	}
-	if err := r.Repository.SetMoveStatus(ctx, move.Name, move.Status); err != nil {
+	if err := r.Repository.SetMoveStatus(ctx, move.Name, move.UID, move.Status); err != nil {
 		return err
 	}
 	r.emitMoveEvent(*move, previous)
