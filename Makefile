@@ -88,14 +88,19 @@ helm-template:
 		trap 'rm -f "$$first" "$$second"' EXIT; \
 		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$first"; \
 		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$second"; \
-		cmp -s "$$first" "$$second"
+		cmp -s "$$first" "$$second"; \
+		grep -q -- '--helper-image=busybox:1.37' "$$first"; \
+		grep -q -- '--mobility-helper-image=ghcr.io/cagojeiger/shiftpv-controller:0.1.11' "$$first"; \
+		! grep -q -- '--helper-service-account=' "$$first"
 	@set -e; rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
+		--set runtime.identityContract=true \
 		--set controller.image.repository=controller --set controller.image.tag=test \
 		--set node.image.repository=node --set node.image.tag=test \
-		--set mobility.helperImage=helper:test)"; \
+		--set helperPod.image=controller:test --set mobility.helperImage=helper:test)"; \
 		printf '%s\n' "$$rendered" | grep -q 'image: "controller:test"'; \
 		printf '%s\n' "$$rendered" | grep -q 'image: "node:test"'; \
 		printf '%s\n' "$$rendered" | grep -q -- '--helper-image=controller:test'; \
+		printf '%s\n' "$$rendered" | grep -q -- '--helper-service-account=shiftpv-controller'; \
 		printf '%s\n' "$$rendered" | grep -q '"helm.sh/hook": pre-delete'; \
 		! printf '%s\n' "$$rendered" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
 		printf '%s\n' "$$rendered" | grep -q 'command: \["/shiftpv-uninstall-guard"\]'; \
@@ -113,6 +118,7 @@ helm-template:
 		! printf '%s\n' "$$rendered" | grep -q '^kind: Secret$$'; \
 		printf '%s\n' "$$rendered" | grep -q 'mountPropagation: HostToContainer'
 	@set -e; helpers="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
+		--set runtime.identityContract=true \
 		--set controller.image.repository=controller --set controller.image.tag=test \
 		--set helperPod.image=create-helper:test --set mobility.helperImage=move-helper:test)"; \
 		printf '%s\n' "$$helpers" | grep -q -- '--helper-image=create-helper:test'; \

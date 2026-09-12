@@ -2,6 +2,11 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+runtime:
+  # Enable only when both controller and node images implement the identity-aware
+  # lifecycle contract. The v0.3.0 chart release enables this with v0.3.0 images.
+  identityContract: false
+
 metrics:
   enabled: false
   port: 8080
@@ -32,9 +37,7 @@ mobility:
   enabled: true
   interval: 30s
   webhookPort: 9443
-  # Empty uses controller.image. Override only for a compatible image that
-  # contains /shiftpv-volume-helper.
-  helperImage: ""
+  helperImage: ghcr.io/cagojeiger/shiftpv-controller:0.1.11
 
 node:
   # This must match the kubelet state root on every selected node.
@@ -50,9 +53,7 @@ node:
   resources: {}
 
 helperPod:
-  # Empty uses controller.image. Override only for a compatible image that
-  # contains /shiftpv-volume-helper.
-  image: ""
+  image: busybox:1.37
   timeout: 2m
   resources:
     requests:

@@ -156,19 +156,20 @@ permission failure, stale probe, truncated inventory는 신규 provisioning과 �
 
 | Value | 역할 | 기본값 |
 |---|---|---|
+| `runtime.identityContract` | identity-aware helper와 node inventory 계약 활성화 | `false` |
 | `controller.image.*` | Controller image | 공개 controller |
 | `controller.resources` | Controller resource 정책 | `{}` |
 | `node.image.*` | Node Plugin image | 공개 node |
 | `node.kubeletRootDir` | kubelet state root | `/var/lib/kubelet` |
 | `node.nodeSelector`, `node.tolerations` | 참여 node | empty |
 | `node.resources` | Node Plugin resource 정책 | `{}` |
-| `helperPod.image` | create/delete/GC helper image; empty면 controller image 사용 | empty |
+| `helperPod.image` | create/delete/GC helper image | `busybox:1.37` |
 | `helperPod.timeout`, `helperPod.resources` | helper 실행 제한 | `2m`, 최소 requests/limits |
 | `poolReadiness.interval` | node-local probe 주기 | `1m` |
 | `poolReadiness.staleAfter` | Controller freshness window | `3m` |
 | `mobility.enabled`, `mobility.webhookPort` | cordon mobility와 admission endpoint | `true`, `9443` |
 | `mobility.interval` | event watch를 보완하는 safety interval | `30s` |
-| `mobility.helperImage` | copy/promote helper image; empty면 controller image 사용 | empty |
+| `mobility.helperImage` | copy/promote helper image | 공개 controller |
 | `lifecycle.uninstallMode` | Helm 또는 Argo CD 제거 owner | `helm` |
 | `storageClass.create`, `storageClass.name` | StorageClass 생성과 이름 | `true`, `shiftpv` |
 | `storageClass.defaultClass` | default-class annotation | `false` |

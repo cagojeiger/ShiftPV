@@ -2,6 +2,9 @@ metrics:
   enabled: true
   snapshotInterval: 2s
 
+runtime:
+  identityContract: true
+
 controller:
   image:
     repository: shiftpv
@@ -10,6 +13,9 @@ controller:
 
 mobility:
   helperImage: shiftpv:dev
+
+helperPod:
+  image: shiftpv:dev
 
 poolReadiness:
   interval: 2s

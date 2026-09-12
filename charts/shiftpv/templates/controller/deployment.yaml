@@ -41,7 +41,9 @@ spec:
             - --namespace=$(POD_NAMESPACE)
             - --helper-image={{ include "shiftpv.helperPodImage" . }}
             - --helper-timeout={{ .Values.helperPod.timeout }}
+            {{- if .Values.runtime.identityContract }}
             - --helper-service-account={{ include "shiftpv.controllerServiceAccount" . }}
+            {{- end }}
             - --helper-cpu-request={{ .Values.helperPod.resources.requests.cpu }}
             - --helper-memory-request={{ .Values.helperPod.resources.requests.memory }}
             - --helper-cpu-limit={{ .Values.helperPod.resources.limits.cpu }}
