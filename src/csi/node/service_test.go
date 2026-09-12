@@ -45,6 +45,7 @@ func (f *sequencedPoolRegistry) PoolForNode(context.Context, string) (volumeapi.
 
 type fakeVolumeRegistry struct {
 	state         volumeapi.State
+	getStates     []volumeapi.State
 	getErr        error
 	setErr        error
 	publishedNode string
@@ -79,7 +80,10 @@ func (f *identityVolumeRegistryFake) ReconcilePublished(_ context.Context, _ str
 }
 
 func (f *fakeVolumeRegistry) Get(context.Context, string) (volumeapi.State, error) {
-	f.getCalls.Add(1)
+	call := int(f.getCalls.Add(1)) - 1
+	if call < len(f.getStates) {
+		return f.getStates[call], f.getErr
+	}
 	return f.state, f.getErr
 }
 
@@ -543,9 +547,52 @@ func TestNodeUnpublishRetriesAfterAcceptedStateResponseLoss(t *testing.T) {
 	if registry.published {
 		t.Fatal("accepted state update was not retained")
 	}
+	destination := copy
+	destination.PoolName, destination.PoolUID, destination.CopyID, destination.NodeName = "pool-b", "pool-b-uid", "destination-copy", "worker-b"
+	registry.state = volumeapi.State{
+		UID: copy.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: destination.NodeName, CurrentCopy: &destination,
+	}
 	registry.setErr = nil
 	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatalf("stale source unpublish retry after owner commit: %v", err)
+	}
+	if binder.unpublished != request.TargetPath {
+		t.Fatalf("stale source target was not unmounted: %#v", binder)
+	}
+}
+
+func TestNodeUnpublishOwnerCommitDuringStorageLock(t *testing.T) {
+	hostRoot := t.TempDir()
+	poolRoot := filepath.Join(hostRoot, "pool")
+	if err := os.Mkdir(poolRoot, 0755); err != nil {
 		t.Fatal(err)
+	}
+	copy := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
+		VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", VolumeUID: "volume-uid",
+		CopyID: "copy-id", NodeName: "worker-a", Role: volume.RoleServing,
+	}
+	if err := ownership.PrepareServing(context.Background(), poolRoot, copy, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	sourceState := volumeapi.State{UID: copy.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: copy.NodeName, CurrentCopy: &copy}
+	destination := copy
+	destination.PoolName, destination.PoolUID, destination.CopyID, destination.NodeName = "pool-b", "pool-b-uid", "destination-copy", "worker-b"
+	destinationState := volumeapi.State{UID: copy.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: destination.NodeName, CurrentCopy: &destination}
+	registry := &identityVolumeRegistryFake{fakeVolumeRegistry: &fakeVolumeRegistry{
+		state: sourceState, getStates: []volumeapi.State{sourceState, destinationState},
+	}, copy: copy}
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	service.HostRoot = hostRoot
+	service.Pools = fakePoolRegistry{pool: volumeapi.Pool{Name: copy.PoolName, UID: copy.PoolUID, NodeName: copy.NodeName, MountPath: "/pool"}}
+	service.Volumes = registry
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: copy.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatalf("owner commit during unpublish: %v", err)
+	}
+	if registry.getCalls.Load() != 2 || binder.unpublished != request.TargetPath {
+		t.Fatalf("stale target did not converge after racing owner commit: reads=%d binder=%#v", registry.getCalls.Load(), binder)
 	}
 }
 

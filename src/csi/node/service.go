@@ -167,8 +167,14 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "read volume state before unpublish: %v", err)
 	}
-	if state.CurrentCopy == nil || state.CurrentCopy.Role != volume.RoleServing || state.CurrentCopy.NodeName != s.NodeName {
+	if state.CurrentCopy == nil || state.CurrentCopy.Role != volume.RoleServing {
 		return nil, status.Error(codes.FailedPrecondition, "identified serving copy is required for unpublish")
+	}
+	if state.CurrentCopy.NodeName != s.NodeName {
+		if err := s.Binder.Unpublish(req.GetTargetPath()); err != nil {
+			return nil, status.Errorf(codes.Internal, "unpublish stale target: %v", err)
+		}
+		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
 	copy := *state.CurrentCopy
 	_, poolRoot, err := s.poolRoot(ctx)
@@ -181,6 +187,12 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	}
 	err = ownership.WithLock(ctx, poolRoot, ownership.PoolIdentity{InstallationID: copy.InstallationID, PoolUID: copy.PoolUID}, req.GetVolumeId(), func(*ownership.Store) error {
 		fresh, getErr := s.Volumes.Get(ctx, req.GetVolumeId())
+		if getErr == nil && fresh.CurrentCopy != nil && fresh.CurrentCopy.Role == volume.RoleServing && fresh.CurrentCopy.NodeName != s.NodeName {
+			if unpublishErr := s.Binder.Unpublish(req.GetTargetPath()); unpublishErr != nil {
+				return fmt.Errorf("unmount stale target: %w", unpublishErr)
+			}
+			return nil
+		}
 		if getErr != nil || fresh.UID != state.UID || fresh.CurrentCopy == nil || *fresh.CurrentCopy != copy || fresh.OwnerNode != s.NodeName {
 			return fmt.Errorf("volume unpublish authority changed: %w", errors.Join(getErr, volumeapi.ErrStateConflict))
 		}
