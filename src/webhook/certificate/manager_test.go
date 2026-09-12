@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -58,11 +59,27 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get ValidatingWebhookConfiguration: %v", err)
 	}
-	if len(validation.Webhooks) != 1 || !bytes.Equal(validation.Webhooks[0].ClientConfig.CABundle, secret.Data[caCertificateKey]) {
-		t.Fatal("validation webhook CA bundle does not match Secret")
+	if len(validation.Webhooks) != 3 {
+		t.Fatalf("validation webhooks = %d, want 3", len(validation.Webhooks))
 	}
-	if validation.Webhooks[0].ObjectSelector == nil || validation.Webhooks[0].ObjectSelector.MatchLabels[protectedLabel] != "true" {
-		t.Fatalf("validation objectSelector = %#v", validation.Webhooks[0].ObjectSelector)
+	assertValidationCABundles(t, validation, secret.Data[caCertificateKey])
+	protected := findValidationWebhook(t, validation, validationWebhookName)
+	if protected.ObjectSelector == nil || protected.ObjectSelector.MatchLabels[protectedLabel] != "true" {
+		t.Fatalf("protected resource objectSelector = %#v", protected.ObjectSelector)
+	}
+	runtime := findValidationWebhook(t, validation, validationCRWebhookName)
+	if runtime.ObjectSelector != nil {
+		t.Fatalf("runtime CR objectSelector = %#v, want nil", runtime.ObjectSelector)
+	}
+	if len(runtime.Rules) != 1 || !reflect.DeepEqual(runtime.Rules[0].Rule.Resources, []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups"}) {
+		t.Fatalf("runtime CR rules = %#v", runtime.Rules)
+	}
+	crds := findValidationWebhook(t, validation, validationCRDWebhookName)
+	if crds.ObjectSelector != nil || len(crds.Rules) != 1 || !reflect.DeepEqual(crds.Rules[0].Rule.Resources, []string{"customresourcedefinitions"}) {
+		t.Fatalf("CRD protection = %#v", crds)
+	}
+	if len(crds.MatchConditions) != 1 || !strings.Contains(crds.MatchConditions[0].Expression, "shiftpvpools.shiftpv.io") {
+		t.Fatalf("CRD protection match conditions = %#v", crds.MatchConditions)
 	}
 
 	serving, err := manager.GetCertificate(nil)
@@ -136,9 +153,10 @@ func TestReconcileRecoversDeletedSecretAndRotatesCA(t *testing.T) {
 		t.Fatal("webhook did not converge to recovered CA")
 	}
 	validation, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), "shiftpv-lifecycle", metav1.GetOptions{})
-	if err != nil || !bytes.Equal(validation.Webhooks[0].ClientConfig.CABundle, recovered.Data[caCertificateKey]) {
+	if err != nil {
 		t.Fatalf("validation webhook did not converge to recovered CA: %v", err)
 	}
+	assertValidationCABundles(t, validation, recovered.Data[caCertificateKey])
 }
 
 func TestDeletedSecretRecoveryPublishesBothCAsBeforeSwitch(t *testing.T) {
@@ -174,9 +192,10 @@ func TestDeletedSecretRecoveryPublishesBothCAsBeforeSwitch(t *testing.T) {
 		t.Fatal("failed final convergence did not leave both old and new CAs trusted")
 	}
 	validation, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), "shiftpv-lifecycle", metav1.GetOptions{})
-	if err != nil || !bytes.Equal(validation.Webhooks[0].ClientConfig.CABundle, wantBundle) {
+	if err != nil {
 		t.Fatalf("validation webhook did not retain both CAs: %v", err)
 	}
+	assertValidationCABundles(t, validation, wantBundle)
 	serving, err := manager.GetCertificate(nil)
 	if err != nil {
 		t.Fatalf("GetCertificate: %v", err)
@@ -336,8 +355,10 @@ func TestReconcileDisablesAndReenablesAdmissionWithoutDeletingResources(t *testi
 	if err != nil {
 		t.Fatalf("lifecycle validation configuration: %v", err)
 	}
-	if validation.Webhooks[0].FailurePolicy == nil || *validation.Webhooks[0].FailurePolicy != admissionv1.Fail {
-		t.Fatalf("lifecycle validation failurePolicy = %v, want Fail", validation.Webhooks[0].FailurePolicy)
+	for _, webhook := range validation.Webhooks {
+		if webhook.FailurePolicy == nil || *webhook.FailurePolicy != admissionv1.Fail {
+			t.Fatalf("lifecycle validation failurePolicy for %s = %v, want Fail", webhook.Name, webhook.FailurePolicy)
+		}
 	}
 }
 
@@ -449,6 +470,26 @@ func mustSecret(t *testing.T, client *fake.Clientset) *corev1.Secret {
 		t.Fatalf("get Secret: %v", err)
 	}
 	return secret
+}
+
+func findValidationWebhook(t *testing.T, configuration *admissionv1.ValidatingWebhookConfiguration, name string) admissionv1.ValidatingWebhook {
+	t.Helper()
+	for _, webhook := range configuration.Webhooks {
+		if webhook.Name == name {
+			return webhook
+		}
+	}
+	t.Fatalf("validation webhook %q is missing", name)
+	return admissionv1.ValidatingWebhook{}
+}
+
+func assertValidationCABundles(t *testing.T, configuration *admissionv1.ValidatingWebhookConfiguration, want []byte) {
+	t.Helper()
+	for _, webhook := range configuration.Webhooks {
+		if !bytes.Equal(webhook.ClientConfig.CABundle, want) {
+			t.Fatalf("validation webhook %q CA bundle does not match", webhook.Name)
+		}
+	}
 }
 
 func parseCertificate(t *testing.T, value []byte) *x509.Certificate {

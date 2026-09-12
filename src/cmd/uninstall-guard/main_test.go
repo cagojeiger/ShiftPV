@@ -73,10 +73,11 @@ func (m *mutableVolumeRepository) ListPools(context.Context) ([]volumeapi.Pool, 
 	return result, nil
 }
 
-func (m *mutableVolumeRepository) observe(at time.Time) {
+func (m *mutableVolumeRepository) observeEmpty(at time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(at.UTC())
+	m.pools[0].Status.Inventory.Copies = nil
 }
 
 func TestRunCompletesQuiescedTeardown(t *testing.T) {
@@ -107,12 +108,15 @@ func TestRunWaitsForEmptyPoolInventoryObservedAfterQuiesce(t *testing.T) {
 	go func() { _ = gate.Run(ctx) }()
 	repository := &mutableVolumeRepository{listed: make(chan struct{}), pools: []volumeapi.Pool{{
 		Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/var/lib/shiftpv", Generation: 1,
-		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(time.Now().Add(-time.Minute)), Valid: true}},
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{
+			ObservedAt: metav1.NewTime(time.Now().Add(-time.Minute)), Valid: true,
+			Copies: []volumeapi.CopyObservation{{Marker: "copy-before-quiesce.json", Present: true}},
+		}},
 	}}}
 	checker := &uninstallcheck.Checker{Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	go func() {
 		<-repository.listed
-		repository.observe(time.Now())
+		repository.observeEmpty(time.Now())
 	}()
 
 	if err := run(ctx, checker, store, "shiftpv-lifecycle"); err != nil {

@@ -20,10 +20,13 @@ flowchart LR
 ```
 
 Helm pre-delete guard와 Kubernetes API deletion validation이 같은 dependency 정책을 집행한다.
+Lifecycle validation은 chart resource, ShiftPV CRD와 `ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`,
+`ShiftPVCleanup` 삭제를 함께 보호한다. 신뢰된 controller identity만 정상 CSI 수명주기에서
+Volume, Move, Cleanup을 정리할 수 있고 Pool 삭제와 외부 삭제는 uninstall permit을 따른다.
 부모 Move나 Volume이 사라져도 미완료 `ShiftPVCleanup`은 독립적인 storage dependency로 남는다.
 Volume reservation도 orphan 발견과 exact cleanup 정산 사이의 공백을 닫는 dependency로 남는다.
 모든 Pool은 quiesce acknowledgement 이후에 관측된 fresh·valid·complete inventory를 제공하며,
-실제 copy가 하나라도 남아 있으면 제거를 유지한다.
+신뢰 가능한 post-quiesce inventory에서 실제 copy가 하나라도 남아 있으면 제거를 유지한다.
 `Pending`, `Running`, `Verifying`, `NeedsReview`는 구성을 유지하며 receipt가 정산된 `Completed`만
 dependency를 해소한다.
 Emergency bypass는 운영자가 보존 데이터와 복구 책임을 명시적으로 인수하는 별도 절차다.

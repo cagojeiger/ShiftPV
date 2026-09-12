@@ -23,8 +23,9 @@ type Permit interface {
 }
 
 type Handler struct {
-	Checker Checker
-	Permit  Permit
+	Checker               Checker
+	Permit                Permit
+	TrustedRuntimeDeleter string
 }
 
 func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -49,6 +50,9 @@ func (h *Handler) Admit(ctx context.Context, request *admissionv1.AdmissionReque
 		return denied("AdmissionReview has no request", "")
 	}
 	if request.Operation != admissionv1.Delete {
+		return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
+	}
+	if trustedRuntimeDelete(request, h.TrustedRuntimeDeleter) {
 		return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
 	}
 	if h.Checker == nil || h.Permit == nil {
@@ -78,6 +82,18 @@ func (h *Handler) Admit(ctx context.Context, request *admissionv1.AdmissionReque
 		blockers = append(blockers, fmt.Sprintf("%s %s", blocker.Kind, name))
 	}
 	return denied("ShiftPV resource deletion denied: dependent storage exists: "+strings.Join(blockers, ", "), request.UID)
+}
+
+func trustedRuntimeDelete(request *admissionv1.AdmissionRequest, trustedUsername string) bool {
+	if trustedUsername == "" || request.UserInfo.Username != trustedUsername || request.Resource.Group != "shiftpv.io" {
+		return false
+	}
+	switch request.Resource.Resource {
+	case "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups":
+		return true
+	default:
+		return false
+	}
 }
 
 func denied(message string, uid types.UID) *admissionv1.AdmissionResponse {

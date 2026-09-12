@@ -208,17 +208,16 @@ func TestCheckBlocksPhysicalPoolCopiesAndUncertainInventory(t *testing.T) {
 	}
 
 	report, err := checker.Check(context.Background())
-	if err != nil || report.Safe() || len(report.Blockers) != 2 {
+	if err != nil || report.Safe() || len(report.Blockers) != 1 || !report.WaitingForInventory() {
 		t.Fatalf("unsafe Pool inventory report=%#v err=%v", report, err)
 	}
 	joined := blockersText(report.Blockers)
-	for _, expected := range []string{
-		"ShiftPVPoolInventory//pool-a/generation=2 observedGeneration=1 valid=false truncated=true message=CopyObservationProblem observedAt=stale",
-		"ShiftPVPoolCopy//pool-a/marker=copy-copy-id.json present=true role=Serving volume=shiftpv-0123456789abcdef0123456789abcdef copy=copy-id published=true",
-	} {
-		if !strings.Contains(joined, expected) {
-			t.Fatalf("Pool inventory blockers do not contain %q: %s", expected, joined)
-		}
+	expected := "ShiftPVPoolInventory//pool-a/generation=2 observedGeneration=1 valid=false truncated=true message=CopyObservationProblem observedAt=stale"
+	if !strings.Contains(joined, expected) {
+		t.Fatalf("Pool inventory blockers do not contain %q: %s", expected, joined)
+	}
+	if strings.Contains(joined, "ShiftPVPoolCopy") {
+		t.Fatalf("untrustworthy inventory emitted a copy blocker: %s", joined)
 	}
 }
 
@@ -238,7 +237,13 @@ func TestCheckRequiresEmptyInventoryObservedAfterQuiesce(t *testing.T) {
 	if err != nil || report.Safe() || !report.WaitingForInventory() {
 		t.Fatalf("pre-quiesce inventory report=%#v err=%v", report, err)
 	}
+	repository.pools[0].Status.Inventory.Copies = []volumeapi.CopyObservation{{Marker: "copy-stale.json", Present: true}}
+	report, err = checker.CheckAfter(context.Background(), now)
+	if err != nil || report.Safe() || !report.WaitingForInventory() || len(report.Blockers) != 1 {
+		t.Fatalf("pre-quiesce copy inventory report=%#v err=%v", report, err)
+	}
 	repository.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(now.Add(time.Second))
+	repository.pools[0].Status.Inventory.Copies = nil
 	checker.Now = func() time.Time { return now.Add(2 * time.Second) }
 	report, err = checker.CheckAfter(context.Background(), now)
 	if err != nil || !report.Safe() || report.WaitingForInventory() {

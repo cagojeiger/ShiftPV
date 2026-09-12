@@ -419,9 +419,11 @@ sequenceDiagram
 | 모든 Pool inventory | quiesce 이후 fresh·valid·complete이며 실제 copy 0개 |
 | Kubernetes API 검사 | 성공 |
 
-보호 대상은 labeled CSI Deployment, DaemonSet, Service, ServiceAccount, RBAC, StorageClass와
-`CSIDriver`다. 직접 `kubectl delete`도 lifecycle admission을 통과한다. Admission은 read-only이므로
-DELETE 또는 dry-run DELETE 자체가 제거 permit을 만들지 않는다.
+보호 대상은 labeled CSI Deployment, DaemonSet, Service, ServiceAccount, RBAC, StorageClass,
+`CSIDriver`, ShiftPV CRD와 모든 `ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`, `ShiftPVCleanup`이다. 정상 CSI
+수명주기에서는 chart가 지정한 controller ServiceAccount만 Volume, Move, Cleanup을 정리한다.
+Pool 삭제와 그 밖의 직접 `kubectl delete`는 lifecycle admission을 통과한다. Admission은
+read-only이므로 DELETE 또는 dry-run DELETE 자체가 제거 permit을 만들지 않는다.
 
 정상 제거:
 

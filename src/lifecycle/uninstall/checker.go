@@ -231,12 +231,17 @@ func poolInventoryBlockers(pool volumeapi.Pool, now time.Time, maxAge time.Durat
 	}
 	if len(reasons) > 0 {
 		result = append(result, Blocker{Kind: PoolInventoryBlockerKind, Name: pool.Name, Reason: strings.Join(reasons, " ")})
+		// Copy observations are authoritative only when the whole inventory is
+		// generation-current, valid, complete, fresh, and newer than the
+		// uninstall quiesce barrier. Until then, wait for a trustworthy snapshot
+		// instead of turning stale copy evidence into a terminal blocker.
+		return result
 	}
 	for _, observed := range inventory.Copies {
-		if !observed.Present {
+		if !observed.Present && !observed.Published {
 			continue
 		}
-		parts := []string{"marker=" + observed.Marker, "present=true"}
+		parts := []string{"marker=" + observed.Marker, fmt.Sprintf("present=%t", observed.Present)}
 		if observed.Identity != nil {
 			parts = append(parts, "role="+string(observed.Identity.Role), "volume="+observed.Identity.VolumeID, "copy="+observed.Identity.CopyID)
 		}

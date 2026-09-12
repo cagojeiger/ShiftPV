@@ -145,6 +145,25 @@ VOLUME_UID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.metadata.ui
 COPY_ID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
 RESERVATION_UID=$(kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
 CHECKSUM_BEFORE=$(kubectl exec shiftpv-argocd-e2e -- sha256sum /data/payload | awk '{print $1}')
+CONTROLLER_SERVICE_ACCOUNT=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o jsonpath='{.spec.template.spec.serviceAccountName}')
+
+# Direct deletion cannot erase the Pool or volume ownership evidence. Runtime
+# cleanup performed by the trusted controller remains available independently.
+if kubectl delete shiftpvpool/worker --wait=false; then
+	echo "direct ShiftPVPool deletion bypassed lifecycle admission" >&2
+	exit 1
+fi
+if kubectl delete customresourcedefinition/shiftpvpools.shiftpv.io --wait=false; then
+	echo "direct ShiftPVPool CRD deletion bypassed lifecycle admission" >&2
+	exit 1
+fi
+if kubectl delete "shiftpvvolume/${VOLUME_ID}" --wait=false; then
+	echo "direct ShiftPVVolume deletion bypassed lifecycle admission" >&2
+	exit 1
+fi
+kubectl get shiftpvpool/worker >/dev/null
+kubectl get customresourcedefinition/shiftpvpools.shiftpv.io >/dev/null
+kubectl get "shiftpvvolume/${VOLUME_ID}" >/dev/null
 
 kubectl -n argocd delete application shiftpv --wait=false
 kubectl -n shiftpv-system wait --for=create job/shiftpv-uninstall-guard --timeout=2m
@@ -177,7 +196,8 @@ fi
 kubectl delete pod shiftpv-argocd-e2e --wait=true
 kubectl delete pvc shiftpv-argocd-e2e --wait=true
 kubectl wait --for=jsonpath='{.status.phase}'=Released "pv/${PV_NAME}" --timeout=2m
-kubectl delete "shiftpvvolume/${VOLUME_ID}" --wait=true
+kubectl --as="system:serviceaccount:shiftpv-system:${CONTROLLER_SERVICE_ACCOUNT}" \
+	delete "shiftpvvolume/${VOLUME_ID}" --wait=true
 kubectl delete "pv/${PV_NAME}" --wait=true
 
 CLEANUP_NAME=
@@ -195,7 +215,7 @@ test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.reserva
 test -n "$(kubectl -n argocd get application shiftpv -o jsonpath='{.metadata.deletionTimestamp}')"
 GUARD_LOG=$(kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard)
 grep -Fq VolumeReservation <<<"${GUARD_LOG}"
-grep -Fq ShiftPVPoolCopy <<<"${GUARD_LOG}"
+grep -Fq ShiftPVPoolInventory <<<"${GUARD_LOG}"
 grep -Fq "${VOLUME_ID}" <<<"${GUARD_LOG}"
 assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
 

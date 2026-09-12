@@ -58,6 +58,7 @@ spec:
             - --webhook-tls-secret-name={{ include "shiftpv.webhookSecretName" . }}
             - --webhook-configuration-name={{ include "shiftpv.webhookConfigurationName" . }}
             - --validation-webhook-configuration-name={{ include "shiftpv.validationWebhookConfigurationName" . }}
+            - --controller-service-account={{ include "shiftpv.controllerServiceAccount" . }}
             - --storage-class-name={{ .Values.storageClass.name }}
             - --uninstall-permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}

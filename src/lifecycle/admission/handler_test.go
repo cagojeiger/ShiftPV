@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
@@ -29,6 +31,41 @@ type fakePermit struct {
 }
 
 func (f fakePermit) Granted(context.Context) (bool, error) { return f.granted, f.err }
+
+func TestAdmitRuntimeDeleteRequiresPermitExceptForTrustedController(t *testing.T) {
+	trusted := "system:serviceaccount:shiftpv-system:shiftpv-controller"
+	handler := &Handler{TrustedRuntimeDeleter: trusted}
+	request := &admissionv1.AdmissionRequest{
+		UID:       types.UID("runtime-delete"),
+		Operation: admissionv1.Delete,
+		Resource:  metav1.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvvolumes"},
+		UserInfo:  authenticationv1.UserInfo{Username: trusted},
+	}
+
+	response := handler.Admit(context.Background(), request)
+	if !response.Allowed {
+		t.Fatalf("trusted controller runtime deletion denied: %#v", response)
+	}
+
+	request.Resource.Resource = "shiftpvpools"
+	response = handler.Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "not configured") {
+		t.Fatalf("controller Pool deletion bypassed lifecycle protection: %#v", response)
+	}
+
+	request.Resource = metav1.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	response = handler.Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "not configured") {
+		t.Fatalf("controller identity bypassed chart resource protection: %#v", response)
+	}
+
+	request.Resource = metav1.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvcleanups"}
+	request.UserInfo.Username = "cluster-admin"
+	response = handler.Admit(context.Background(), request)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "not configured") {
+		t.Fatalf("untrusted runtime deletion bypassed lifecycle protection: %#v", response)
+	}
+}
 
 func TestAdmitDeleteRequiresGrantedQuiescedTeardown(t *testing.T) {
 	request := &admissionv1.AdmissionRequest{UID: types.UID("delete"), Operation: admissionv1.Delete}
