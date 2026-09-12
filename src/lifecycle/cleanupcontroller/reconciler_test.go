@@ -324,6 +324,127 @@ func TestDiscoverClassifiesExactOrphanAsReviewOnly(t *testing.T) {
 	}
 }
 
+func TestDiscoverWaitsForPostTerminalMoveInventory(t *testing.T) {
+	for name, moveStatus := range map[string]volumeapi.MoveStatus{
+		"succeeded": {Phase: "Succeeded"},
+		"recovered": {Phase: "Blocked", RecoveryPhase: "Recovered"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, existing := fixture(t)
+			if err := store.UpdateStatus(context.Background(), existing.Name, existing.UID, cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview, Reason: "fixture"}); err != nil {
+				t.Fatal(err)
+			}
+			incoming := existing.Spec.Target
+			incoming.CopyID, incoming.Role = "terminal-incoming", volume.RoleIncoming
+			transitionedAt := time.Unix(10, 0).UTC()
+			moveStatus.LastTransitionTime = transitionedAt.Format(time.RFC3339Nano)
+			moveStatus.IncomingCopy = &incoming
+			pool := readyPool(incoming, volumeapi.CopyObservation{Marker: "incoming", Identity: &incoming, Present: true})
+			pool.Status.Inventory.ObservedAt = metav1.NewTime(transitionedAt.Add(-time.Second))
+			inventory := &countingInventory{inventory: inventory{
+				pools: []volumeapi.Pool{pool}, volumes: map[string]volumeapi.State{},
+				moves: []volumeapi.Move{{Name: "terminal-move", Spec: volumeapi.MoveSpec{VolumeID: incoming.VolumeID}, Status: moveStatus}},
+			}}
+			reconciler := &Reconciler{
+				Store: store, Operator: &operator{}, Client: orphanKubernetesClient(), Namespace: "system",
+				Inventory: inventory, Interval: time.Second, Now: func() time.Time { return transitionedAt.Add(time.Minute) },
+			}
+			if err := reconciler.Discover(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			requests, err := store.List(context.Background())
+			if err != nil || len(requests) != 1 {
+				t.Fatalf("stale inventory created an orphan review: requests=%#v err=%v", requests, err)
+			}
+
+			inventory.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(transitionedAt.Add(time.Second))
+			if err := reconciler.Discover(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			requests, err = store.List(context.Background())
+			if err != nil || len(requests) != 2 {
+				t.Fatalf("fresh inventory did not expose the persistent orphan: requests=%#v err=%v", requests, err)
+			}
+			for _, request := range requests {
+				if request.Spec.Target == incoming && (request.Status.Phase != cleanupapi.PhaseNeedsReview || request.Status.Reason != "OrphanPreserved") {
+					t.Fatalf("unexpected terminal move orphan review: %#v", request)
+				}
+			}
+		})
+	}
+}
+
+func TestApprovedOrphanWaitsForPostTerminalMoveInventory(t *testing.T) {
+	store, existing := fixture(t)
+	if err := store.UpdateStatus(context.Background(), existing.Name, existing.UID, cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview, Reason: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	target := existing.Spec.Target
+	target.CopyID, target.Role = "approved-terminal-incoming", volume.RoleIncoming
+	request, err := store.Ensure(context.Background(), cleanupapi.Spec{
+		OperationID: "review-approved-terminal-incoming", Target: target, Reason: "OrphanReclaim", Approved: true,
+		Authority: cleanupapi.Authority{Kind: "Namespace", Name: "kube-system", UID: target.InstallationID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transitionedAt := time.Unix(10, 0).UTC()
+	pool := readyPool(target, volumeapi.CopyObservation{Marker: "incoming", Identity: &target, Present: true})
+	pool.Status.Inventory.ObservedAt = metav1.NewTime(transitionedAt.Add(-time.Second))
+	inventory := &countingInventory{inventory: inventory{
+		pools: []volumeapi.Pool{pool}, volumes: map[string]volumeapi.State{},
+		moves: []volumeapi.Move{{Name: "terminal-move", Spec: volumeapi.MoveSpec{VolumeID: target.VolumeID}, Status: volumeapi.MoveStatus{
+			Phase: "Succeeded", LastTransitionTime: transitionedAt.Format(time.RFC3339Nano), IncomingCopy: &target,
+		}}},
+	}}
+	worker := &operator{}
+	reconciler := &Reconciler{
+		Store: store, Operator: worker, Client: orphanKubernetesClient(), Namespace: "system",
+		Inventory: inventory, Interval: time.Second, Now: func() time.Time { return transitionedAt.Add(time.Minute) },
+	}
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.Get(context.Background(), request.Name)
+	if err != nil || current.Status.Phase != cleanupapi.PhaseNeedsReview || current.Status.Reason != "MoveObservationPending" || worker.calls != 0 {
+		t.Fatalf("approved cleanup crossed terminal Move fence: cleanup=%#v calls=%d err=%v", current, worker.calls, err)
+	}
+
+	inventory.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(transitionedAt.Add(time.Second))
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current, err = store.Get(context.Background(), request.Name)
+	if err != nil || current.Status.Phase != cleanupapi.PhaseCompleted || worker.calls != 1 {
+		t.Fatalf("fresh post-terminal inventory did not release approved cleanup: cleanup=%#v calls=%d err=%v", current, worker.calls, err)
+	}
+}
+
+func TestTerminalMoveObservationFenceFailsClosed(t *testing.T) {
+	target := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid", VolumeID: "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		VolumeUID: "volume-uid", CopyID: "incoming", NodeName: "node", Role: volume.RoleIncoming,
+	}
+	move := volumeapi.Move{Status: volumeapi.MoveStatus{Phase: "Succeeded", IncomingCopy: &target}}
+	pool := readyPool(target, volumeapi.CopyObservation{Marker: "incoming", Identity: &target, Present: true})
+	if !volumeapi.TerminalMoveInventoryPending(move, target, pool) {
+		t.Fatal("missing terminal transition time did not preserve the observed copy")
+	}
+	move.Status.LastTransitionTime = time.Unix(10, 0).UTC().Format(time.RFC3339Nano)
+	pool.Status.Inventory = nil
+	if !volumeapi.TerminalMoveInventoryPending(move, target, pool) {
+		t.Fatal("unavailable inventory did not preserve the observed copy")
+	}
+	if !volumeapi.TerminalMoveInventoryPending(move, target, volumeapi.Pool{}) {
+		t.Fatal("missing Pool identity did not preserve the observed copy")
+	}
+	unrelated := target
+	unrelated.CopyID = "other-copy"
+	if volumeapi.TerminalMoveInventoryPending(move, unrelated, pool) {
+		t.Fatal("terminal Move fenced an unrelated copy")
+	}
+}
+
 func TestDiscoverReopensReviewFenceWhenCompletedCopyReappears(t *testing.T) {
 	store, request := fixture(t)
 	worker := &operator{}
@@ -425,7 +546,7 @@ func TestDiscoverFindsSupersededCopyWhilePersistentVolumeRemains(t *testing.T) {
 				UID: target.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: current.NodeName, CurrentCopy: &current,
 			}},
 			moves: []volumeapi.Move{{Name: "recovered", Spec: volumeapi.MoveSpec{VolumeID: target.VolumeID}, Status: volumeapi.MoveStatus{
-				Phase: "Blocked", RecoveryPhase: "Recovered", IncomingCopy: &target,
+				Phase: "Blocked", RecoveryPhase: "Recovered", LastTransitionTime: time.Unix(0, 0).UTC().Format(time.RFC3339Nano), IncomingCopy: &target,
 			}}},
 		},
 	}
@@ -752,7 +873,9 @@ func TestOrphanClassificationPreservesEveryUnprovenBoundary(t *testing.T) {
 			s.moves = []volumeapi.Move{{Name: "move", Status: volumeapi.MoveStatus{Phase: "Copying", SourceCopy: &target}}}
 		}, reason: "MoveAuthorityPresent"},
 		"recovered move released authority": {mutate: func(s *orphanSnapshot) {
-			s.moves = []volumeapi.Move{{Name: "move", Status: volumeapi.MoveStatus{Phase: "Blocked", RecoveryPhase: "Recovered", SourceCopy: &target}}}
+			s.moves = []volumeapi.Move{{Name: "move", Status: volumeapi.MoveStatus{
+				Phase: "Blocked", RecoveryPhase: "Recovered", LastTransitionTime: time.Unix(0, 0).UTC().Format(time.RFC3339Nano), SourceCopy: &target,
+			}}}
 		}, ready: true, reason: "OrphanReady"},
 		"superseded volume and persistent volume released exact copy": {mutate: func(s *orphanSnapshot) {
 			current := target

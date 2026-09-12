@@ -81,7 +81,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 		volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList",
 	}, poolObject)
 	registry := &volumeapi.Registry{Client: dynamicClient}
-	now := metav1.NewTime(time.Now().UTC())
+	now := metav1.NewTime(time.Now().UTC().Add(-time.Minute))
 	poolStatus := volumeapi.PoolStatus{
 		ObservedGeneration: 1, LastProbeTime: now,
 		Conditions: []metav1.Condition{
@@ -116,9 +116,10 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	if _, err := dynamicClient.Resource(volumeapi.MoveResource).Create(context.Background(), recoveredMove, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), string(recoveredMove.GetUID()), volumeapi.MoveStatus{
-		Phase: "Blocked", RecoveryPhase: "Recovered", IncomingCopy: &target,
-	}); err != nil {
+	recoveredStatus := volumeapi.MoveStatus{
+		Phase: "Blocked", RecoveryPhase: "Recovered", LastTransitionTime: now.Add(-time.Second).Format(time.RFC3339Nano), IncomingCopy: &target,
+	}
+	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), string(recoveredMove.GetUID()), recoveredStatus); err != nil {
 		t.Fatal(err)
 	}
 	current := target
@@ -144,6 +145,22 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err != nil {
 		t.Fatalf("superseded copy retained recovered Move or volume-wide authority: %v", err)
 	}
+	recoveredStatus.LastTransitionTime = now.Format(time.RFC3339Nano)
+	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), string(recoveredMove.GetUID()), recoveredStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err == nil {
+		t.Fatal("pre-terminal Pool inventory authorized orphan cleanup")
+	}
+	postTerminal := metav1.NewTime(now.Add(time.Second))
+	poolStatus.LastProbeTime = postTerminal
+	poolStatus.Inventory.ObservedAt = postTerminal
+	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err != nil {
+		t.Fatalf("post-terminal Pool inventory did not release orphan cleanup: %v", err)
+	}
 	deletingPool, err := dynamicClient.Resource(volumeapi.PoolResource).Get(context.Background(), target.PoolName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -163,6 +180,10 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 		t.Fatalf("terminating Pool rejected exact orphan cleanup: %v", err)
 	}
 	withinConfiguredWindow := metav1.NewTime(time.Now().UTC().Add(-5 * time.Minute))
+	recoveredStatus.LastTransitionTime = withinConfiguredWindow.Add(-time.Second).Format(time.RFC3339Nano)
+	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), string(recoveredMove.GetUID()), recoveredStatus); err != nil {
+		t.Fatal(err)
+	}
 	poolStatus.LastProbeTime = withinConfiguredWindow
 	poolStatus.Inventory.ObservedAt = withinConfiguredWindow
 	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
