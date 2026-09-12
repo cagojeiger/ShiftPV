@@ -276,6 +276,44 @@ func TestBeginCreatePersistsIdentityBeforeReady(t *testing.T) {
 	}
 }
 
+func TestBeginCreateRejectsReplacementVolumeBeforeStatusWrite(t *testing.T) {
+	ctx := context.Background()
+	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Namespace",
+		"metadata": map[string]any{"name": installationNamespace, "uid": "installation-uid"},
+	}}
+	registeredPool := pool("pool-a", "node-a")
+	registeredPool.SetUID("pool-uid")
+	const volumeID = "shiftpv-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	original := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
+		"metadata": map[string]any{"name": volumeID, "uid": "original-uid"},
+		"spec":     map[string]any{"volumeID": volumeID},
+	}}
+	replacement := original.DeepCopy()
+	replacement.SetUID("replacement-uid")
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", namespaceResource: "NamespaceList",
+	}, clusterIdentity, registeredPool, replacement)
+	getCalls := 0
+	client.PrependReactor("get", "shiftpvvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		getCalls++
+		if getCalls == 1 {
+			return true, original.DeepCopy(), nil
+		}
+		return false, nil, nil
+	})
+	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
+	if _, err := registry.BeginCreate(ctx, volumeID, "node-a"); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("replacement Volume creation error = %v", err)
+	}
+	current, err := registry.Get(ctx, volumeID)
+	if err != nil || current.UID != "replacement-uid" || current.Phase != "" || current.CurrentCopy != nil {
+		t.Fatalf("replacement Volume received stale creation state: state=%#v err=%v", current, err)
+	}
+}
+
 func TestBeginCreateResumesExactPendingIdentityWithInvalidInventory(t *testing.T) {
 	ctx := context.Background()
 	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}

@@ -304,6 +304,9 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 			CurrentCopy:         &copy,
 		}
 		if err := r.mutateState(ctx, volumeID, func(current State) (State, error) {
+			if current.UID != next.UID {
+				return State{}, fmt.Errorf("%w: ShiftPVVolume %q UID changed from %q to %q", ErrStateConflict, volumeID, next.UID, current.UID)
+			}
 			if current.Phase != "" {
 				return current, nil
 			}
