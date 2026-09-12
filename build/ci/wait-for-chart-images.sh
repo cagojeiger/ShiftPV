@@ -30,6 +30,7 @@ rendered=$(helm template shiftpv "${repo_root}/charts/shiftpv" --namespace shift
 if [[ "${chart_app_version}" != "${controller_version}" ]] ||
 	! grep -Fq "image: \"${controller_image}\"" <<<"${rendered}" ||
 	! grep -Fq "image: \"${node_image}\"" <<<"${rendered}" ||
+	! grep -Fq -- "--helper-image=${controller_image}" <<<"${rendered}" ||
 	! grep -Fq -- "--mobility-helper-image=${controller_image}" <<<"${rendered}"; then
 	echo "::error::chart defaults do not match versions/controller and versions/node" >&2
 	exit 1
