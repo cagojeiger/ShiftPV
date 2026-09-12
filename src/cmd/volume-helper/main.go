@@ -571,7 +571,14 @@ func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interfa
 	if err != nil {
 		return err
 	}
+	pool, err := registry.PoolForIdentity(ctx, cleanup.Spec.Target.PoolName, cleanup.Spec.Target.PoolUID, cleanup.Spec.Target.NodeName)
+	if err != nil || pool.Name != cleanup.Spec.Target.PoolName || pool.UID != cleanup.Spec.Target.PoolUID {
+		return fmt.Errorf("orphan Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	}
 	for _, move := range moves {
+		if !effectStarted && volumeapi.TerminalMoveInventoryPending(move, cleanup.Spec.Target, pool) {
+			return fmt.Errorf("terminal ShiftPVMove %q is waiting for a newer Pool inventory: %w", move.Name, volumeapi.ErrStateConflict)
+		}
 		if move.Status.Phase == "Succeeded" || move.Status.RecoveryPhase == "Recovered" {
 			continue
 		}
@@ -580,10 +587,6 @@ func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interfa
 				return fmt.Errorf("ShiftPVMove %q still has orphan authority: %w", move.Name, volumeapi.ErrStateConflict)
 			}
 		}
-	}
-	pool, err := registry.PoolForIdentity(ctx, cleanup.Spec.Target.PoolName, cleanup.Spec.Target.PoolUID, cleanup.Spec.Target.NodeName)
-	if err != nil || pool.Name != cleanup.Spec.Target.PoolName || pool.UID != cleanup.Spec.Target.PoolUID {
-		return fmt.Errorf("orphan Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 	}
 	now := time.Now().UTC()
 	if ready, reason := pool.CleanupReadyAt(now, poolReadinessStaleAfter); !ready {

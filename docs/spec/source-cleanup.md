@@ -131,6 +131,7 @@ observe without write
 | 초과 | `inventory.truncated=true`; 누락을 부재 증거로 사용하지 않고 Pool을 신규 provisioning·이동 대상에서 제외 |
 | 손상 marker·unrecorded path | `problem`으로 보고하고 보존 |
 | 실제 kubelet publication | `published=true`; orphan 실행 차단 |
+| terminal Move 직후 | `lastTransitionTime` 이후의 exact Pool inventory가 도착할 때까지 해당 copy를 Move 참조로 보존 |
 | API owner 없는 valid copy | unapproved `OrphanReclaim` + `NeedsReview` |
 | 외부 directory | ShiftPV marker가 없으면 삭제 대상으로 채택하지 않음 |
 

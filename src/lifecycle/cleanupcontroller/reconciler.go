@@ -186,6 +186,9 @@ func (s orphanSnapshot) classify(target volume.CopyIdentity, reservationUID stri
 		return false, "PersistentVolumePresent", "data is preserved while a PersistentVolume still references this volume; remove or restore the PV authority and wait for re-evaluation"
 	}
 	for _, move := range s.moves {
+		if terminalMoveObservationPending(s.pools, move, target) {
+			return false, "MoveObservationPending", "data is preserved until the exact Pool inventory is observed after the terminal Move"
+		}
 		if move.Status.Phase == "Succeeded" || move.Status.RecoveryPhase == "Recovered" {
 			continue
 		}
@@ -299,11 +302,8 @@ func (r *Reconciler) discover(ctx context.Context, snapshot orphanSnapshot) erro
 	}
 	for _, move := range snapshot.moves {
 		state, active := snapshot.volumes[move.Spec.VolumeID]
-		if !active || state.ActiveMove != move.Name {
-			continue
-		}
 		for _, identity := range []*volume.CopyIdentity{move.Status.SourceCopy, move.Status.IncomingCopy, move.Status.DestinationCopy} {
-			if identity != nil {
+			if identity != nil && ((active && state.ActiveMove == move.Name) || terminalMoveObservationPending(snapshot.pools, move, *identity)) {
 				referenced[*identity] = struct{}{}
 			}
 		}
@@ -384,6 +384,16 @@ func (r *Reconciler) discover(ctx context.Context, snapshot orphanSnapshot) erro
 		}
 	}
 	return nil
+}
+
+func terminalMoveObservationPending(pools []volumeapi.Pool, move volumeapi.Move, identity volume.CopyIdentity) bool {
+	for _, pool := range pools {
+		if pool.Name != identity.PoolName || pool.UID != identity.PoolUID || pool.NodeName != identity.NodeName {
+			continue
+		}
+		return volumeapi.TerminalMoveInventoryPending(move, identity, pool)
+	}
+	return volumeapi.TerminalMoveInventoryPending(move, identity, volumeapi.Pool{})
 }
 
 func observedAfterSettlement(pool volumeapi.Pool, settledAt string) bool {
