@@ -44,13 +44,14 @@ func (f *sequencedPoolRegistry) PoolForNode(context.Context, string) (volumeapi.
 }
 
 type fakeVolumeRegistry struct {
-	state         volumeapi.State
-	getStates     []volumeapi.State
-	getErr        error
-	setErr        error
-	publishedNode string
-	published     bool
-	getCalls      atomic.Int32
+	state          volumeapi.State
+	getStates      []volumeapi.State
+	getErr         error
+	setErr         error
+	publishedNode  string
+	published      bool
+	getCalls       atomic.Int32
+	reconcileCalls atomic.Int32
 }
 
 type identityVolumeRegistryFake struct {
@@ -71,6 +72,7 @@ func (f *identityVolumeRegistryFake) BeginPublish(_ context.Context, _ string, n
 }
 
 func (f *identityVolumeRegistryFake) ReconcilePublished(_ context.Context, _ string, node string, copy volume.CopyIdentity, published bool) error {
+	f.reconcileCalls.Add(1)
 	if node != f.state.OwnerNode || copy != f.copy {
 		return volumeapi.ErrStateConflict
 	}
@@ -97,6 +99,7 @@ func (f *fakeVolumeRegistry) BeginPublish(_ context.Context, _ string, node stri
 }
 
 func (f *fakeVolumeRegistry) ReconcilePublished(_ context.Context, _ string, node string, copy volume.CopyIdentity, published bool) error {
+	f.reconcileCalls.Add(1)
 	if f.state.CurrentCopy == nil || *f.state.CurrentCopy != copy || f.state.OwnerNode != node {
 		return volumeapi.ErrStateConflict
 	}
@@ -606,6 +609,76 @@ func TestNodeUnpublishMissingVolumeStillRemovesValidatedTarget(t *testing.T) {
 	}
 	if binder.unpublished != request.TargetPath {
 		t.Fatalf("absent volume target was not unmounted: %#v", binder)
+	}
+}
+
+func TestNodeUnpublishRemovesTargetWhenPoolIsUnavailable(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	service.Pools = fakePoolRegistry{err: apierrors.NewNotFound(schema.GroupResource{Group: "shiftpv.io", Resource: "shiftpvpools"}, "pool-a")}
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: "shiftpv-0123456789abcdef0123456789abcdef", TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if binder.unpublished != request.TargetPath || registry.reconcileCalls.Load() != 0 {
+		t.Fatalf("unavailable Pool blocked target teardown or changed publication state: binder=%#v reconciles=%d", binder, registry.reconcileCalls.Load())
+	}
+}
+
+func TestNodeUnpublishRemovesTargetWhenPoolIdentityWasReplaced(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	copy := *registry.state.CurrentCopy
+	service.Pools = fakePoolRegistry{pool: volumeapi.Pool{
+		Name: copy.PoolName, UID: "replacement-pool-uid", NodeName: copy.NodeName, MountPath: "/pool",
+	}}
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: copy.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if binder.unpublished != request.TargetPath || registry.reconcileCalls.Load() != 0 {
+		t.Fatalf("replacement Pool blocked target teardown or changed publication state: binder=%#v reconciles=%d", binder, registry.reconcileCalls.Load())
+	}
+}
+
+func TestNodeUnpublishRemovesTargetWhenLocalPoolIdentityCannotBeOpened(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	if err := os.RemoveAll(filepath.Join(service.HostRoot, "pool", ".shiftpv")); err != nil {
+		t.Fatal(err)
+	}
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: registry.state.CurrentCopy.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if binder.unpublished != request.TargetPath || registry.reconcileCalls.Load() != 0 {
+		t.Fatalf("unverifiable local Pool blocked target teardown or changed publication state: binder=%#v reconciles=%d", binder, registry.reconcileCalls.Load())
+	}
+}
+
+func TestNodeUnpublishSkipsPublicationReconcileWhenPoolChangesUnderLock(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	copy := *registry.state.CurrentCopy
+	pools := &sequencedPoolRegistry{pools: []volumeapi.Pool{
+		{Name: copy.PoolName, UID: copy.PoolUID, NodeName: copy.NodeName, MountPath: "/pool"},
+		{Name: copy.PoolName, UID: "replacement-pool-uid", NodeName: copy.NodeName, MountPath: "/pool"},
+	}}
+	service.Pools = pools
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: copy.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if pools.calls.Load() != 2 || binder.unpublished != request.TargetPath || registry.reconcileCalls.Load() != 0 {
+		t.Fatalf("racing Pool replacement changed publication state: calls=%d binder=%#v reconciles=%d", pools.calls.Load(), binder, registry.reconcileCalls.Load())
 	}
 }
 
