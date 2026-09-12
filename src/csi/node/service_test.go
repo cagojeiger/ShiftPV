@@ -30,6 +30,19 @@ func (f fakePoolRegistry) PoolForNode(context.Context, string) (volumeapi.Pool, 
 	return f.pool, f.err
 }
 
+type sequencedPoolRegistry struct {
+	pools []volumeapi.Pool
+	calls atomic.Int32
+}
+
+func (f *sequencedPoolRegistry) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+	call := int(f.calls.Add(1)) - 1
+	if call >= len(f.pools) {
+		call = len(f.pools) - 1
+	}
+	return f.pools[call], nil
+}
+
 type fakeVolumeRegistry struct {
 	state         volumeapi.State
 	getErr        error
@@ -144,6 +157,40 @@ func TestNodePublishUsesRegisteredNodeMountPath(t *testing.T) {
 	want := filepath.Join(service.HostRoot, "srv", "storage-a", "volumes", validPublishRequest().VolumeId)
 	if binder.publishedSource != want {
 		t.Fatalf("published source = %q, want %q", binder.publishedSource, want)
+	}
+}
+
+func TestNodePublishRejectsReplacementPoolIdentity(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	copy := *registry.state.CurrentCopy
+	service.Pools = fakePoolRegistry{pool: volumeapi.Pool{
+		Name: copy.PoolName, UID: "replacement-pool-uid", NodeName: copy.NodeName, MountPath: "/pool",
+	}}
+	if _, err := service.NodePublishVolume(context.Background(), validPublishRequest()); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("replacement Pool publish code=%s err=%v", status.Code(err), err)
+	}
+	if binder.publishedSource != "" || registry.published {
+		t.Fatalf("replacement Pool reached publish effects: binder=%#v registry=%#v", binder, registry)
+	}
+}
+
+func TestNodePublishRechecksPoolIdentityUnderStorageLock(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	copy := *registry.state.CurrentCopy
+	pools := &sequencedPoolRegistry{pools: []volumeapi.Pool{
+		{Name: copy.PoolName, UID: copy.PoolUID, NodeName: copy.NodeName, MountPath: "/pool"},
+		{Name: copy.PoolName, UID: "replacement-pool-uid", NodeName: copy.NodeName, MountPath: "/pool"},
+	}}
+	service.Pools = pools
+	if _, err := service.NodePublishVolume(context.Background(), validPublishRequest()); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("racing replacement Pool publish code=%s err=%v", status.Code(err), err)
+	}
+	if pools.calls.Load() != 2 || binder.publishedSource != "" || registry.published {
+		t.Fatalf("Pool replacement was not stopped before effects: calls=%d binder=%#v registry=%#v", pools.calls.Load(), binder, registry)
 	}
 }
 

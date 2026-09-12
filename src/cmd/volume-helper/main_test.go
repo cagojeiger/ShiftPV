@@ -86,7 +86,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 		Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "Ready", Message: "ready"}},
 		Inventory:  &volumeapi.PoolInventory{ObservedAt: now, Valid: true, Copies: []volumeapi.CopyObservation{{Marker: "copy", Identity: &target, Present: true}}},
 	}
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.NodeName, poolStatus); err != nil {
+	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
 		t.Fatal(err)
 	}
 	reservation := &corev1.ConfigMap{
@@ -151,7 +151,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 		t.Fatal(err)
 	}
 	poolStatus.Inventory.Copies[0].Published = true
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.NodeName, poolStatus); err != nil {
+	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup); err == nil {
@@ -160,7 +160,7 @@ func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservat
 	poolStatus.Inventory.Copies[0].Published = false
 	poolStatus.Inventory.ObservedAt = metav1.NewTime(time.Now().UTC())
 	poolStatus.LastProbeTime = poolStatus.Inventory.ObservedAt
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.NodeName, poolStatus); err != nil {
+	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.CoreV1().ConfigMaps("system").Delete(context.Background(), volumeID, metav1.DeleteOptions{}); err != nil {

@@ -15,7 +15,7 @@ import (
 
 type Repository interface {
 	PoolForNode(context.Context, string) (volumeapi.Pool, error)
-	SetPoolStatus(context.Context, string, string, volumeapi.PoolStatus) error
+	SetPoolStatus(context.Context, string, string, string, volumeapi.PoolStatus) error
 }
 
 type Reconciler struct {
@@ -80,7 +80,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 		inventory := r.Inventory(ctx, pool, now)
 		status.Inventory = &inventory
 	}
-	return r.Pools.SetPoolStatus(ctx, pool.Name, r.NodeName, status)
+	return r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status)
 }
 
 func (r *Reconciler) reconcileAndLog(ctx context.Context) error {

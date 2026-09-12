@@ -82,14 +82,6 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	if ownerNode != s.NodeName {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume is owned by node %q, not %q", ownerNode, s.NodeName)
 	}
-	poolRoot, err := s.poolRoot(ctx)
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "resolve node pool: %v", err)
-	}
-	source, err := volume.Path(poolRoot, req.GetVolumeId())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
 	if state.CurrentCopy == nil {
 		return nil, status.Error(codes.FailedPrecondition, "identified volume state is required for publish")
 	}
@@ -97,7 +89,25 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	if copy.NodeName != s.NodeName || copy.Role != volume.RoleServing {
 		return nil, status.Error(codes.FailedPrecondition, "serving copy identity does not match this node")
 	}
+	pool, poolRoot, err := s.poolRoot(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "resolve node pool: %v", err)
+	}
+	if !copyMatchesPool(copy, pool) {
+		return nil, status.Error(codes.FailedPrecondition, "serving copy identity does not match the registered node pool")
+	}
+	source, err := volume.Path(poolRoot, req.GetVolumeId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	err = ownership.WithLock(ctx, poolRoot, ownership.PoolIdentity{InstallationID: copy.InstallationID, PoolUID: copy.PoolUID}, req.GetVolumeId(), func(store *ownership.Store) error {
+		freshPool, freshPoolRoot, poolErr := s.poolRoot(ctx)
+		if poolErr != nil {
+			return fmt.Errorf("refresh node pool before publish: %w", poolErr)
+		}
+		if freshPoolRoot != poolRoot || !copyMatchesPool(copy, freshPool) {
+			return fmt.Errorf("registered node pool changed before publish: %w", volumeapi.ErrStateConflict)
+		}
 		fresh, getErr := s.Volumes.Get(ctx, req.GetVolumeId())
 		if getErr != nil || fresh.CurrentCopy == nil || *fresh.CurrentCopy != copy || fresh.Phase != volumeapi.PhaseReady || fresh.OwnerNode != s.NodeName {
 			return fmt.Errorf("volume publish authority changed: %w", errors.Join(getErr, volumeapi.ErrStateConflict))
@@ -161,7 +171,7 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 		return nil, status.Error(codes.FailedPrecondition, "identified serving copy is required for unpublish")
 	}
 	copy := *state.CurrentCopy
-	poolRoot, err := s.poolRoot(ctx)
+	_, poolRoot, err := s.poolRoot(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "resolve node pool before unpublish: %v", err)
 	}
@@ -226,20 +236,24 @@ func (s *Service) lockPublication(volumeID string) func() {
 	return func() { _ = s.publicationLocks.UnlockKey(volumeID) }
 }
 
-func (s *Service) poolRoot(ctx context.Context) (string, error) {
+func (s *Service) poolRoot(ctx context.Context) (volumeapi.Pool, string, error) {
 	pool, err := s.Pools.PoolForNode(ctx, s.NodeName)
 	if err != nil {
-		return "", err
+		return volumeapi.Pool{}, "", err
 	}
 	mountPath := filepath.Clean(pool.MountPath)
 	if !filepath.IsAbs(mountPath) || mountPath == string(filepath.Separator) {
-		return "", fmt.Errorf("pool mountPath %q must be an absolute non-root path", pool.MountPath)
+		return volumeapi.Pool{}, "", fmt.Errorf("pool mountPath %q must be an absolute non-root path", pool.MountPath)
 	}
 	hostRoot := filepath.Clean(s.HostRoot)
 	if !filepath.IsAbs(hostRoot) {
-		return "", fmt.Errorf("host root %q must be absolute", s.HostRoot)
+		return volumeapi.Pool{}, "", fmt.Errorf("host root %q must be absolute", s.HostRoot)
 	}
-	return filepath.Join(hostRoot, strings.TrimPrefix(mountPath, string(filepath.Separator))), nil
+	return pool, filepath.Join(hostRoot, strings.TrimPrefix(mountPath, string(filepath.Separator))), nil
+}
+
+func copyMatchesPool(copy volume.CopyIdentity, pool volumeapi.Pool) bool {
+	return copy.PoolName == pool.Name && copy.PoolUID == pool.UID && copy.NodeName == pool.NodeName
 }
 
 func validateCapability(capability *csi.VolumeCapability) error {

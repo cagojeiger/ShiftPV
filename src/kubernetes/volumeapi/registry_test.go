@@ -441,8 +441,9 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 	}
 }
 
-func TestRegistrySetPoolStatusUsesNodeIdentity(t *testing.T) {
+func TestRegistrySetPoolStatusUsesPoolIdentity(t *testing.T) {
 	object := pool("pool-a", "node-a")
+	object.SetUID("pool-a-uid")
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		PoolResource: "ShiftPVPoolList",
 	}, object)
@@ -450,10 +451,13 @@ func TestRegistrySetPoolStatusUsesNodeIdentity(t *testing.T) {
 	status := PoolStatus{ObservedGeneration: 1, LastProbeTime: metav1.NewTime(time.Now()), Conditions: []metav1.Condition{{
 		Type: PoolConditionReady, Status: metav1.ConditionFalse, Reason: "ReadOnly", Message: "read-only",
 	}}}
-	if err := registry.SetPoolStatus(context.Background(), "pool-a", "node-b", status); !errors.Is(err, ErrStateConflict) {
+	if err := registry.SetPoolStatus(context.Background(), "pool-a", "pool-a-uid", "node-b", status); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("foreign node update error = %v", err)
 	}
-	if err := registry.SetPoolStatus(context.Background(), "pool-a", "node-a", status); err != nil {
+	if err := registry.SetPoolStatus(context.Background(), "pool-a", "replacement-uid", "node-a", status); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("replacement Pool update error = %v", err)
+	}
+	if err := registry.SetPoolStatus(context.Background(), "pool-a", "pool-a-uid", "node-a", status); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := registry.PoolForNode(context.Background(), "node-a")

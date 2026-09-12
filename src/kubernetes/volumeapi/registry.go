@@ -684,18 +684,21 @@ func poolInventoryReadyAt(pool Pool, now time.Time, staleAfter time.Duration) (b
 	return true, ""
 }
 
-func (r *Registry) SetPoolStatus(ctx context.Context, name, nodeName string, status PoolStatus) error {
+func (r *Registry) SetPoolStatus(ctx context.Context, name, uid, nodeName string, status PoolStatus) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	if name == "" || nodeName == "" {
-		return fmt.Errorf("ShiftPVPool name and node name are required")
+	if name == "" || uid == "" || nodeName == "" {
+		return fmt.Errorf("ShiftPVPool name, UID, and node name are required")
 	}
 	resource := r.Client.Resource(PoolResource)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		object, err := resource.Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("read ShiftPVPool status: %w", err)
+		}
+		if string(object.GetUID()) != uid {
+			return fmt.Errorf("%w: ShiftPVPool %q UID changed from %q to %q", ErrStateConflict, name, uid, object.GetUID())
 		}
 		registeredNode, _, _ := unstructured.NestedString(object.Object, "spec", "nodeName")
 		if registeredNode != nodeName {
