@@ -76,12 +76,23 @@ capture_evidence() {
 }
 
 snapshot_non_shiftpv_specs() {
-	local label=$1
-	k get deployments.apps,statefulsets.apps -A -o json | jq -S --arg system "${SYSTEM_NAMESPACE}" --arg prefix "${TEST_PREFIX}-" '
+	local label=$1 autoscaled_workloads
+	autoscaled_workloads=$(k get horizontalpodautoscalers.autoscaling -A -o json | jq -c '
+		[.items[] | {namespace: .metadata.namespace, kind: .spec.scaleTargetRef.kind, name: .spec.scaleTargetRef.name}]')
+	k get deployments.apps,statefulsets.apps -A -o json | jq -S \
+		--arg system "${SYSTEM_NAMESPACE}" --arg prefix "${TEST_PREFIX}-" \
+		--argjson autoscaled "${autoscaled_workloads}" '
 		[.items[]
 		 | select(.metadata.namespace != $system)
 		 | select((.metadata.namespace | startswith($prefix)) | not)
-		 | {apiVersion, kind, metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid, labels: .metadata.labels, annotations: .metadata.annotations}, spec}]
+		 | . as $workload
+		 | {apiVersion, kind, metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid, labels: .metadata.labels, annotations: .metadata.annotations},
+		    spec: (if any($autoscaled[];
+		      .namespace == $workload.metadata.namespace and
+		      .kind == $workload.kind and
+		      .name == $workload.metadata.name)
+		    then ($workload.spec | del(.replicas))
+		    else $workload.spec end)}]
 		| sort_by(.apiVersion, .kind, .metadata.namespace, .metadata.name)' >"${ARTIFACT_DIR}/${label}-non-shiftpv-workloads.json"
 	k get pvc -A -o json | jq -S --arg prefix "${TEST_PREFIX}-" '
 		[.items[]
@@ -145,7 +156,9 @@ stop_source_node() {
 		# the hard-power stage that requires independent out-of-band recovery.
 		# Run SSH asynchronously because some clients retain the dead connection
 		# even after the host has completed the reboot.
-		ssh_source sudo systemctl reboot --force --force </dev/null >/dev/null 2>&1 &
+		ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" \
+			"${SOURCE_SSH_TARGET}" sudo systemctl reboot --force --force \
+			</dev/null >/dev/null 2>&1 &
 		reboot_ssh_pid=$!
 		deadline=$((SECONDS + NODE_TIMEOUT_SECONDS))
 		while ((SECONDS < deadline)); do

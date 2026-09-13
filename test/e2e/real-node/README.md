@@ -130,7 +130,10 @@ invariants:
   safe baseline after cleanup. Move journals may remain only in a settled
   terminal state with no finalizer or capacity hold.
 - Both pools finish `Ready` with fresh, valid, non-truncated inventory.
-- Non-test workloads and existing StorageClasses/PVs/PVCs are unchanged.
+- Non-test workload configuration and existing StorageClasses/PVs/PVCs are
+  unchanged. A HorizontalPodAutoscaler may change its target's live
+  `spec.replicas`; that controller-owned field is excluded while the rest of
+  the workload spec remains under exact comparison.
 
 Archive the resource snapshots, events, component logs, node journal, checksums,
 timestamps, and capacity readings for each run. A green command without this
