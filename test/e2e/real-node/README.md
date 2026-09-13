@@ -11,7 +11,8 @@ has passed and all test resources have returned to the recorded baseline.
 
 1. **Read-only preflight**: prove exact context, nodes, immutable candidate
    images, empty ShiftPV state, healthy pools/inventory, non-default StorageClass,
-   SSH recovery access, and a fault node with no non-DaemonSet workload.
+   SSH recovery access, and either an isolated fault node or an exact reviewed
+   shared-workload inventory.
 2. **Service interruption**: stop and restore the worker node's Kubernetes
    service during one precommit move and one postcommit source-cleanup move.
 3. **Operating-system reboot**: repeat the two boundaries with a worker reboot.
@@ -25,8 +26,11 @@ has passed and all test resources have returned to the recorded baseline.
 
 ## Preflight
 
-`preflight.sh` is intentionally read-only. It never relaxes its workload gate;
-the fault node must be dedicated to the qualification apart from DaemonSets.
+`preflight.sh` is intentionally read-only. Its default workload gate requires a
+dedicated fault node apart from DaemonSets. For an explicitly approved shared
+node maintenance window, hash the exact sorted inventory printed by a blocked
+run and pass it as `EXPECTED_NON_DAEMONSET_PODS_SHA256`. A changed Pod name,
+owner, or count blocks the run rather than broadening the approval.
 
 ```bash
 KUBECTL_CONTEXT=lab \
@@ -36,6 +40,7 @@ FAULT_NODE=lab-worker-2 \
 FAULT_SSH_TARGET=ubuntu@lab-worker-2 \
 EXPECTED_CONTROLLER_IMAGE=registry.example/shiftpv-controller:candidate@sha256:... \
 EXPECTED_NODE_IMAGE=registry.example/shiftpv-node:candidate@sha256:... \
+EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
 ./test/e2e/real-node/preflight.sh
 ```
 

@@ -22,11 +22,13 @@ Optional environment:
   EXPECTED_NODE_COUNT=2
   MAX_INVENTORY_AGE_SECONDS=120
   SSH_CONNECT_TIMEOUT=5
+  EXPECTED_NON_DAEMONSET_PODS_SHA256=
 
 The script does not cordon, drain, restart, reboot, power off, create, patch, or
-delete anything. It exits non-zero when the proposed fault node is not isolated
-from non-DaemonSet workloads or any storage identity/capacity prerequisite is
-ambiguous.
+delete anything. By default it requires a fault node without non-DaemonSet
+workloads. A reviewed shared-node maintenance window can instead provide the
+SHA-256 of the exact sorted workload inventory. Any inventory change blocks the
+run.
 EOF
 }
 
@@ -42,6 +44,7 @@ STORAGE_CLASS=${STORAGE_CLASS:-shiftpv}
 EXPECTED_NODE_COUNT=${EXPECTED_NODE_COUNT:-2}
 MAX_INVENTORY_AGE_SECONDS=${MAX_INVENTORY_AGE_SECONDS:-120}
 SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-5}
+EXPECTED_NON_DAEMONSET_PODS_SHA256=${EXPECTED_NON_DAEMONSET_PODS_SHA256:-}
 
 blocked=0
 block() {
@@ -215,9 +218,25 @@ unsafe_pods=$(k get pods -A --field-selector "spec.nodeName=${FAULT_NODE}" -o js
 	.items[]
 	| select(.status.phase != "Succeeded" and .status.phase != "Failed")
 	| select((.metadata.ownerReferences[0].kind // "") != "DaemonSet")
-	| "\(.metadata.namespace)/\(.metadata.name) owner=\(.metadata.ownerReferences[0].kind // "none")/\(.metadata.ownerReferences[0].name // "none")"' || true)
+	| "\(.metadata.namespace)/\(.metadata.name) owner=\(.metadata.ownerReferences[0].kind // "none")/\(.metadata.ownerReferences[0].name // "none")"' \
+	| sort || true)
 if [[ -z "${unsafe_pods}" ]]; then
 	pass "fault node has no non-DaemonSet workload: ${FAULT_NODE}"
+elif [[ -n "${EXPECTED_NON_DAEMONSET_PODS_SHA256}" ]]; then
+	if command -v sha256sum >/dev/null 2>&1; then
+		actual_pods_sha256=$(printf '%s\n' "${unsafe_pods}" | sha256sum | awk '{print $1}')
+	else
+		actual_pods_sha256=$(printf '%s\n' "${unsafe_pods}" | shasum -a 256 | awk '{print $1}')
+	fi
+	if [[ "${EXPECTED_NON_DAEMONSET_PODS_SHA256}" =~ ^[0-9a-f]{64}$ && "${actual_pods_sha256}" == "${EXPECTED_NON_DAEMONSET_PODS_SHA256}" ]]; then
+		workload_count=$(wc -l <<<"${unsafe_pods}" | tr -d ' ')
+		pass "fault node matches the reviewed shared-workload baseline: ${FAULT_NODE} count=${workload_count} sha256=${actual_pods_sha256}"
+		while IFS= read -r pod; do
+			[[ -z "${pod}" ]] || printf '      %s\n' "${pod}"
+		done <<<"${unsafe_pods}"
+	else
+		block "fault node shared-workload baseline changed: ${FAULT_NODE} expected=${EXPECTED_NON_DAEMONSET_PODS_SHA256} actual=${actual_pods_sha256}"
+	fi
 else
 	block "fault node still hosts non-DaemonSet workloads: ${FAULT_NODE}"
 	while IFS= read -r pod; do
