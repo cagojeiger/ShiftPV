@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -17,9 +19,10 @@ import (
 )
 
 const (
-	admissionNamespaceLabel = "shiftpv.io/admission"
-	placementHoldName       = "shiftpv.io/placement-hold"
-	placementAnnotationKey  = "shiftpv.io/placement"
+	admissionNamespaceLabel     = "shiftpv.io/admission"
+	placementHoldName           = "shiftpv.io/placement-hold"
+	placementAnnotationKey      = "shiftpv.io/placement"
+	DefaultMoveJournalRetention = 7 * 24 * time.Hour
 )
 
 type Repository interface {
@@ -54,6 +57,7 @@ type Reconciler struct {
 		Reclaim(context.Context, cleanupapi.Cleanup, *cleanupapi.Store) (cleanupapi.Cleanup, error)
 	}
 	Interval                time.Duration
+	MoveJournalRetention    time.Duration
 	PoolReadinessStaleAfter time.Duration
 	Now                     func() time.Time
 	Recorder                record.EventRecorder
@@ -104,23 +108,13 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 			}
 			continue
 		}
-		if phase == fsm.PhaseSucceeded {
+		if phase == fsm.PhaseSucceeded || (phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered) {
 			if !volumeapi.MoveCleanupSettled(move) {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("retain completed move %s: cleanup is not settled", move.Name))
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("retain terminal move %s: cleanup and capacity are not settled", move.Name))
 				continue
 			}
-			if err := r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID); err != nil {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("release completed move %s: %w", move.Name, err))
-			}
-			continue
-		}
-		if phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered {
-			if !volumeapi.MoveCleanupSettled(move) {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("retain recovered move %s: cleanup and capacity are not settled", move.Name))
-				continue
-			}
-			if err := r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID); err != nil {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("release recovered move %s: %w", move.Name, err))
+			if err := r.reconcileTerminalMove(ctx, move); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile terminal move %s: %w", move.Name, err))
 			}
 			continue
 		}
@@ -132,6 +126,41 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 		}
 	}
 	return errors.Join(reconcileErrors...)
+}
+
+func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.Move) error {
+	if slices.Contains(move.Finalizers, volumeapi.MoveProtectionFinalizer) {
+		return r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID)
+	}
+	if len(move.Finalizers) != 0 {
+		return nil
+	}
+
+	transitionedAt, err := time.Parse(time.RFC3339Nano, move.Status.LastTransitionTime)
+	if err != nil {
+		return fmt.Errorf("retain journal with invalid terminal transition time: %w", err)
+	}
+	now := r.now()
+	if now.Before(transitionedAt) {
+		return fmt.Errorf("retain journal whose terminal transition time is in the future")
+	}
+	retention := r.MoveJournalRetention
+	if retention <= 0 {
+		retention = DefaultMoveJournalRetention
+	}
+	if now.Before(transitionedAt.Add(retention)) {
+		return nil
+	}
+
+	state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("confirm volume no longer references journal: %w", err)
+	}
+	if err == nil && state.ActiveMove == move.Name {
+		return fmt.Errorf("retain journal still referenced by active volume")
+	}
+	klog.Infof("deleting settled ShiftPVMove journal %s after %s retention", move.Name, retention)
+	return r.Repository.DeleteMove(ctx, move.Name, move.UID)
 }
 
 func (r *Reconciler) validate() error {

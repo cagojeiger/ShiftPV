@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -58,7 +59,7 @@ func (m *memoryRepository) ListVolumes(context.Context) (map[string]volumeapi.St
 func (m *memoryRepository) Get(_ context.Context, id string) (volumeapi.State, error) {
 	state, exists := m.volumes[id]
 	if !exists {
-		return volumeapi.State{}, fmt.Errorf("volume not found")
+		return volumeapi.State{}, apierrors.NewNotFound(volumeapi.VolumeResource.GroupResource(), id)
 	}
 	return identifiedTestState(id, state, m.pools), nil
 }
@@ -377,7 +378,7 @@ func TestPendingMoveIsCancelledWhenSourceWasUncordonedBeforeLock(t *testing.T) {
 	}
 }
 
-func TestReconcileAllReleasesOnlySucceededMoveFinalizer(t *testing.T) {
+func TestReconcileAllReleasesOnlySettledMoveFinalizer(t *testing.T) {
 	for name, test := range map[string]struct {
 		status      volumeapi.MoveStatus
 		wantRelease bool
@@ -422,6 +423,98 @@ func TestReconcileAllReleasesOnlySucceededMoveFinalizer(t *testing.T) {
 				t.Fatalf("non-succeeded finalizers = %#v", got)
 			}
 		})
+	}
+}
+
+func TestReconcileAllGarbageCollectsOnlyExpiredSettledMoveJournals(t *testing.T) {
+	now := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+	retention := 7 * 24 * time.Hour
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	terminal := func(status volumeapi.MoveStatus, age time.Duration) volumeapi.Move {
+		status.LastTransitionTime = now.Add(-age).Format(time.RFC3339Nano)
+		return volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: status}
+	}
+
+	for name, test := range map[string]struct {
+		move       volumeapi.Move
+		volume     *volumeapi.State
+		wantDelete bool
+		wantError  bool
+	}{
+		"recent succeeded": {
+			move: terminal(volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}, retention-time.Nanosecond),
+		},
+		"expired succeeded": {
+			move: terminal(volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}, retention), wantDelete: true,
+		},
+		"expired recovered": {
+			move: terminal(volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked), RecoveryPhase: recoveryRecovered, CapacityReason: recoveryCapacitySettled}, retention+time.Hour), wantDelete: true,
+		},
+		"other finalizer": {
+			move: func() volumeapi.Move {
+				move := terminal(volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}, retention+time.Hour)
+				move.Finalizers = []string{"example.test/keep"}
+				return move
+			}(),
+		},
+		"active volume reference": {
+			move:   terminal(volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}, retention+time.Hour),
+			volume: &volumeapi.State{Phase: volumeapi.PhaseReady, ActiveMove: "move-test", OwnerNode: "destination"}, wantError: true,
+		},
+		"invalid terminal time": {
+			move: func() volumeapi.Move {
+				move := terminal(volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}, retention)
+				move.Status.LastTransitionTime = "invalid"
+				return move
+			}(), wantError: true,
+		},
+		"future terminal time": {
+			move: terminal(volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}, -time.Hour), wantError: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := &memoryRepository{volumes: map[string]volumeapi.State{}, moves: []volumeapi.Move{test.move}}
+			if test.volume != nil {
+				repository.volumes[volumeID] = *test.volume
+			}
+			reconciler := &Reconciler{
+				Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", HelperImage: "helper",
+				MoveJournalRetention: retention, Now: func() time.Time { return now },
+			}
+			err := reconciler.ReconcileAll(context.Background())
+			if (err != nil) != test.wantError {
+				t.Fatalf("ReconcileAll error = %v, wantError=%t", err, test.wantError)
+			}
+			if gotDelete := len(repository.moves) == 0; gotDelete != test.wantDelete {
+				t.Fatalf("journal deleted=%t, want=%t; moves=%#v", gotDelete, test.wantDelete, repository.moves)
+			}
+		})
+	}
+}
+
+func TestReconcileAllSeparatesFinalizerReleaseFromJournalDeletion(t *testing.T) {
+	now := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	repository := &memoryRepository{volumes: map[string]volumeapi.State{}, moves: []volumeapi.Move{{
+		Name: "move-test", UID: "move-uid", Finalizers: []string{volumeapi.MoveProtectionFinalizer},
+		Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{
+			Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted,
+			LastTransitionTime: now.Add(-DefaultMoveJournalRetention).Format(time.RFC3339Nano),
+		},
+	}}}
+	reconciler := &Reconciler{Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", HelperImage: "helper", Now: func() time.Time { return now }}
+
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.moves) != 1 || len(repository.moves[0].Finalizers) != 0 {
+		t.Fatalf("first reconcile did not stop after finalizer release: %#v", repository.moves)
+	}
+	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.moves) != 0 {
+		t.Fatalf("expired unprotected journal remained: %#v", repository.moves)
 	}
 }
 

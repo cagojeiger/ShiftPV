@@ -57,6 +57,7 @@ func main() {
 		poolReadinessStaleAfter  = flag.Duration("pool-readiness-stale-after", 3*time.Minute, "maximum age of a successful node Pool readiness probe")
 		mobilityEnabled          = flag.Bool("mobility-enabled", true, "run the automatic cordon mobility reconciler and admission webhook")
 		mobilityInterval         = flag.Duration("mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
+		moveJournalRetention     = flag.Duration("move-journal-retention", mobilitycontroller.DefaultMoveJournalRetention, "minimum retention for settled terminal ShiftPVMove journals")
 		mobilityImage            = flag.String("mobility-helper-image", "shiftpv-rsync-helper:dev", "rsync mobility helper image")
 		webhookAddress           = flag.String("webhook-listen-address", ":9443", "mobility admission HTTPS listen address")
 		webhookService           = flag.String("webhook-service-name", "shiftpv-webhook", "mobility admission Service name")
@@ -73,6 +74,9 @@ func main() {
 	flag.Parse()
 	if *poolReadinessStaleAfter <= 0 {
 		klog.Fatalf("pool readiness stale duration must be positive")
+	}
+	if *moveJournalRetention < time.Hour {
+		klog.Fatalf("move journal retention must be at least one hour")
 	}
 
 	config, err := rest.InClusterConfig()
@@ -194,7 +198,7 @@ func main() {
 		eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
 		eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
 		wake := mobilitycontroller.WatchEvents(ctx, client, dynamicClient, *namespace)
-		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, ServiceAccountName: *helperServiceAccount, Cleanups: cleanupStore, CleanupOperator: operator, Interval: *mobilityInterval, PoolReadinessStaleAfter: *poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
+		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, ServiceAccountName: *helperServiceAccount, Cleanups: cleanupStore, CleanupOperator: operator, Interval: *mobilityInterval, MoveJournalRetention: *moveJournalRetention, PoolReadinessStaleAfter: *poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
 		if exporter != nil {
 			exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
 			reconciler.ObserveDiscovery = exporter.ObserveDiscovery

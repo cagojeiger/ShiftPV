@@ -113,6 +113,11 @@ capacity가 잡히는 것이 정상이다.
 
 ## Planned mobility
 
+Settled terminal `ShiftPVMove` metadata is retained for seven days by default
+and then removed with a UID precondition. Configure whole-hour retention with
+`mobility.journalRetention`. This policy never deletes copy data and never
+removes unresolved, active, or finalizer-protected journals.
+
 Mobility admission을 사용할 workload namespace만 opt in한다.
 
 ```bash
