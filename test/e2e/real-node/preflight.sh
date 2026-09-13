@@ -177,11 +177,25 @@ else
 fi
 
 volume_count=$(k get shiftpvvolumes -o json 2>/dev/null | jq '.items | length' 2>/dev/null || printf 'unknown')
-move_count=$(k get shiftpvmoves -o json 2>/dev/null | jq '.items | length' 2>/dev/null || printf 'unknown')
-if [[ "${volume_count}" == 0 && "${move_count}" == 0 ]]; then
-	pass 'no pre-existing ShiftPV Volume or Move can be confused with the qualification workload'
+move_json=$(k get shiftpvmoves -o json 2>/dev/null || true)
+move_count=$(jq '.items | length' <<<"${move_json}" 2>/dev/null || printf 'unknown')
+unsettled_moves=$(jq -r '
+	.items[]?
+	| select(
+		((.status.phase == "Succeeded" and .status.cleanup.status.phase == "Completed") or
+		 (.status.phase == "Blocked" and .status.recoveryPhase == "Recovered" and
+		  (.status.capacityApproved // false) == false and .status.capacityReason == "RecoverySettled")) and
+		((.metadata.finalizers // []) | length) == 0
+	  | not)
+	| "\(.metadata.name):phase=\(.status.phase // "missing"),recovery=\(.status.recoveryPhase // "missing"),cleanup=\(.status.cleanup.status.phase // "missing"),capacityApproved=\(.status.capacityApproved // false),capacityReason=\(.status.capacityReason // "missing"),finalizers=\((.metadata.finalizers // []) | join(","))"' \
+	<<<"${move_json}" 2>/dev/null || true)
+if [[ "${volume_count}" == 0 && -z "${unsettled_moves}" ]]; then
+	pass "no pre-existing Volume or unsettled Move can be confused with the qualification workload: settledMoves=${move_count}"
 else
-	block "ShiftPV state is not empty: volumes=${volume_count} moves=${move_count}"
+	block "ShiftPV state is unsafe: volumes=${volume_count} moves=${move_count}"
+	while IFS= read -r move; do
+		[[ -z "${move}" ]] || printf '      %s\n' "${move}" >&2
+	done <<<"${unsettled_moves}"
 fi
 
 pool_json=$(k get shiftpvpools -o json 2>/dev/null || true)

@@ -115,7 +115,12 @@ wait_for_node() {
 }
 
 stop_source_node() {
-	ssh_source sudo snap stop microk8s
+	# Stop the runtime and kubelet/apiserver process together. `snap stop microk8s`
+	# shuts services down serially and can leave a small copy enough time to
+	# commit after the controller has already observed Copying.
+	ssh_source sudo systemctl stop \
+		snap.microk8s.daemon-containerd.service \
+		snap.microk8s.daemon-kubelite.service
 	wait_for_node "${SOURCE_NODE}" unavailable
 }
 
@@ -262,23 +267,53 @@ assert_identity_and_checksum() {
 }
 
 cleanup_case() {
-	local namespace=$1 deadline
+	local namespace=$1 deadline phase='' recovery_phase='' cleanup_phase='' capacity_approved='' capacity_reason='' finalizers=''
 	k patch "pv/${PV_NAME}" --type=merge -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
 	k delete "namespace/${namespace}" --wait=true --timeout=300s
 	k wait "pv/${PV_NAME}" --for=delete --timeout=300s
 	k wait "shiftpvvolume/${VOLUME_ID}" --for=delete --timeout=300s
 	deadline=$((SECONDS + 180))
 	while ((SECONDS < deadline)); do
-		if ! k get "shiftpvmove/${MOVE_NAME}" >/dev/null 2>&1; then
+		phase=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		recovery_phase=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.recoveryPhase}' 2>/dev/null || true)
+		cleanup_phase=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}' 2>/dev/null || true)
+		capacity_approved=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.capacityApproved}' 2>/dev/null || true)
+		capacity_reason=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.capacityReason}' 2>/dev/null || true)
+		finalizers=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+		if [[ -z "${finalizers}" ]] &&
+			{ [[ "${phase}" == Succeeded && "${cleanup_phase}" == Completed ]] ||
+				[[ "${phase}" == Blocked && "${recovery_phase}" == Recovered && "${capacity_approved}" != true && "${capacity_reason}" == RecoverySettled ]]; }; then
+			printf 'PASS retained settled Move journal move=%s phase=%s recovery=%s cleanup=%s\n' \
+				"${MOVE_NAME}" "${phase}" "${recovery_phase:-none}" "${cleanup_phase:-none}"
 			break
 		fi
 		sleep 2
 	done
-	if k get "shiftpvmove/${MOVE_NAME}" >/dev/null 2>&1; then
-		k delete "shiftpvmove/${MOVE_NAME}" --wait=true --timeout=120s
+	if [[ -n "${finalizers}" ]] ||
+		{ [[ "${phase}" != Succeeded || "${cleanup_phase}" != Completed ]] &&
+			[[ "${phase}" != Blocked || "${recovery_phase}" != Recovered || "${capacity_approved}" == true || "${capacity_reason}" != RecoverySettled ]]; }; then
+		echo "Move journal did not settle: move=${MOVE_NAME} phase=${phase} recovery=${recovery_phase} cleanup=${cleanup_phase} capacityApproved=${capacity_approved} capacityReason=${capacity_reason} finalizers=${finalizers}" >&2
+		return 1
 	fi
 	k uncordon "${SOURCE_NODE}" >/dev/null
 	k uncordon "${DESTINATION_NODE}" >/dev/null
+}
+
+assert_no_unsettled_moves() {
+	local unsettled
+	unsettled=$(k get shiftpvmoves -o json | jq -r '
+		.items[]
+		| select(
+			((.status.phase == "Succeeded" and .status.cleanup.status.phase == "Completed") or
+			 (.status.phase == "Blocked" and .status.recoveryPhase == "Recovered" and
+			  (.status.capacityApproved // false) == false and .status.capacityReason == "RecoverySettled")) and
+			((.metadata.finalizers // []) | length) == 0
+		  | not)
+		| .metadata.name')
+	if [[ -n "${unsettled}" ]]; then
+		echo "unsettled Move journals remain: ${unsettled}" >&2
+		return 1
+	fi
 }
 
 run_precommit_source_interruption() {
@@ -291,7 +326,7 @@ run_precommit_source_interruption() {
 	reason=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.reason}')
 	test "${reason}" = SourceUnavailable
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	ssh_source sudo test -f -- "${SOURCE_POOL}/volumes/${VOLUME_ID}/payload"
+	ssh_source sudo test -f "${SOURCE_POOL}/volumes/${VOLUME_ID}/payload"
 	start_source_node
 	k uncordon "${SOURCE_NODE}" >/dev/null
 	k patch "shiftpvmove/${MOVE_NAME}" --type=merge -p '{"spec":{"recovery":"ResumeOwner"}}'
@@ -329,7 +364,7 @@ run_postcommit_cleanup_interruption() {
 	trigger_move
 	stop_after_commit_before_cleanup
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
-	ssh_source sudo test -f -- "${SOURCE_POOL}/volumes/${VOLUME_ID}/payload"
+	ssh_source sudo test -f "${SOURCE_POOL}/volumes/${VOLUME_ID}/payload"
 	deadline=$((SECONDS + 300))
 	while ((SECONDS < deadline)); do
 		phase=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
@@ -354,7 +389,7 @@ run_postcommit_cleanup_interruption() {
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 	test "$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}')" = Completed
 	ssh_source sudo test ! -e "${SOURCE_POOL}/volumes/${VOLUME_ID}"
-	ssh_destination sudo test -f -- "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
+	ssh_destination sudo test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
 	printf 'PASS postcommit cleanup recovery volume=%s move=%s checksum=%s\n' "${VOLUME_ID}" "${MOVE_NAME}" "${SOURCE_CHECKSUM}"
 	cleanup_case "${namespace}"
 }
@@ -368,7 +403,7 @@ run_postcommit_cleanup_interruption
 
 k wait shiftpvpool --all --for=condition=Ready --timeout=300s
 test "$(k get shiftpvvolumes -o json | jq '.items | length')" = 0
-test "$(k get shiftpvmoves -o json | jq '.items | length')" = 0
+assert_no_unsettled_moves
 snapshot_non_shiftpv_specs after
 for subject in non-shiftpv-workloads existing-pvcs existing-pvs storageclasses; do
 	diff -u "${ARTIFACT_DIR}/before-${subject}.json" "${ARTIFACT_DIR}/after-${subject}.json" >"${ARTIFACT_DIR}/${subject}.diff"

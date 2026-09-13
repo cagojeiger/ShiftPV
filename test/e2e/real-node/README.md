@@ -10,9 +10,9 @@ Run one stage at a time. A later stage must not start until the previous stage
 has passed and all test resources have returned to the recorded baseline.
 
 1. **Read-only preflight**: prove exact context, nodes, immutable candidate
-   images, empty ShiftPV state, healthy pools/inventory, non-default StorageClass,
-   SSH recovery access, and either an isolated fault node or an exact reviewed
-   shared-workload inventory.
+   images, no active Volume or unsettled Move, healthy pools/inventory,
+   non-default StorageClass, SSH recovery access, and either an isolated fault
+   node or an exact reviewed shared-workload inventory.
 2. **Service interruption**: stop and restore the worker node's Kubernetes
    service during one precommit move and one postcommit source-cleanup move.
 3. **Operating-system reboot**: repeat the two boundaries with a worker reboot.
@@ -55,6 +55,13 @@ source node. It first interrupts the source during `Copying` and proves
 interrupts the source after the owner commit but before source cleanup, and
 proves cleanup eventually reaches `Completed` after the node returns.
 
+The interruption stops the MicroK8s container runtime and kubelite units
+together so a small copy cannot commit while a serial full-snap shutdown is
+still in progress. Recovery starts the full MicroK8s snap. Settled terminal Move
+journals remain as durable evidence: `Succeeded` requires cleanup `Completed`,
+and recovered `Blocked` requires `RecoverySettled`; both must have no finalizer.
+They do not block later qualification runs.
+
 The script never drains the shared node and never edits non-ShiftPV workload
 specs. Those workloads still experience downtime while MicroK8s is stopped. It
 records their specs plus all existing PVCs, PVs, and StorageClasses before the
@@ -89,8 +96,9 @@ invariants:
   `NeedsReview` preserves data but fails qualification.
 - The source copy is absent only after destination publication and ownership are
   proven; the destination copy remains present and published.
-- Capacity holds, finalizers, helper Jobs/Pods, Moves, and test volumes return to
-  baseline after cleanup.
+- Capacity holds, finalizers, helper Jobs/Pods, and test volumes return to the
+  safe baseline after cleanup. Move journals may remain only in a settled
+  terminal state with no finalizer or capacity hold.
 - Both pools finish `Ready` with fresh, valid, non-truncated inventory.
 - Non-test workloads and existing StorageClasses/PVs/PVCs are unchanged.
 
