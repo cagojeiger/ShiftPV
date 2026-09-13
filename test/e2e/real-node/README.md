@@ -15,7 +15,9 @@ has passed and all test resources have returned to the recorded baseline.
    node or an exact reviewed shared-workload inventory.
 2. **Service interruption**: stop and restore the worker node's Kubernetes
    service during one precommit move and one postcommit source-cleanup move.
-3. **Operating-system reboot**: repeat the two boundaries with a worker reboot.
+3. **Operating-system reboot**: repeat the two boundaries with a forced worker
+   reboot, prove the boot ID changed, and hold MicroK8s stopped after boot until
+   the control plane has observed the node unavailable.
 4. **Hard power loss**: repeat them only after an independent out-of-band method
    for powering the worker back on has been demonstrated.
 5. **Soak**: alternate a synthetic volume between nodes for at least 100 moves
@@ -81,6 +83,34 @@ EXPECTED_NODE_IMAGE=ghcr.io/example/node:candidate@sha256:... \
 EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
 ./test/e2e/real-node/service-interruption.sh
 ```
+
+## Operating-system reboot
+
+Stage 3 reuses the same workload, identity, checksum, cleanup, and baseline
+gates as stage 2. Set `FAULT_MODE=reboot`. Each fault immediately reboots the
+source host with `systemctl reboot --force --force`, waits for a different boot
+ID, then stops the MicroK8s runtime and kubelite together until Kubernetes has
+observed the node unavailable. This makes the fault boundary deterministic
+without claiming a physical power cut.
+
+```bash
+FAULT_MODE=reboot \
+KUBECTL_CONTEXT=home-prod-kr \
+SOURCE_NODE=server-02 \
+DESTINATION_NODE=server-01 \
+FAULT_NODE=server-02 \
+FAULT_SSH_TARGET=ubuntu@home-server-02 \
+SOURCE_SSH_TARGET=ubuntu@home-server-02 \
+DESTINATION_SSH_TARGET=ubuntu@home-server-01 \
+EXPECTED_CONTROLLER_IMAGE=ghcr.io/example/controller:candidate@sha256:... \
+EXPECTED_NODE_IMAGE=ghcr.io/example/node:candidate@sha256:... \
+EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
+./test/e2e/real-node/service-interruption.sh
+```
+
+This is an unclean OS reboot, not stage 4 hard power loss. Stage 4 still
+requires an independently demonstrated IPMI, managed-PDU, smart-plug, or other
+out-of-band power-on path before power is removed.
 
 ## Acceptance contract
 
