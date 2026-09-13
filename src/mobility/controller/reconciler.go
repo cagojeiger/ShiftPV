@@ -28,7 +28,9 @@ type Repository interface {
 	CompareAndSetState(context.Context, string, string, string, string, volumeapi.State) error
 	Pools(context.Context) ([]volumeapi.Pool, error)
 	ReadyPools(context.Context) ([]volumeapi.Pool, error)
+	ReadyPoolForNode(context.Context, string) (volumeapi.Pool, error)
 	CreateMove(context.Context, string, volumeapi.MoveSpec) (volumeapi.Move, error)
+	RemoveMoveFinalizer(context.Context, string, string) error
 	DeleteMove(context.Context, string, string) error
 	ListMoves(context.Context) ([]volumeapi.Move, error)
 	SetMoveStatus(context.Context, string, string, volumeapi.MoveStatus) error
@@ -102,7 +104,27 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 			}
 			continue
 		}
-		if phase == fsm.PhaseSucceeded || phase == fsm.PhaseBlocked {
+		if phase == fsm.PhaseSucceeded {
+			if !volumeapi.MoveCleanupSettled(move) {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("retain completed move %s: cleanup is not settled", move.Name))
+				continue
+			}
+			if err := r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("release completed move %s: %w", move.Name, err))
+			}
+			continue
+		}
+		if phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered {
+			if !volumeapi.MoveCleanupSettled(move) {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("retain recovered move %s: cleanup and capacity are not settled", move.Name))
+				continue
+			}
+			if err := r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("release recovered move %s: %w", move.Name, err))
+			}
+			continue
+		}
+		if phase == fsm.PhaseBlocked {
 			continue
 		}
 		if err := r.reconcileMove(ctx, move); err != nil {

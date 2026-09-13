@@ -24,6 +24,8 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
+const testCleanupReceiptDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	ctx := context.Background()
 	cleanups, cleanup := cleanupFixture(t)
@@ -42,15 +44,24 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	receiptWritten := false
 	client.PrependReactor("get", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if !receiptWritten {
-			current, err := cleanups.Get(ctx, cleanup.Name)
+			current, err := cleanups.Get(ctx, cleanup.Spec.Authority)
+			if err != nil {
+				return true, nil, err
+			}
+			bound := *current.Status.Executor
+			bound.PodUID = "pod-uid"
+			if err := cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &bound}); err != nil {
+				return true, nil, err
+			}
+			current, err = cleanups.Get(ctx, cleanup.Spec.Authority)
 			if err != nil {
 				return true, nil, err
 			}
 			receipt := &cleanupapi.Receipt{
 				OperationID: current.Spec.OperationID, ExecutorUID: current.Status.Executor.JobUID,
-				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: testCleanupReceiptDigest,
 			}
-			if err := cleanups.UpdateStatus(ctx, current.Name, current.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: current.Status.Executor, Receipt: receipt}); err != nil {
+			if err := cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: current.Status.Executor, Receipt: receipt}); err != nil {
 				return true, nil, err
 			}
 			receiptWritten = true
@@ -75,8 +86,10 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	if created.Name != cleanup.Name+"-effect" || created.Spec.Template.Spec.NodeName != cleanup.Spec.Target.NodeName ||
 		created.Spec.Template.Spec.ServiceAccountName != "shiftpv-controller" || container.Command[0] != "/shiftpv-volume-helper" ||
 		created.Spec.BackoffLimit == nil || *created.Spec.BackoffLimit < 1 || created.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever ||
-		!strings.Contains(strings.Join(container.Args, " "), "--cleanup-uid="+cleanup.UID) ||
-		!strings.Contains(strings.Join(container.Args, " "), "--pool-readiness-stale-after=7m0s") {
+		!strings.Contains(strings.Join(container.Args, " "), "--authority-kind=ShiftPVVolume") ||
+		!strings.Contains(strings.Join(container.Args, " "), "--authority-name="+cleanup.Spec.Authority.Name) ||
+		!strings.Contains(strings.Join(container.Args, " "), "--authority-uid="+cleanup.Spec.Authority.UID) ||
+		len(created.OwnerReferences) != 1 || created.OwnerReferences[0].UID != types.UID(cleanup.Spec.Authority.UID) {
 		t.Fatalf("cleanup Job identity=%#v", created)
 	}
 	started, err := client.BatchV1().Jobs(runner.Namespace).Get(ctx, created.Name, metav1.GetOptions{})
@@ -95,7 +108,7 @@ func TestCleanupRunnerRejectsChangedPoolAndJob(t *testing.T) {
 	if _, err := runner.Reclaim(context.Background(), cleanup, cleanups); err == nil || !strings.Contains(err.Error(), "PoolIdentityChanged") {
 		t.Fatalf("replacement Pool accepted: %v", err)
 	}
-	if current, err := cleanups.Get(context.Background(), cleanup.Name); err != nil || current.Status.Phase != cleanupapi.PhaseNeedsReview || current.Status.Reason != "PoolIdentityChanged" {
+	if current, err := cleanups.Get(context.Background(), cleanup.Spec.Authority); err != nil || current.Status.Phase != cleanupapi.PhaseNeedsReview || current.Status.Reason != "PoolIdentityChanged" {
 		t.Fatalf("Pool mismatch did not converge to review: %#v err=%v", current, err)
 	}
 
@@ -107,6 +120,29 @@ func TestCleanupRunnerRejectsChangedPoolAndJob(t *testing.T) {
 	runner.Client = fake.NewClientset(wanted)
 	if _, err := runner.Reclaim(context.Background(), cleanup, cleanups); err == nil || !strings.Contains(err.Error(), "JobIdentityChanged") {
 		t.Fatalf("changed Job accepted: %v", err)
+	}
+}
+
+func TestCleanupRunnerRejectsPoolWithoutLifecycleProtection(t *testing.T) {
+	cleanups, cleanup := cleanupFixture(t)
+	client := fake.NewClientset()
+	pool := readyCleanupPool(volumeapi.Pool{
+		Name: cleanup.Spec.Target.PoolName, UID: cleanup.Spec.Target.PoolUID,
+		NodeName: cleanup.Spec.Target.NodeName, MountPath: "/mnt/shiftpv",
+	})
+	pool.Finalizers = nil
+	runner := validRunner(client)
+	runner.Pools = fakePoolResolver{pool: pool}
+	if _, err := runner.Reclaim(context.Background(), cleanup, cleanups); err == nil || !strings.Contains(err.Error(), "PoolProtectionChanged") {
+		t.Fatalf("unprotected Pool was accepted: %v", err)
+	}
+	current, err := cleanups.Get(context.Background(), cleanup.Spec.Authority)
+	if err != nil || current.Status.Phase != cleanupapi.PhaseNeedsReview || current.Status.Reason != "PoolProtectionChanged" {
+		t.Fatalf("unprotected Pool did not converge to review: cleanup=%#v err=%v", current, err)
+	}
+	jobs, err := client.BatchV1().Jobs(runner.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil || len(jobs.Items) != 0 {
+		t.Fatalf("unprotected Pool started cleanup Jobs: jobs=%#v err=%v", jobs.Items, err)
 	}
 }
 
@@ -124,7 +160,7 @@ func TestCleanupRunnerRejectsExecutorStartedBeforeUIDBinding(t *testing.T) {
 	if _, err := runner.Reclaim(context.Background(), cleanup, cleanups); err == nil || !strings.Contains(err.Error(), "ExecutorStartedBeforeBinding") {
 		t.Fatalf("unbound executor was accepted: %v", err)
 	}
-	current, err := cleanups.Get(context.Background(), cleanup.Name)
+	current, err := cleanups.Get(context.Background(), cleanup.Spec.Authority)
 	if err != nil || current.Status.Phase != cleanupapi.PhaseNeedsReview || current.Status.Reason != "ExecutorStartedBeforeBinding" {
 		t.Fatalf("unbound executor did not converge to review: %#v err=%v", current, err)
 	}
@@ -136,15 +172,15 @@ func TestCleanupRunnerDefersEffectWhilePoolIsNotReady(t *testing.T) {
 	runner := validRunner(client)
 	runner.Pools = fakePoolResolver{pool: volumeapi.Pool{
 		Name: cleanup.Spec.Target.PoolName, UID: cleanup.Spec.Target.PoolUID,
-		NodeName: cleanup.Spec.Target.NodeName, MountPath: "/mnt/shiftpv",
+		NodeName: cleanup.Spec.Target.NodeName, MountPath: "/mnt/shiftpv", Finalizers: []string{volumeapi.PoolProtectionFinalizer},
 	}}
 	_, err := runner.Reclaim(context.Background(), cleanup, cleanups)
 	if err == nil || !isRetryable(err) {
 		t.Fatalf("unready Pool was not deferred retryably: %v", err)
 	}
-	current, getErr := cleanups.Get(context.Background(), cleanup.Name)
+	current, getErr := cleanups.Get(context.Background(), cleanup.Spec.Authority)
 	jobs, listErr := client.BatchV1().Jobs(runner.Namespace).List(context.Background(), metav1.ListOptions{})
-	if getErr != nil || listErr != nil || current.Status.Phase != "" || len(jobs.Items) != 0 {
+	if getErr != nil || listErr != nil || current.Status.Phase != cleanupapi.PhasePending || len(jobs.Items) != 0 {
 		t.Fatalf("unready Pool changed cleanup or started effect: cleanup=%#v jobs=%#v getErr=%v listErr=%v", current, jobs.Items, getErr, listErr)
 	}
 }
@@ -163,8 +199,8 @@ func TestCleanupRunnerJoinsStartedExecutorFromStalePendingSnapshot(t *testing.T)
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 	client := fake.NewClientset(job)
 	runner.Client = client
-	executor := &cleanupapi.Executor{JobName: job.Name, JobUID: string(job.UID), NodeName: stale.Spec.Target.NodeName}
-	if err := cleanups.UpdateStatus(ctx, stale.Name, stale.UID, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+	executor := &cleanupapi.Executor{JobName: job.Name, JobUID: string(job.UID), PodUID: "pod-uid", NodeName: stale.Spec.Target.NodeName}
+	if err := cleanups.UpdateStatus(ctx, stale, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 		t.Fatal(err)
 	}
 	receiptWritten := false
@@ -172,9 +208,9 @@ func TestCleanupRunnerJoinsStartedExecutorFromStalePendingSnapshot(t *testing.T)
 		if !receiptWritten {
 			receipt := &cleanupapi.Receipt{
 				OperationID: stale.Spec.OperationID, ExecutorUID: executor.JobUID,
-				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: testCleanupReceiptDigest,
 			}
-			if err := cleanups.UpdateStatus(ctx, stale.Name, stale.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+			if err := cleanups.UpdateStatus(ctx, stale, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
 				return true, nil, err
 			}
 			receiptWritten = true
@@ -200,15 +236,15 @@ func TestCleanupRunnerWaitsForJobTerminationAfterReceipt(t *testing.T) {
 	job.Spec.Suspend = boolPtr(false)
 	client := fake.NewClientset(job)
 	runner.Client = client
-	executor := &cleanupapi.Executor{JobName: job.Name, JobUID: string(job.UID), NodeName: cleanup.Spec.Target.NodeName}
+	executor := &cleanupapi.Executor{JobName: job.Name, JobUID: string(job.UID), PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
 	receipt := &cleanupapi.Receipt{
 		OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID,
-		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: testCleanupReceiptDigest,
 	}
-	if err := cleanups.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+	if err := cleanups.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanups.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+	if err := cleanups.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
 		t.Fatal(err)
 	}
 	runner.Timeout = 20 * time.Millisecond
@@ -233,15 +269,15 @@ func TestCleanupRunnerWaitsForJobTerminationAfterReceipt(t *testing.T) {
 func TestCleanupRunnerAcceptsVerifyingReceiptAfterTTLRemovedExecutor(t *testing.T) {
 	ctx := context.Background()
 	cleanups, cleanup := cleanupFixture(t)
-	executor := &cleanupapi.Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", NodeName: cleanup.Spec.Target.NodeName}
+	executor := &cleanupapi.Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
 	receipt := &cleanupapi.Receipt{
 		OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID,
-		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: testCleanupReceiptDigest,
 	}
-	if err := cleanups.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+	if err := cleanups.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanups.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+	if err := cleanups.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
 		t.Fatal(err)
 	}
 	client := fake.NewClientset()
@@ -264,15 +300,15 @@ func TestCleanupRunnerAcceptsVerifyingReceiptAfterTTLRemovedExecutor(t *testing.
 func TestCleanupRunnerWaitsForTTLOwnedPodAfterJobDisappears(t *testing.T) {
 	ctx := context.Background()
 	cleanups, cleanup := cleanupFixture(t)
-	executor := &cleanupapi.Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", NodeName: cleanup.Spec.Target.NodeName}
+	executor := &cleanupapi.Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
 	receipt := &cleanupapi.Receipt{
 		OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID,
-		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: testCleanupReceiptDigest,
 	}
-	if err := cleanups.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+	if err := cleanups.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanups.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+	if err := cleanups.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
 		t.Fatal(err)
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
@@ -300,31 +336,23 @@ func TestCleanupRunnerWaitsForTTLOwnedPodAfterJobDisappears(t *testing.T) {
 	}
 }
 
-func TestCleanupRunnerRejectsIncompleteVerifyingReceipt(t *testing.T) {
+func TestCleanupJournalRejectsIncompleteVerifyingReceipt(t *testing.T) {
 	ctx := context.Background()
 	cleanups, cleanup := cleanupFixture(t)
-	executor := &cleanupapi.Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", NodeName: cleanup.Spec.Target.NodeName}
+	executor := &cleanupapi.Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
 	receipt := &cleanupapi.Receipt{
 		OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID,
-		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, LocalReceiptDigest: testCleanupReceiptDigest,
 	}
-	if err := cleanups.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+	if err := cleanups.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanups.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
-		t.Fatal(err)
+	if err := cleanups.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err == nil {
+		t.Fatal("incomplete receipt entered Verifying")
 	}
-	runner := validRunner(fake.NewClientset())
-	runner.Pools = fakePoolResolver{pool: readyCleanupPool(volumeapi.Pool{
-		Name: cleanup.Spec.Target.PoolName, UID: cleanup.Spec.Target.PoolUID,
-		NodeName: cleanup.Spec.Target.NodeName, MountPath: "/mnt/shiftpv",
-	})}
-	if _, err := runner.Reclaim(ctx, cleanup, cleanups); err == nil {
-		t.Fatal("incomplete Verifying receipt was accepted")
-	}
-	current, err := cleanups.Get(ctx, cleanup.Name)
-	if err != nil || current.Status.Phase != cleanupapi.PhaseNeedsReview || current.Status.Reason != "ReceiptInvalid" {
-		t.Fatalf("current=%#v err=%v", current, err)
+	current, err := cleanups.Get(ctx, cleanup.Spec.Authority)
+	if err != nil || current.Status.Phase != cleanupapi.PhaseRunning || current.Status.Receipt != nil {
+		t.Fatalf("incomplete receipt changed journal: current=%#v err=%v", current, err)
 	}
 }
 
@@ -361,13 +389,22 @@ func TestCleanupRunnerReacquiresJobAfterAcceptedCreateResponseLoss(t *testing.T)
 	})
 	receiptWritten := false
 	client.PrependReactor("get", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
-		current, err := cleanups.Get(ctx, cleanup.Name)
+		current, err := cleanups.Get(ctx, cleanup.Spec.Authority)
 		if err == nil && current.Status.Phase == cleanupapi.PhaseRunning && !receiptWritten {
+			bound := *current.Status.Executor
+			bound.PodUID = "pod-uid"
+			if err := cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &bound}); err != nil {
+				return true, nil, err
+			}
+			current, err = cleanups.Get(ctx, cleanup.Spec.Authority)
+			if err != nil {
+				return true, nil, err
+			}
 			receipt := &cleanupapi.Receipt{
 				OperationID: current.Spec.OperationID, ExecutorUID: current.Status.Executor.JobUID,
-				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: testCleanupReceiptDigest,
 			}
-			if err := cleanups.UpdateStatus(ctx, current.Name, current.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: current.Status.Executor, Receipt: receipt}); err != nil {
+			if err := cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: current.Status.Executor, Receipt: receipt}); err != nil {
 				return true, nil, err
 			}
 			receiptWritten = true
@@ -440,7 +477,7 @@ func TestCleanupRunnerReportsFailedAndReceiptlessJobs(t *testing.T) {
 			if _, err := runner.Reclaim(context.Background(), cleanup, cleanups); err == nil {
 				t.Fatal("terminal Job without receipt accepted")
 			}
-			current, err := cleanups.Get(context.Background(), cleanup.Name)
+			current, err := cleanups.Get(context.Background(), cleanup.Spec.Authority)
 			if err != nil || current.Status.Phase != cleanupapi.PhaseNeedsReview {
 				t.Fatalf("terminal Job did not converge to review: %#v err=%v", current, err)
 			}
@@ -457,21 +494,27 @@ func TestCleanupRunnerReportsFailedAndReceiptlessJobs(t *testing.T) {
 
 func cleanupFixture(t *testing.T) (*cleanupapi.Store, cleanupapi.Cleanup) {
 	t.Helper()
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{cleanupapi.Resource: "ShiftPVCleanupList"})
-	dynamicClient.PrependReactor("create", "shiftpvcleanups", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		object := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
-		object.SetUID("cleanup-uid")
-		return false, nil, nil
-	})
-	store := &cleanupapi.Store{Client: dynamicClient}
 	target := volume.CopyIdentity{
 		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
 		VolumeID: testVolumeID, VolumeUID: "volume-uid", CopyID: "copy-id",
 		NodeName: "worker-a", Role: volume.RoleServing,
 	}
+	parent := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
+		"metadata": map[string]any{
+			"name": target.VolumeID, "uid": target.VolumeUID, "resourceVersion": "1", "generation": int64(1),
+			"finalizers": []any{cleanupapi.VolumeProtectionFinalizer},
+		},
+		"spec": map[string]any{},
+	}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		cleanupapi.VolumeResource: "ShiftPVVolumeList",
+		cleanupapi.MoveResource:   "ShiftPVMoveList",
+		cleanupapi.PoolResource:   "ShiftPVPoolList",
+	}, parent)
+	store := &cleanupapi.Store{Client: dynamicClient}
 	cleanup, err := store.Ensure(context.Background(), cleanupapi.Spec{
 		OperationID: "delete-volume-uid", Target: target, Reason: "VolumeDelete",
-		Approved:  true,
 		Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: target.VolumeID, UID: target.VolumeUID},
 	})
 	if err != nil {
@@ -483,6 +526,7 @@ func cleanupFixture(t *testing.T) (*cleanupapi.Store, cleanupapi.Cleanup) {
 func readyCleanupPool(pool volumeapi.Pool) volumeapi.Pool {
 	now := metav1.Now()
 	pool.Generation = 1
+	pool.Finalizers = []string{volumeapi.PoolProtectionFinalizer}
 	pool.Status = volumeapi.PoolStatus{
 		ObservedGeneration: 1,
 		LastProbeTime:      now,

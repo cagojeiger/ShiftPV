@@ -32,7 +32,6 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	lifecycleadmission "github.com/cagojeiger/ShiftPV/src/lifecycle/admission"
-	cleanupcontroller "github.com/cagojeiger/ShiftPV/src/lifecycle/cleanupcontroller"
 	poolcontroller "github.com/cagojeiger/ShiftPV/src/lifecycle/poolcontroller"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
 	"github.com/cagojeiger/ShiftPV/src/metrics"
@@ -47,7 +46,7 @@ var version = "dev"
 func main() {
 	var (
 		endpoint                 = flag.String("endpoint", "unix:///run/csi/csi.sock", "CSI Unix socket endpoint")
-		namespace                = flag.String("namespace", os.Getenv("POD_NAMESPACE"), "namespace for reservations and helper Pods")
+		namespace                = flag.String("namespace", os.Getenv("POD_NAMESPACE"), "namespace for helper Pods and controller state")
 		helperImage              = flag.String("helper-image", "busybox:1.37", "directory helper Pod image")
 		helperWait               = flag.Duration("helper-timeout", 2*time.Minute, "helper Pod completion timeout")
 		helperCPURequest         = flag.String("helper-cpu-request", "10m", "helper Pod CPU request")
@@ -107,7 +106,7 @@ func main() {
 	if *metricsAddress != "" && *metricsInterval > 0 {
 		exporter = metrics.New("metadata")
 		exporter.Start(ctx, *metricsAddress)
-		observer, metricsErr := exporter.NewController(config, *namespace, *metricsInterval, *poolReadinessStaleAfter)
+		observer, metricsErr := exporter.NewController(config, *metricsInterval, *poolReadinessStaleAfter)
 		if metricsErr != nil {
 			klog.Errorf("metrics inventory disabled: %v", metricsErr)
 		} else {
@@ -138,10 +137,6 @@ func main() {
 		},
 	}
 	poolLocks := &poolcapacity.Locker{}
-	cleanupReconciler := &cleanupcontroller.Reconciler{
-		Store: cleanupStore, Operator: operator, Client: client, Namespace: *namespace, Inventory: volumeRegistry, Interval: 30 * time.Second,
-		PoolReadinessStaleAfter: *poolReadinessStaleAfter,
-	}
 	lifecycleChecker := &uninstallcheck.Checker{
 		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassName: *storageClassName, Namespace: *namespace,
 	}
@@ -153,9 +148,8 @@ func main() {
 	}
 	identityService := &identity.Service{Version: version}
 
-	errCh := make(chan error, 7)
+	errCh := make(chan error, 6)
 	go func() { errCh <- quiesceGate.Run(ctx) }()
-	go func() { errCh <- cleanupReconciler.Run(ctx) }()
 	go func() { errCh <- poolLifecycleReconciler.Run(ctx) }()
 	go func() {
 		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {

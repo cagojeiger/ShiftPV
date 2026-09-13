@@ -38,10 +38,9 @@ var definitions = []struct {
 	name, help string
 	labels     []string
 }{
-	{"pool_capacity_limit_bytes", "Configured logical reservation limit.", []string{"pool", "node"}},
-	{"pool_reserved_bytes", "Owner and approved incoming logical reservations, not disk usage.", []string{"pool", "node"}},
-	{"pool_unregistered_reserved_bytes", "Reservation bytes without a Volume CR, including in-progress creation.", []string{"pool", "node"}},
-	{"pool_accounting_valid", "Whether the latest Pool reservation accounting is valid.", []string{"pool", "node"}},
+	{"pool_capacity_limit_bytes", "Configured logical capacity-hold limit.", []string{"pool", "node"}},
+	{"pool_reserved_bytes", "Volume owner and active Move capacity holds, not disk usage.", []string{"pool", "node"}},
+	{"pool_accounting_valid", "Whether the latest Pool capacity-hold accounting is valid.", []string{"pool", "node"}},
 	{"pool_ready", "Pool readiness including generation and probe freshness.", []string{"pool", "node"}},
 	{"pool_filesystem_size_bytes", "Total size of the filesystem containing the registered directory.", []string{"pool", "node"}},
 	{"pool_filesystem_available_bytes", "Filesystem bytes available to unprivileged users, including external writers.", []string{"pool", "node"}},

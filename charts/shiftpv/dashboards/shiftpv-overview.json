@@ -454,8 +454,8 @@
     {
       "id": 5,
       "type": "table",
-      "title": "Pool capacity & reservations",
-      "description": "Current observations only. Unknown means unavailable, failed or older than the selected window. FS available includes other writers; Reserved and Limit are logical reservations, not actual file usage. No Volume CR may be a creation in progress; it is not an automatic deletion instruction.",
+      "title": "Pool capacity & holds",
+      "description": "Current observations only. Unknown means unavailable, failed or older than the selected window. FS available includes other writers; Reserved and Limit are logical capacity holds, not actual file usage or a write quota.",
       "gridPos": {
         "x": 0,
         "y": 6,
@@ -634,22 +634,6 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "No Volume CR"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "bytes"
-              },
-              {
-                "id": "custom.width",
-                "value": 120
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "Cluster"
             },
             "properties": [
@@ -745,18 +729,6 @@
           "instant": true,
           "range": false,
           "format": "time_series"
-        },
-        {
-          "refId": "F",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "label_replace(max by (cluster, namespace, pool, node) ((shiftpv_pool_unregistered_reserved_bytes{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} and (shiftpv_pool_accounting_valid{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",pool=~\"${pool:regex}\"} == 1)) and on (cluster, namespace, job, instance) ((shiftpv_metrics_snapshot_success{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} == 1) and on (cluster, namespace, job, instance) (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\",source=\"metadata\"} > time() - ${freshness}) and on (cluster, namespace, job, instance) (up{shiftpv=\"true\",cluster=~\"${cluster:regex}\",namespace=~\"${namespace:regex}\"} == 1))), \"column\", \"No Volume CR\", \"pool\", \".*\")",
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "time_series"
         }
       ],
       "options": {
@@ -799,8 +771,7 @@
               "Accounting": 4,
               "FS available": 5,
               "Reserved": 6,
-              "Limit": 7,
-              "No Volume CR": 8
+              "Limit": 7
             },
             "renameByName": {
               "cluster": "Cluster",
@@ -874,8 +845,8 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Reservation limit used · %",
-      "description": "Logical reservations / configured limit. This is not filesystem utilization or a per-PVC write quota. Gaps indicate invalid accounting or stale metadata.",
+      "title": "Capacity holds / limit · %",
+      "description": "Logical capacity holds / configured limit. This is not filesystem utilization or a per-PVC write quota. Gaps indicate invalid accounting or stale metadata.",
       "gridPos": {
         "x": 8,
         "y": 13,

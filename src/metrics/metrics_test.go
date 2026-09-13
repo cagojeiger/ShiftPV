@@ -18,11 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes/fake"
-	ktesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
@@ -68,16 +64,12 @@ func (i *inventory) ListMoves(context.Context) ([]volumeapi.Move, error) {
 	return i.moves, nil
 }
 
-func reservation(id, node, bytes string) *corev1.ConfigMap {
-	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: "system", Labels: map[string]string{"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation"}}, Data: map[string]string{"volumeID": id, "volumeUID": "volume-uid", "nodeName": node, "capacity": bytes}}
-}
 func fixture() (*Controller, *inventory) {
 	inv := &inventory{pools: []volumeapi.Pool{{Name: "pool-a", NodeName: "a", CapacityLimit: "1Gi"}, {Name: "pool-b", NodeName: "b", CapacityLimit: "1Gi"}},
-		volumes: map[string]volumeapi.State{"v": {UID: "volume-uid", OwnerNode: "a", Phase: "Moving", ActiveMove: "move"}},
-		moves:   []volumeapi.Move{{Name: "move", Spec: volumeapi.MoveSpec{VolumeID: "v"}, Status: volumeapi.MoveStatus{Phase: "Copying", DestinationNode: "b", CapacityApproved: true}}},
+		volumes: map[string]volumeapi.State{"v": {UID: "volume-uid", CapacityBytes: 64, OwnerNode: "a", Phase: "Moving", ActiveMove: "move"}},
+		moves:   []volumeapi.Move{{Name: "move", Spec: volumeapi.MoveSpec{VolumeID: "v", SourceNode: "a"}, Status: volumeapi.MoveStatus{Phase: "Copying", DestinationNode: "b", CapacityApproved: true}}},
 	}
-	client := fake.NewClientset(reservation("v", "a", "64"), reservation("unregistered", "a", "67108864"))
-	return &Controller{Exporter: New("metadata"), Inventory: inv, Client: client, Namespace: "system", Interval: time.Millisecond}, inv
+	return &Controller{Exporter: New("metadata"), Inventory: inv, Interval: time.Millisecond}, inv
 }
 
 func output(t testing.TB, e *Exporter) string {
@@ -106,17 +98,16 @@ func TestControllerAccountingAndMoveLifecycle(t *testing.T) {
 	}
 	body := output(t, c.Exporter)
 	contains(t, body,
-		"shiftpv_pool_reserved_bytes{node=\"a\",pool=\"pool-a\"} 6.7108928e+07",
+		"shiftpv_pool_reserved_bytes{node=\"a\",pool=\"pool-a\"} 64",
 		"shiftpv_pool_reserved_bytes{node=\"b\",pool=\"pool-b\"} 64",
-		"shiftpv_pool_unregistered_reserved_bytes{node=\"a\",pool=\"pool-a\"} 6.7108864e+07",
 		"shiftpv_moves{phase=\"Copying\"} 1",
 		"shiftpv_volumes{phase=\"Moving\"} 1")
-	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", OwnerNode: "b", Phase: "Ready", ActiveMove: "move"}
+	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", Phase: "Ready", ActiveMove: "move"}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	contains(t, output(t, c.Exporter), "shiftpv_pool_reserved_bytes{node=\"b\",pool=\"pool-b\"} 64")
-	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", OwnerNode: "b", Phase: "Ready"}
+	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", Phase: "Ready"}
 	inv.moves[0].Status.Phase = "Blocked"
 	inv.moves[0].Status.RecoveryPhase = "Recovered"
 	if err := c.Refresh(context.Background()); err != nil {
@@ -137,7 +128,7 @@ func TestControllerAccountingAndMoveLifecycle(t *testing.T) {
 }
 
 func TestMetadataFailuresPreserveLastSuccess(t *testing.T) {
-	for _, failure := range []string{"pools", "volumes", "moves", "reservations", "active-link"} {
+	for _, failure := range []string{"pools", "volumes", "moves", "active-link"} {
 		t.Run(failure, func(t *testing.T) {
 			c, inv := fixture()
 			if err := c.Refresh(context.Background()); err != nil {
@@ -147,9 +138,6 @@ func TestMetadataFailuresPreserveLastSuccess(t *testing.T) {
 			inv.fail = failure
 			if failure == "active-link" {
 				inv.moves = nil
-			}
-			if failure == "reservations" {
-				c.Client.(*fake.Clientset).PrependReactor("list", "configmaps", func(ktesting.Action) (bool, runtime.Object, error) { return true, nil, context.DeadlineExceeded })
 			}
 			if c.Refresh(context.Background()) == nil {
 				t.Fatal("expected snapshot error")
@@ -165,12 +153,12 @@ func TestMetadataFailuresPreserveLastSuccess(t *testing.T) {
 func TestCompletingMoveHasBoundedMetricPhase(t *testing.T) {
 	c, inv := fixture()
 	inv.moves[0].Status.Phase = "Completing"
-	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", OwnerNode: "b", Phase: "Ready", ActiveMove: "move"}
+	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", Phase: "Ready", ActiveMove: "move"}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	contains(t, output(t, c.Exporter), "shiftpv_moves{phase=\"Completing\"} 1", "shiftpv_moves{phase=\"Unknown\"} 0")
-	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", OwnerNode: "b", Phase: "Ready"}
+	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", Phase: "Ready"}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +184,7 @@ func TestInvalidAccountingKeepsNumbersAndUnknownInitial(t *testing.T) {
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	contains(t, output(t, c.Exporter), "shiftpv_pool_accounting_valid{node=\"a\",pool=\"pool-a\"} 0", "shiftpv_pool_reserved_bytes{node=\"a\",pool=\"pool-a\"} 6.7108928e+07")
+	contains(t, output(t, c.Exporter), "shiftpv_pool_accounting_valid{node=\"a\",pool=\"pool-a\"} 0", "shiftpv_pool_reserved_bytes{node=\"a\",pool=\"pool-a\"} 64")
 	fresh := New("metadata")
 	c.Exporter = fresh
 	inv.pools[1].CapacityLimit = "invalid"
@@ -293,7 +281,6 @@ func TestConcurrentCachedScrapesHaveNoExternalIO(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := inv.calls
-	actions := len(c.Client.(*fake.Clientset).Actions())
 	var wg sync.WaitGroup
 	for n := 0; n < 100; n++ {
 		wg.Add(1)
@@ -309,7 +296,7 @@ func TestConcurrentCachedScrapesHaveNoExternalIO(t *testing.T) {
 		c.Exporter.ObserveDiscovery(map[string]int{"DisruptionBudgetDenied": n}, nil)
 	}
 	wg.Wait()
-	if inv.calls != calls || len(c.Client.(*fake.Clientset).Actions()) != actions {
+	if inv.calls != calls {
 		t.Fatal("scrape performed API I/O")
 	}
 }
@@ -319,7 +306,7 @@ func TestCardinalityBoundedByPoolsAndEnums(t *testing.T) {
 	inv.volumes = make(map[string]volumeapi.State)
 	inv.moves = nil
 	for n := 0; n < 1000; n++ {
-		inv.volumes[fmt.Sprintf("unique-volume-%d", n)] = volumeapi.State{OwnerNode: "a", Phase: fmt.Sprintf("unique-phase-%d", n)}
+		inv.volumes[fmt.Sprintf("unique-volume-%d", n)] = volumeapi.State{CapacityBytes: 1, OwnerNode: "a", Phase: fmt.Sprintf("unique-phase-%d", n)}
 	}
 	for n := 0; n < 10000; n++ {
 		inv.moves = append(inv.moves, volumeapi.Move{Name: fmt.Sprintf("historic-%d", n), Status: volumeapi.MoveStatus{Phase: "Blocked"}})
@@ -388,10 +375,7 @@ func TestCachedScrapeLatency(t *testing.T) {
 	c, inv := fixture()
 	for n := 0; n < 99; n++ {
 		id := fmt.Sprintf("v-%d", n)
-		inv.volumes[id] = volumeapi.State{OwnerNode: "a", Phase: "Ready"}
-		if _, err := c.Client.CoreV1().ConfigMaps("system").Create(context.Background(), reservation(id, "a", "64"), metav1.CreateOptions{}); err != nil {
-			t.Fatal(err)
-		}
+		inv.volumes[id] = volumeapi.State{CapacityBytes: 64, OwnerNode: "a", Phase: "Ready"}
 	}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -433,7 +417,7 @@ func TestDedicatedMetricFamilyContract(t *testing.T) {
 	e.ObserveDiscovery(nil, nil)
 	_, _ = e.intercept(context.Background(), nil, &grpc.UnaryServerInfo{FullMethod: "/csi.v1.Controller/CreateVolume"}, func(context.Context, any) (any, error) { return nil, status.Error(codes.Code(1000), "unknown code") })
 	families, err := e.Registry.Gather()
-	if err != nil || len(families) != 19 {
+	if err != nil || len(families) != 18 {
 		t.Fatalf("families=%d err=%v", len(families), err)
 	}
 	for _, family := range families {
@@ -463,6 +447,7 @@ func TestCleanupContractMetricsExposeVerifyingAndFailClosed(t *testing.T) {
 	c.Cleanups = cleanupInventory{items: []cleanupapi.Cleanup{
 		{},
 		{Status: cleanupapi.Status{Phase: cleanupapi.PhaseVerifying}},
+		{Status: cleanupapi.Status{Phase: cleanupapi.PhaseConfirmingAbsence}},
 		{Status: cleanupapi.Status{Phase: cleanupapi.PhaseNeedsReview}},
 		{Status: cleanupapi.Status{Phase: "Invalid"}},
 	}}
@@ -472,6 +457,7 @@ func TestCleanupContractMetricsExposeVerifyingAndFailClosed(t *testing.T) {
 	contains(t, output(t, c.Exporter),
 		`shiftpv_cleanup_requests{state="Pending"} 1`,
 		`shiftpv_cleanup_requests{state="Verifying"} 1`,
+		`shiftpv_cleanup_requests{state="ConfirmingAbsence"} 1`,
 		`shiftpv_cleanup_requests{state="NeedsReview"} 1`,
 		`shiftpv_cleanup_requests{state="Unknown"} 1`,
 	)
@@ -487,7 +473,7 @@ func TestCopyObservationsClassifyAuthorityWithoutDeletingOrphans(t *testing.T) {
 	current := volume.CopyIdentity{InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid", VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", VolumeUID: "volume-uid", CopyID: "current", NodeName: "a", Role: volume.RoleServing}
 	orphan := current
 	orphan.CopyID = "orphan"
-	inv.volumes = map[string]volumeapi.State{current.VolumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "a", CurrentCopy: &current}}
+	inv.volumes = map[string]volumeapi.State{current.VolumeID: {UID: current.VolumeUID, CapacityBytes: 64, Phase: volumeapi.PhaseReady, OwnerNode: "a", CurrentCopy: &current}}
 	inv.moves = nil
 	inv.pools = []volumeapi.Pool{{
 		Name: "pool-a", NodeName: "a", CapacityLimit: "1Gi",

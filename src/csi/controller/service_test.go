@@ -26,19 +26,28 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
+var cleanupListKinds = map[schema.GroupVersionResource]string{
+	cleanupapi.VolumeResource: "ShiftPVVolumeList",
+	cleanupapi.MoveResource:   "ShiftPVMoveList",
+	cleanupapi.PoolResource:   "ShiftPVPoolList",
+}
+
 type fakeVolumeRegistry struct {
 	state     volumeapi.State
 	poolNodes []string
 }
 
 type retryDeleteVolumeRegistry struct {
-	state       volumeapi.State
-	exists      bool
-	deleteCalls int
-	deleteFirst bool
+	state             volumeapi.State
+	exists            bool
+	deleteCalls       int
+	deleteFirst       bool
+	deletionRequested bool
+	finalizersRemoved int
+	events            []string
 }
 
-func (r *retryDeleteVolumeRegistry) BeginCreate(context.Context, string, string) (volumeapi.State, error) {
+func (r *retryDeleteVolumeRegistry) BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error) {
 	return r.state, nil
 }
 
@@ -57,14 +66,33 @@ func (r *retryDeleteVolumeRegistry) Delete(_ context.Context, _ string, uid stri
 	if r.exists && r.state.UID != uid {
 		return volumeapi.ErrStateConflict
 	}
+	r.events = append(r.events, "delete")
 	r.deleteCalls++
 	if r.deleteCalls == 1 {
 		if r.deleteFirst {
-			r.exists = false
+			r.deletionRequested = true
 		}
 		return apierrors.NewTimeoutError("volume state delete response timed out", 1)
 	}
-	r.exists = false
+	r.deletionRequested = true
+	if r.finalizersRemoved > 0 {
+		r.exists = false
+	}
+	return nil
+}
+
+func (r *retryDeleteVolumeRegistry) RemoveVolumeFinalizer(_ context.Context, _ string, uid string) error {
+	if !r.exists {
+		return nil
+	}
+	if r.state.UID != uid {
+		return volumeapi.ErrStateConflict
+	}
+	r.events = append(r.events, "remove-finalizer")
+	r.finalizersRemoved++
+	if r.deletionRequested {
+		r.exists = false
+	}
 	return nil
 }
 
@@ -81,10 +109,19 @@ func (r *retryDeleteVolumeRegistry) BeginDelete(_ context.Context, volumeID, uid
 
 func (*retryDeleteVolumeRegistry) PoolNodes(context.Context) ([]string, error) { return nil, nil }
 
-func (f *fakeVolumeRegistry) Get(context.Context, string) (volumeapi.State, error) {
+func (f *fakeVolumeRegistry) Get(_ context.Context, id string) (volumeapi.State, error) {
+	if f.state.UID == "" && f.state.Phase == "" && f.state.CurrentCopy == nil && f.state.CapacityBytes == 0 {
+		return volumeapi.State{}, apierrors.NewNotFound(schema.GroupResource{Group: "shiftpv.io", Resource: "shiftpvvolumes"}, id)
+	}
 	return f.state, nil
 }
 func (f *fakeVolumeRegistry) Delete(_ context.Context, _ string, uid string) error {
+	if f.state.UID != "" && f.state.UID != uid {
+		return volumeapi.ErrStateConflict
+	}
+	return nil
+}
+func (f *fakeVolumeRegistry) RemoveVolumeFinalizer(_ context.Context, _ string, uid string) error {
 	if f.state.UID != "" && f.state.UID != uid {
 		return volumeapi.ErrStateConflict
 	}
@@ -97,14 +134,19 @@ func (f *fakeVolumeRegistry) PoolNodes(context.Context) ([]string, error) {
 	return []string{f.state.OwnerNode}, nil
 }
 
-func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, volumeID, nodeName string) (volumeapi.State, error) {
+func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, volumeID, requestName, nodeName string, capacityBytes int64) (volumeapi.State, error) {
 	if f.state.CurrentCopy == nil {
 		copy := volume.CopyIdentity{
 			InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid",
 			VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "initial-volume-uid",
 			NodeName: nodeName, Role: volume.RoleServing,
 		}
-		f.state = volumeapi.State{UID: copy.VolumeUID, Phase: volumeapi.PhasePending, OwnerNode: nodeName, CurrentCopy: &copy}
+		f.state = volumeapi.State{
+			UID: copy.VolumeUID, RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: nodeName,
+			Phase: volumeapi.PhasePending, OwnerNode: nodeName, CurrentCopy: &copy,
+		}
+	} else if err := validateCreateIntent(f.state, requestName, nodeName, capacityBytes); err != nil {
+		return volumeapi.State{}, err
 	}
 	return f.state, nil
 }
@@ -146,7 +188,7 @@ type durableCreateRegistry struct {
 	completeCalls int
 }
 
-func (r *durableCreateRegistry) BeginCreate(context.Context, string, string) (volumeapi.State, error) {
+func (r *durableCreateRegistry) BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error) {
 	*r.events = append(*r.events, "intent")
 	return r.state, r.beginErr
 }
@@ -165,6 +207,8 @@ type identityCreateOperator struct {
 }
 
 type receiptCleanupOperator struct{ calls int }
+
+type verifyingCleanupOperator struct{ calls int }
 
 type blockingCreateOperator struct {
 	started chan struct{}
@@ -199,12 +243,7 @@ func configuredService(service *Service) *Service {
 		service.Volumes = &fakeVolumeRegistry{poolNodes: []string{"worker-a", "worker-b"}}
 	}
 	if service.Cleanups == nil {
-		client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{cleanupapi.Resource: "ShiftPVCleanupList"})
-		client.PrependReactor("create", "shiftpvcleanups", func(action k8stesting.Action) (bool, runtime.Object, error) {
-			object := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
-			object.SetUID("cleanup-uid")
-			return false, nil, nil
-		})
+		client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), cleanupListKinds)
 		service.Cleanups = &cleanupapi.Store{Client: client}
 	}
 	if service.CleanupOperator == nil {
@@ -218,18 +257,106 @@ func (o *receiptCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi
 	if cleanup.Status.Phase == cleanupapi.PhaseVerifying || cleanup.Status.Phase == cleanupapi.PhaseCompleted {
 		return cleanup, nil
 	}
-	executor := &cleanupapi.Executor{JobName: "job", JobUID: "job-uid", NodeName: cleanup.Spec.Target.NodeName}
-	if err := store.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+	executor := &cleanupapi.Executor{JobName: "job", JobUID: "job-uid", PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
+	if err := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	running, err := store.Get(ctx, cleanup.Spec.Authority)
+	if err != nil {
 		return cleanupapi.Cleanup{}, err
 	}
 	receipt := &cleanupapi.Receipt{
 		OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID,
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+		LocalReceiptDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
-	if err := store.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+	if err := store.UpdateStatus(ctx, running, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
 		return cleanupapi.Cleanup{}, err
 	}
-	return store.Get(ctx, cleanup.Name)
+	verifying, err := store.Get(ctx, cleanup.Spec.Authority)
+	if err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	proof := &cleanupapi.AbsenceProof{
+		RequestID: "absence-proof", PoolName: cleanup.Spec.Target.PoolName, PoolUID: cleanup.Spec.Target.PoolUID,
+		RequiredGeneration: 1,
+	}
+	if err := store.UpdateStatus(ctx, verifying, cleanupapi.Status{
+		Phase: cleanupapi.PhaseConfirmingAbsence, Executor: executor, Receipt: receipt, AbsenceProof: proof,
+	}); err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	confirming, err := store.Get(ctx, cleanup.Spec.Authority)
+	if err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	proof.Valid = true
+	proof.Complete = true
+	proof.Absent = true
+	proof.ObservedGeneration = 1
+	proof.ConfirmedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := store.UpdateStatus(ctx, confirming, cleanupapi.Status{
+		Phase: cleanupapi.PhaseCompleted, Executor: executor, Receipt: receipt, AbsenceProof: proof,
+		SettledAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	return store.Get(ctx, cleanup.Spec.Authority)
+}
+
+func (o *verifyingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store *cleanupapi.Store) (cleanupapi.Cleanup, error) {
+	o.calls++
+	executor := &cleanupapi.Executor{JobName: "job", JobUID: "job-uid", PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
+	if err := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	running, err := store.Get(ctx, cleanup.Spec.Authority)
+	if err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	receipt := &cleanupapi.Receipt{
+		OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+		LocalReceiptDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	if err := store.UpdateStatus(ctx, running, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	return store.Get(ctx, cleanup.Spec.Authority)
+}
+
+func cleanupParentVolume(volumeID string, copy volume.CopyIdentity) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1",
+		"kind":       "ShiftPVVolume",
+		"metadata": map[string]any{
+			"name": volumeID, "uid": copy.VolumeUID, "generation": int64(1),
+			"finalizers": []any{cleanupapi.VolumeProtectionFinalizer},
+		},
+		"spec": map[string]any{
+			"volumeID": volumeID, "requestName": "pvc", "initialNode": copy.NodeName, "capacityBytes": int64(64 << 20),
+		},
+	}}
+}
+
+func cleanupPool(copy volume.CopyIdentity, present bool) *unstructured.Unstructured {
+	identity, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(&copy)
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1",
+		"kind":       "ShiftPVPool",
+		"metadata": map[string]any{
+			"name": copy.PoolName, "uid": copy.PoolUID, "generation": int64(2),
+			"finalizers": []any{cleanupapi.PoolProtectionFinalizer},
+		},
+		"spec": map[string]any{"nodeName": copy.NodeName, "scanEpoch": int64(1)},
+		"status": map[string]any{
+			"observedGeneration": int64(2),
+			"inventory": map[string]any{
+				"observedAt": time.Now().UTC().Format(time.RFC3339Nano), "valid": true, "truncated": false,
+				"copies": []any{map[string]any{"marker": "copy", "identity": identity, "present": present}},
+			},
+		},
+	}}
 }
 
 func TestDeleteVolumeUsesCleanupIntentAndReceiptBeforeMetadata(t *testing.T) {
@@ -241,16 +368,11 @@ func TestDeleteVolumeUsesCleanupIntentAndReceiptBeforeMetadata(t *testing.T) {
 		NodeName: "worker-a", Role: volume.RoleServing,
 	}
 	registry := &retryDeleteVolumeRegistry{state: volumeapi.State{UID: copy.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy}, exists: true, deleteCalls: 1}
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{cleanupapi.Resource: "ShiftPVCleanupList"})
-	dynamicClient.PrependReactor("create", "shiftpvcleanups", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		object := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
-		object.SetUID("cleanup-uid")
-		return false, nil, nil
-	})
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), cleanupListKinds, cleanupParentVolume(volumeID, copy))
 	cleanups := &cleanupapi.Store{Client: dynamicClient}
 	operator := &fakeDirectoryOperator{}
 	reclaimer := &receiptCleanupOperator{}
-	client := fake.NewClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "shiftpv-system"}, Data: map[string]string{"nodeName": "worker-a"}})
+	client := fake.NewClientset()
 	service := &Service{
 		Client: client, Namespace: "shiftpv-system", Operator: operator, Volumes: registry,
 		Cleanups: cleanups, CleanupOperator: reclaimer,
@@ -268,11 +390,74 @@ func TestDeleteVolumeUsesCleanupIntentAndReceiptBeforeMetadata(t *testing.T) {
 	if err != nil || len(items) != 1 || items[0].Status.Phase != cleanupapi.PhaseCompleted || items[0].Status.Receipt == nil {
 		t.Fatalf("cleanups=%#v err=%v", items, err)
 	}
-	if _, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(ctx, volumeID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("reservation remains: %v", err)
-	}
 	if registry.exists {
 		t.Fatal("volume metadata remains after verified receipt")
+	}
+	if len(registry.events) != 2 || registry.events[0] != "delete" || registry.events[1] != "remove-finalizer" {
+		t.Fatalf("settled deletion order=%v, want delete request before finalizer release", registry.events)
+	}
+}
+
+func TestDeleteVolumeRetainsFinalizerAndCapacityUntilCausalAbsenceProof(t *testing.T) {
+	ctx := context.Background()
+	volumeID := "shiftpv-1023456789abcdef0123456789abcdef"
+	copy := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid",
+		VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "copy-id",
+		NodeName: "worker-a", Role: volume.RoleServing,
+	}
+	registry := &retryDeleteVolumeRegistry{
+		state: volumeapi.State{
+			UID: copy.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName,
+			CapacityBytes: 64 << 20, CurrentCopy: &copy,
+		},
+		exists: true, deleteCalls: 1,
+	}
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(), cleanupListKinds, cleanupParentVolume(volumeID, copy), cleanupPool(copy, true),
+	)
+	dynamicClient.PrependReactor("update", "shiftpvpools", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		object := action.(k8stesting.UpdateAction).GetObject().(*unstructured.Unstructured)
+		if action.GetSubresource() == "" {
+			object.SetGeneration(object.GetGeneration() + 1)
+		}
+		return false, nil, nil
+	})
+	cleanups := &cleanupapi.Store{Client: dynamicClient}
+	reclaimer := &verifyingCleanupOperator{}
+	service := &Service{
+		Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry,
+		Cleanups: cleanups, CleanupOperator: reclaimer,
+	}
+	request := &csi.DeleteVolumeRequest{VolumeId: volumeID}
+	if _, err := service.DeleteVolume(ctx, request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("receipt-only delete code=%s err=%v", status.Code(err), err)
+	}
+	if !registry.exists || registry.finalizersRemoved != 0 || registry.deleteCalls != 1 {
+		t.Fatalf("receipt released metadata early: exists=%t finalizers=%d deletes=%d", registry.exists, registry.finalizersRemoved, registry.deleteCalls)
+	}
+	journal, err := cleanups.Get(ctx, cleanupapi.Authority{Kind: "ShiftPVVolume", Name: volumeID, UID: copy.VolumeUID})
+	if err != nil || journal.Status.Phase != cleanupapi.PhaseConfirmingAbsence || journal.Status.AbsenceProof == nil {
+		t.Fatalf("journal=%#v err=%v", journal, err)
+	}
+	pool, err := dynamicClient.Resource(cleanupapi.PoolResource).Get(ctx, copy.PoolName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedField(pool.Object, pool.GetGeneration(), "status", "observedGeneration"); err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedSlice(pool.Object, []any{}, "status", "inventory", "copies"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dynamicClient.Resource(cleanupapi.PoolResource).UpdateStatus(ctx, pool, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DeleteVolume(ctx, request); err != nil {
+		t.Fatalf("fresh exact absence did not settle delete: %v", err)
+	}
+	if registry.exists || registry.finalizersRemoved != 1 || reclaimer.calls != 1 {
+		t.Fatalf("settled delete state: exists=%t finalizers=%d effects=%d", registry.exists, registry.finalizersRemoved, reclaimer.calls)
 	}
 }
 
@@ -282,15 +467,17 @@ func TestCreateVolumeIsBlockedByUnresolvedCleanupFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{cleanupapi.Resource: "ShiftPVCleanupList"})
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), cleanupListKinds)
 	cleanups := &cleanupapi.Store{Client: dynamicClient}
 	target := volume.CopyIdentity{
 		InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid", VolumeID: volumeID,
 		VolumeUID: "old-volume-uid", CopyID: "old-copy", NodeName: "worker-a", Role: volume.RoleServing,
 	}
+	dynamicClient = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), cleanupListKinds, cleanupParentVolume(volumeID, target))
+	cleanups = &cleanupapi.Store{Client: dynamicClient}
 	if _, err := cleanups.Ensure(context.Background(), cleanupapi.Spec{
-		OperationID: "review-old-copy", Target: target, Reason: "OrphanReclaim",
-		Authority: cleanupapi.Authority{Kind: "Namespace", Name: "kube-system", UID: target.InstallationID},
+		OperationID: "delete-old-volume", Target: target, Reason: "VolumeDelete",
+		Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: volumeID, UID: target.VolumeUID},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +489,7 @@ func TestCreateVolumeIsBlockedByUnresolvedCleanupFence(t *testing.T) {
 	}
 }
 
-func TestDeleteVolumeConvergesAfterAcceptedReservationDeleteTimeout(t *testing.T) {
+func TestDeleteVolumeConvergesAfterAcceptedVolumeStateDeleteTimeout(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-1123456789abcdef0123456789abcdef"
 	copy := volume.CopyIdentity{
@@ -312,33 +499,12 @@ func TestDeleteVolumeConvergesAfterAcceptedReservationDeleteTimeout(t *testing.T
 	}
 	registry := &retryDeleteVolumeRegistry{
 		state:  volumeapi.State{UID: copy.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy},
-		exists: true, deleteCalls: 1,
+		exists: true, deleteFirst: true,
 	}
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{cleanupapi.Resource: "ShiftPVCleanupList"})
-	dynamicClient.PrependReactor("create", "shiftpvcleanups", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		object := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
-		object.SetUID("cleanup-uid")
-		return false, nil, nil
-	})
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), cleanupListKinds, cleanupParentVolume(volumeID, copy))
 	cleanups := &cleanupapi.Store{Client: dynamicClient}
 	reclaimer := &receiptCleanupOperator{}
-	reservation := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "shiftpv-system", UID: "reservation-uid"},
-		Data:       map[string]string{"nodeName": copy.NodeName, "volumeID": volumeID, "volumeUID": copy.VolumeUID},
-	}
-	client := fake.NewClientset(reservation)
-	timedOut := false
-	client.PrependReactor("delete", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		if timedOut {
-			return false, nil, nil
-		}
-		timedOut = true
-		deleteAction := action.(k8stesting.DeleteAction)
-		if err := client.Tracker().Delete(action.GetResource(), action.GetNamespace(), deleteAction.GetName()); err != nil {
-			return true, nil, err
-		}
-		return true, nil, apierrors.NewTimeoutError("reservation delete response lost", 1)
-	})
+	client := fake.NewClientset()
 	service := &Service{
 		Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry,
 		Cleanups: cleanups, CleanupOperator: reclaimer,
@@ -347,13 +513,13 @@ func TestDeleteVolumeConvergesAfterAcceptedReservationDeleteTimeout(t *testing.T
 	if _, err := service.DeleteVolume(ctx, request); status.Code(err) != codes.Unavailable {
 		t.Fatalf("first delete code=%s err=%v", status.Code(err), err)
 	}
-	if _, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(ctx, volumeID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("accepted reservation deletion was not retained: %v", err)
+	if !registry.exists || registry.finalizersRemoved != 0 || !registry.deletionRequested {
+		t.Fatalf("accepted delete timeout lost protection: exists=%t finalizers=%d requested=%t", registry.exists, registry.finalizersRemoved, registry.deletionRequested)
 	}
 	if _, err := service.DeleteVolume(ctx, request); err != nil {
 		t.Fatalf("retry did not converge: %v", err)
 	}
-	if registry.exists || reclaimer.calls != 2 {
+	if registry.exists || reclaimer.calls != 1 {
 		t.Fatalf("exists=%t cleanup calls=%d", registry.exists, reclaimer.calls)
 	}
 }
@@ -379,16 +545,12 @@ func TestDeleteVolumePreservesReservationWithoutExactCopyState(t *testing.T) {
 	registry := &retryDeleteVolumeRegistry{
 		state: volumeapi.State{UID: "volume-uid", Phase: volumeapi.PhaseReady, OwnerNode: "worker-a"}, exists: true,
 	}
-	reservation := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "shiftpv-system"}, Data: map[string]string{"nodeName": "worker-a"}}
-	client := fake.NewClientset(reservation)
+	client := fake.NewClientset()
 	service := configuredService(&Service{
 		Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry,
 	})
 	if _, err := service.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: volumeID}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("missing exact copy state was accepted: %v", err)
-	}
-	if _, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{}); err != nil {
-		t.Fatalf("reservation was removed: %v", err)
 	}
 }
 
@@ -431,15 +593,10 @@ func TestConcurrentDeleteVolumeCallsRunOneExactCleanup(t *testing.T) {
 		state:  volumeapi.State{UID: copy.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy},
 		exists: true, deleteCalls: 1,
 	}
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{cleanupapi.Resource: "ShiftPVCleanupList"})
-	dynamicClient.PrependReactor("create", "shiftpvcleanups", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		object := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
-		object.SetUID("cleanup-uid")
-		return false, nil, nil
-	})
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), cleanupListKinds, cleanupParentVolume(volumeID, copy))
 	cleaner := &blockingCleanupOperator{started: make(chan struct{}, 1), release: make(chan struct{})}
 	service := &Service{
-		Client:    fake.NewClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "shiftpv-system"}, Data: map[string]string{"nodeName": copy.NodeName}}),
+		Client:    fake.NewClientset(),
 		Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry,
 		Cleanups: &cleanupapi.Store{Client: dynamicClient}, CleanupOperator: cleaner,
 	}
@@ -513,68 +670,19 @@ func TestCreateVolumeNeverRunsEffectWithoutDurableIntent(t *testing.T) {
 	}
 }
 
-func TestCreateVolumeReleasesExactUnboundReservationAfterCopyConflict(t *testing.T) {
+func TestCreateVolumeDoesNotRunEffectAfterCopyConflict(t *testing.T) {
 	events := []string{}
 	registry := &durableCreateRegistry{events: &events, beginErr: volumeapi.ErrPoolCopyConflict}
 	client := fake.NewClientset()
-	client.PrependReactor("create", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		reservation := action.(k8stesting.CreateAction).GetObject().(*corev1.ConfigMap)
-		reservation.UID = "reservation-uid"
-		reservation.ResourceVersion = "reservation-rv"
-		return false, nil, nil
-	})
-	client.PrependReactor("delete", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		options := action.(k8stesting.DeleteAction).GetDeleteOptions()
-		if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != "reservation-uid" ||
-			options.Preconditions.ResourceVersion == nil || *options.Preconditions.ResourceVersion != "reservation-rv" {
-			t.Fatalf("reservation delete preconditions = %#v", options.Preconditions)
-		}
-		return false, nil, nil
-	})
 	service := configuredService(&Service{Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
 	req := validCreateRequest("worker-a")
-	volumeID, err := volume.IDFromName(req.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	_, err = service.CreateVolume(context.Background(), req)
+	_, err := service.CreateVolume(context.Background(), req)
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("copy conflict code=%s err=%v", status.Code(err), err)
 	}
 	if got := strings.Join(events, ","); got != "intent" {
 		t.Fatalf("unexpected lifecycle events: %s", got)
-	}
-	if _, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("unbound reservation remained after copy conflict: %v", err)
-	}
-}
-
-func TestCreateVolumePreservesConcurrentlyBoundReservationAfterCopyConflict(t *testing.T) {
-	events := []string{}
-	registry := &durableCreateRegistry{events: &events, beginErr: volumeapi.ErrPoolCopyConflict}
-	client := fake.NewClientset()
-	client.PrependReactor("create", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		reservation := action.(k8stesting.CreateAction).GetObject().(*corev1.ConfigMap)
-		reservation.UID = "reservation-uid"
-		reservation.ResourceVersion = "reservation-rv"
-		reservation.Data["volumeUID"] = "concurrent-volume-uid"
-		return false, nil, nil
-	})
-	service := configuredService(&Service{Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
-	req := validCreateRequest("worker-a")
-	volumeID, err := volume.IDFromName(req.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = service.CreateVolume(context.Background(), req)
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("copy conflict code=%s err=%v", status.Code(err), err)
-	}
-	reservation, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{})
-	if err != nil || reservation.Data["volumeUID"] != "concurrent-volume-uid" {
-		t.Fatalf("concurrently bound reservation changed: reservation=%#v err=%v", reservation, err)
 	}
 }
 
@@ -796,12 +904,9 @@ func TestCreateVolumeReportsDirectoryFailure(t *testing.T) {
 	if status.Code(err) != codes.Internal {
 		t.Fatalf("expected Internal, got %v", err)
 	}
-	id, idErr := volume.IDFromName(req.Name)
-	if idErr != nil {
-		t.Fatal(idErr)
-	}
-	if _, getErr := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), id, metav1.GetOptions{}); getErr != nil {
-		t.Fatalf("expected reservation to remain retryable: %v", getErr)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	if registry.state.RequestName != req.Name || registry.state.InitialNode != "worker-a" {
+		t.Fatalf("volume intent was not preserved for retry: %#v", registry.state)
 	}
 }
 
@@ -815,80 +920,12 @@ func TestCreateVolumeMapsRetryableDirectoryFailureToUnavailable(t *testing.T) {
 	}
 }
 
-func TestCreateVolumeRetriesAfterAmbiguousReservationTimeout(t *testing.T) {
-	client := fake.NewClientset()
-	operator := &fakeDirectoryOperator{}
-	service := configuredService(&Service{Client: client, Namespace: "shiftpv-system", Operator: operator})
-	req := validCreateRequest("worker-a")
-	timedOut := false
-	client.PrependReactor("create", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		if timedOut {
-			return false, nil, nil
-		}
-		timedOut = true
-		create := action.(k8stesting.CreateAction)
-		cm := create.GetObject().(*corev1.ConfigMap).DeepCopy()
-		if err := client.Tracker().Create(action.GetResource(), cm, action.GetNamespace()); err != nil {
-			return true, nil, err
-		}
-		return true, nil, apierrors.NewTimeoutError("reservation response timed out", 1)
-	})
-
-	if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
-		t.Fatalf("expected retryable Unavailable, got %v", err)
-	}
-	if operator.createCalls != 0 {
-		t.Fatalf("directory operation ran after ambiguous reservation response: %d calls", operator.createCalls)
-	}
-	response, err := service.CreateVolume(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.GetVolume().GetVolumeId() == "" || operator.createCalls != 1 {
-		t.Fatalf("retry did not converge: response=%#v createCalls=%d", response, operator.createCalls)
-	}
-}
-
-func TestCreateVolumeRetriesAfterReservationBindingFailure(t *testing.T) {
-	client := fake.NewClientset()
-	operator := &fakeDirectoryOperator{}
-	service := configuredService(&Service{Client: client, Namespace: "shiftpv-system", Operator: operator})
-	req := validCreateRequest("worker-a")
-	volumeID, err := volume.IDFromName(req.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	failed := false
-	client.PrependReactor("update", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
-		if failed {
-			return false, nil, nil
-		}
-		failed = true
-		return true, nil, apierrors.NewServiceUnavailable("reservation binding unavailable")
-	})
-
-	if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
-		t.Fatalf("binding failure code=%s err=%v", status.Code(err), err)
-	}
-	reservation, err := client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{})
-	if err != nil || reservation.Data["volumeUID"] != "" || operator.createCalls != 0 {
-		t.Fatalf("unbound intent was not preserved safely: reservation=%#v createCalls=%d err=%v", reservation, operator.createCalls, err)
-	}
-	if _, err := service.CreateVolume(context.Background(), req); err != nil {
-		t.Fatalf("retry did not bind and continue the durable creation: %v", err)
-	}
-	reservation, err = client.CoreV1().ConfigMaps("shiftpv-system").Get(context.Background(), volumeID, metav1.GetOptions{})
-	if err != nil || reservation.Data["volumeUID"] != "volume-uid" || operator.createCalls != 1 {
-		t.Fatalf("retry did not converge: reservation=%#v createCalls=%d err=%v", reservation, operator.createCalls, err)
-	}
-}
-
 func TestCreateVolumePreservesDeadlineExceededCode(t *testing.T) {
-	client := fake.NewClientset()
-	client.PrependReactor("create", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, context.DeadlineExceeded
+	events := []string{}
+	service := configuredService(&Service{
+		Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
+		Volumes: &durableCreateRegistry{events: &events, beginErr: context.DeadlineExceeded},
 	})
-	service := configuredService(&Service{Client: client, Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}})
 
 	if _, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a")); status.Code(err) != codes.DeadlineExceeded {
 		t.Fatalf("expected DeadlineExceeded, got %v", err)
@@ -961,25 +998,6 @@ type rejectingProvisioningGate struct{}
 
 func (rejectingProvisioningGate) Enter() (func(), error) {
 	return nil, errors.New("quiescing")
-}
-
-func reservationForCreateRequest(id string, req *csi.CreateVolumeRequest) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: id, Namespace: "shiftpv-system",
-			Labels: map[string]string{
-				"app.kubernetes.io/name":      "shiftpv",
-				"app.kubernetes.io/component": "volume-reservation",
-			},
-		},
-		Data: map[string]string{
-			"requestName": req.Name,
-			"volumeID":    id,
-			"volumeUID":   "volume-uid",
-			"nodeName":    req.AccessibilityRequirements.Preferred[0].Segments[TopologyKey],
-			"capacity":    "67108864",
-		},
-	}
 }
 
 func validCreateRequest(node string) *csi.CreateVolumeRequest {

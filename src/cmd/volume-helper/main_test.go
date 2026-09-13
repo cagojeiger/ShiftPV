@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
-	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +20,24 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
+func TestMoveCopyArgumentsPreserveFilesystemContract(t *testing.T) {
+	copyArguments, verifyArguments := moveCopyArguments("rsync://source/data/", "/pool/incoming")
+	wantCopy := []string{
+		"-aHAXS", "--numeric-ids", "--one-file-system", "--no-devices", "--delete", "--fsync",
+		"rsync://source/data/", "/pool/incoming/",
+	}
+	wantVerify := []string{
+		"-aHAXS", "--numeric-ids", "--one-file-system", "--no-devices", "--delete",
+		"--checksum", "--dry-run", "--itemize-changes", "rsync://source/data/", "/pool/incoming/",
+	}
+	if !reflect.DeepEqual(copyArguments, wantCopy) {
+		t.Fatalf("copy arguments = %#v", copyArguments)
+	}
+	if !reflect.DeepEqual(verifyArguments, wantVerify) {
+		t.Fatalf("verify arguments = %#v", verifyArguments)
+	}
+}
+
 func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 	const volumeID = "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	copy := volume.CopyIdentity{
@@ -34,19 +52,19 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{volumeapi.VolumeResource: "ShiftPVVolumeList"}, object)
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	cleanup := cleanupapi.Cleanup{Spec: cleanupapi.Spec{
-		OperationID: "delete-" + copy.VolumeUID, Target: copy, Reason: "VolumeDelete", Approved: true,
+		OperationID: "delete-" + copy.VolumeUID, Target: copy, Reason: "VolumeDelete",
 		Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: volumeID, UID: copy.VolumeUID},
 	}}
 	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy}); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
 		t.Fatal("Ready volume was accepted without a deletion fence")
 	}
 	if _, err := registry.BeginDelete(context.Background(), volumeID, copy.VolumeUID, copy); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err != nil {
+	if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err != nil {
 		t.Fatalf("durably fenced deletion was rejected: %v", err)
 	}
 	state, err := registry.Get(context.Background(), volumeID)
@@ -57,200 +75,201 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 	if err := registry.SetState(context.Background(), volumeID, state); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), nil, registry, "", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
 		t.Fatal("published volume crossed deletion authority")
 	}
 }
 
-func TestOrphanCleanupAuthorityRequiresNoLiveReferenceMountOrReplacementReservation(t *testing.T) {
-	const (
-		volumeID             = "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-		reservationUID       = "reservation-uid"
-		replacementVolumeUID = "replacement-volume-uid"
-	)
-	target := volume.CopyIdentity{
-		InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid", VolumeID: volumeID,
-		VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: "node-a", Role: volume.RoleServing,
-	}
-	poolObject := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool",
-		"metadata": map[string]any{"name": target.PoolName, "uid": target.PoolUID, "generation": int64(1)},
-		"spec":     map[string]any{"nodeName": target.NodeName, "mountPath": "/pool", "capacity": map[string]any{"limit": "1Gi"}},
-	}}
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList",
-	}, poolObject)
-	registry := &volumeapi.Registry{Client: dynamicClient}
-	now := metav1.NewTime(time.Now().UTC().Add(-time.Minute))
-	poolStatus := volumeapi.PoolStatus{
-		ObservedGeneration: 1, LastProbeTime: now,
-		Conditions: []metav1.Condition{
-			{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "Ready", Message: "ready"},
-			{Type: volumeapi.PoolConditionAccessible, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "PathAccessible", Message: "accessible"},
-			{Type: volumeapi.PoolConditionWritable, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "PathWritable", Message: "writable"},
-			{Type: volumeapi.PoolConditionCapacityReadable, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "CapacityReadable", Message: "capacity readable"},
-		},
-		Inventory: &volumeapi.PoolInventory{ObservedAt: now, Valid: true, Copies: []volumeapi.CopyObservation{{Marker: "copy", Identity: &target, Present: true}}},
-	}
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
-		t.Fatal(err)
-	}
-	reservation := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "system", UID: types.UID(reservationUID), Labels: map[string]string{
-			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
-		}},
-		Data: map[string]string{"volumeID": volumeID, "volumeUID": replacementVolumeUID},
-	}
-	client := fake.NewClientset(
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kube-system", UID: types.UID(target.InstallationID)}}, reservation,
-	)
+func TestUnknownOrphanCleanupHasNoExecutableAuthority(t *testing.T) {
 	cleanup := cleanupapi.Cleanup{Spec: cleanupapi.Spec{
-		OperationID: "review-copy-id", Target: target, Reason: "OrphanReclaim", Approved: true,
-		Authority: cleanupapi.Authority{Kind: "Namespace", Name: "kube-system", UID: target.InstallationID},
+		OperationID: "review-orphan", Reason: "OrphanReclaim",
+		Target: volume.CopyIdentity{
+			InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid",
+			VolumeID: "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", VolumeUID: "volume-uid",
+			CopyID: "copy-id", NodeName: "node-a", Role: volume.RoleServing,
+		},
+		Authority: cleanupapi.Authority{Kind: "Namespace", Name: "kube-system", UID: "installation"},
 	}}
-	recoveredMove := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
-		"metadata": map[string]any{"name": "recovered-move", "uid": "recovered-move-uid"},
-		"spec":     map[string]any{"volumeID": volumeID, "sourceNode": target.NodeName},
-	}}
-	if _, err := dynamicClient.Resource(volumeapi.MoveResource).Create(context.Background(), recoveredMove, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
+	if err := cleanup.Spec.Validate(); err == nil {
+		t.Fatal("orphan cleanup intent unexpectedly validated")
 	}
-	recoveredStatus := volumeapi.MoveStatus{
-		Phase: "Blocked", RecoveryPhase: "Recovered", LastTransitionTime: now.Add(-time.Second).Format(time.RFC3339Nano), IncomingCopy: &target,
+	if err := verifyCleanupAuthority(context.Background(), nil, cleanup, false); err == nil {
+		t.Fatal("unknown orphan observation gained destructive authority")
 	}
-	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), string(recoveredMove.GetUID()), recoveredStatus); err != nil {
-		t.Fatal(err)
+}
+
+func TestCleanupExecutorMustMatchExactRunningPod(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-uid"}, Spec: corev1.PodSpec{NodeName: "worker-a"}}
+	executor := &cleanupapi.Executor{JobName: "cleanup-job", JobUID: "job-uid", PodUID: "pod-uid", NodeName: "worker-a"}
+	if !matchesCleanupExecutor(executor, "cleanup-job", "job-uid", pod) {
+		t.Fatal("exact Pod-bound executor was rejected")
 	}
-	current := target
-	current.VolumeUID, current.CopyID, current.NodeName, current.Role = replacementVolumeUID, "current-copy", "node-b", volume.RoleServing
-	volumeObject := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
-		"metadata": map[string]any{"name": volumeID, "uid": replacementVolumeUID},
-		"spec":     map[string]any{"volumeID": volumeID},
-	}}
-	if _, err := dynamicClient.Resource(volumeapi.VolumeResource).Create(context.Background(), volumeObject, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
+	for name, mutate := range map[string]func(*cleanupapi.Executor, *corev1.Pod){
+		"missing executor": func(current *cleanupapi.Executor, _ *corev1.Pod) { *current = cleanupapi.Executor{} },
+		"job name":         func(current *cleanupapi.Executor, _ *corev1.Pod) { current.JobName = "replacement" },
+		"job UID":          func(current *cleanupapi.Executor, _ *corev1.Pod) { current.JobUID = "replacement" },
+		"Pod UID":          func(current *cleanupapi.Executor, _ *corev1.Pod) { current.PodUID = "replacement" },
+		"node":             func(_ *cleanupapi.Executor, currentPod *corev1.Pod) { currentPod.Spec.NodeName = "worker-b" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changedExecutor := *executor
+			changedPod := pod.DeepCopy()
+			mutate(&changedExecutor, changedPod)
+			if matchesCleanupExecutor(&changedExecutor, "cleanup-job", "job-uid", changedPod) {
+				t.Fatal("changed executor identity was accepted")
+			}
+		})
 	}
-	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{UID: replacementVolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: current.NodeName, CurrentCopy: &current}); err != nil {
-		t.Fatal(err)
+	if matchesCleanupExecutor(nil, "cleanup-job", "job-uid", pod) || matchesCleanupExecutor(executor, "cleanup-job", "job-uid", nil) {
+		t.Fatal("missing executor or Pod was accepted")
 	}
-	persistentVolume := &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{Name: "live-pv"},
-		Spec:       corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "csi.shiftpv.io", VolumeHandle: volumeID}}},
+}
+
+func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.T) {
+	const (
+		volumeID = "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		moveName = "move-recovery"
+		moveUID  = "move-recovery-uid"
+	)
+	source := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid",
+		VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "source-copy", NodeName: "source", Role: volume.RoleServing,
 	}
-	if _, err := client.CoreV1().PersistentVolumes().Create(context.Background(), persistentVolume, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
+	incoming := volume.CopyIdentity{
+		InstallationID: source.InstallationID, PoolName: "destination-pool", PoolUID: "destination-pool-uid",
+		VolumeID: volumeID, VolumeUID: source.VolumeUID, CopyID: "incoming-copy", NodeName: "destination", Role: volume.RoleIncoming,
 	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err != nil {
-		t.Fatalf("superseded copy retained recovered Move or volume-wide authority: %v", err)
-	}
-	recoveredStatus.LastTransitionTime = now.Format(time.RFC3339Nano)
-	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), string(recoveredMove.GetUID()), recoveredStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err == nil {
-		t.Fatal("pre-terminal Pool inventory authorized orphan cleanup")
-	}
-	postTerminal := metav1.NewTime(now.Add(time.Second))
-	poolStatus.LastProbeTime = postTerminal
-	poolStatus.Inventory.ObservedAt = postTerminal
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err != nil {
-		t.Fatalf("post-terminal Pool inventory did not release orphan cleanup: %v", err)
-	}
-	deletingPool, err := dynamicClient.Resource(volumeapi.PoolResource).Get(context.Background(), target.PoolName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	deletionTime := metav1.NewTime(time.Now().UTC())
-	deletingPool.SetDeletionTimestamp(&deletionTime)
-	if _, err := dynamicClient.Resource(volumeapi.PoolResource).Update(context.Background(), deletingPool, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	poolStatus.Conditions[0] = metav1.Condition{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionFalse, ObservedGeneration: 1, LastTransitionTime: deletionTime, Reason: "PoolDeregistering", Message: "new placement is closed"}
-	poolStatus.LastProbeTime = deletionTime
-	poolStatus.Inventory.ObservedAt = deletionTime
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err != nil {
-		t.Fatalf("terminating Pool rejected exact orphan cleanup: %v", err)
-	}
-	withinConfiguredWindow := metav1.NewTime(time.Now().UTC().Add(-5 * time.Minute))
-	recoveredStatus.LastTransitionTime = withinConfiguredWindow.Add(-time.Second).Format(time.RFC3339Nano)
-	if err := registry.SetMoveStatus(context.Background(), recoveredMove.GetName(), string(recoveredMove.GetUID()), recoveredStatus); err != nil {
-		t.Fatal(err)
-	}
-	poolStatus.LastProbeTime = withinConfiguredWindow
-	poolStatus.Inventory.ObservedAt = withinConfiguredWindow
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, 10*time.Minute, false); err != nil {
-		t.Fatalf("configured helper freshness rejected exact orphan cleanup: %v", err)
-	}
-	poolStatus.LastProbeTime = metav1.Now()
-	poolStatus.Inventory.ObservedAt = poolStatus.LastProbeTime
-	poolStatus.Inventory.Valid = false
-	poolStatus.Inventory.Message = "CopyObservationProblem"
-	poolStatus.Inventory.Copies = []volumeapi.CopyObservation{{Marker: "path:.shiftpv/retired/copy-id", Present: true, Problem: "UnrecordedPath"}}
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err == nil {
-		t.Fatal("invalid post-effect inventory was accepted for a fresh orphan cleanup")
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, true); err != nil {
-		t.Fatalf("journaled orphan cleanup could not resume after its own filesystem effect: %v", err)
-	}
-	poolStatus.Inventory.Valid = true
-	poolStatus.Inventory.Message = ""
-	poolStatus.Inventory.Copies = []volumeapi.CopyObservation{{Marker: "copy", Identity: &target, Present: true}}
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := dynamicClient.Resource(volumeapi.MoveResource).Delete(context.Background(), recoveredMove.GetName(), metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := dynamicClient.Resource(volumeapi.VolumeResource).Delete(context.Background(), volumeID, metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err == nil {
-		t.Fatal("PersistentVolume without exact current-copy proof did not revoke orphan cleanup authority")
-	}
-	if err := client.CoreV1().PersistentVolumes().Delete(context.Background(), persistentVolume.Name, metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	poolStatus.Inventory.Copies[0].Published = true
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err == nil {
-		t.Fatal("published mount did not revoke orphan cleanup authority")
-	}
-	poolStatus.Inventory.Copies[0].Published = false
-	poolStatus.Inventory.ObservedAt = metav1.NewTime(time.Now().UTC())
-	poolStatus.LastProbeTime = poolStatus.Inventory.ObservedAt
-	if err := registry.SetPoolStatus(context.Background(), target.PoolName, target.PoolUID, target.NodeName, poolStatus); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.CoreV1().ConfigMaps("system").Delete(context.Background(), volumeID, metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	replacement := reservation.DeepCopy()
-	replacement.ResourceVersion = ""
-	replacement.UID = "replacement-reservation"
-	if _, err := client.CoreV1().ConfigMaps("system").Create(context.Background(), replacement, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, false); err == nil {
-		t.Fatal("replacement reservation did not revoke orphan cleanup authority")
-	}
-	if err := verifyCleanupAuthority(context.Background(), client, registry, "system", cleanup, volumeapi.DefaultPoolReadinessStaleAfter, true); err == nil {
-		t.Fatal("journal replay ignored replacement reservation authority")
+	destination := incoming
+	destination.Role = volume.RoleServing
+
+	for name, test := range map[string]struct {
+		reason, operationID, recoveryOwner string
+		target, current                    volume.CopyIdentity
+	}{
+		"precommit rollback": {
+			reason: "MoveRollback", operationID: "rollback-" + moveUID, recoveryOwner: source.NodeName,
+			target: incoming, current: source,
+		},
+		"postcommit source cleanup": {
+			reason: "MoveSource", operationID: "cleanup-" + moveUID, recoveryOwner: destination.NodeName,
+			target: source, current: destination,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			moveObject := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
+				"metadata": map[string]any{"name": moveName, "uid": moveUID},
+				"spec":     map[string]any{"volumeID": volumeID, "sourceNode": source.NodeName, "recovery": "ResumeOwner"},
+			}}
+			volumeObject := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
+				"metadata": map[string]any{"name": volumeID, "uid": source.VolumeUID},
+				"spec":     map[string]any{"volumeID": volumeID},
+			}}
+			poolObject := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool",
+				"metadata": map[string]any{
+					"name": destination.PoolName, "uid": destination.PoolUID, "generation": int64(1),
+					"finalizers": []any{volumeapi.PoolProtectionFinalizer},
+				},
+				"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool"},
+			}}
+			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+				volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList",
+			}, moveObject, volumeObject, poolObject)
+			registry := &volumeapi.Registry{Client: client}
+			moveStatus := volumeapi.MoveStatus{
+				Phase: "Blocked", RecoveryPhase: "Retiring", RecoveryOwner: test.recoveryOwner,
+				DestinationNode: destination.NodeName, DestinationPoolUID: destination.PoolUID,
+				SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
+			}
+			if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, moveStatus); err != nil {
+				t.Fatal(err)
+			}
+			statePhase := volumeapi.PhaseBlocked
+			if test.reason == "MoveSource" {
+				statePhase = volumeapi.PhaseReady
+			}
+			state := volumeapi.State{
+				UID: source.VolumeUID, Phase: statePhase, OwnerNode: test.current.NodeName,
+				ActiveMove: moveName, CurrentCopy: &test.current, PublishedNodes: []string{test.current.NodeName},
+			}
+			if err := registry.SetState(context.Background(), volumeID, state); err != nil {
+				t.Fatal(err)
+			}
+			if test.reason == "MoveSource" {
+				now := metav1.Now()
+				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
+					ObservedGeneration: 1,
+					LastProbeTime:      now,
+					Conditions:         []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+					Inventory: &volumeapi.PoolInventory{
+						ObservedAt: now, Valid: true,
+						Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: true}},
+					},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cleanup := cleanupapi.Cleanup{Spec: cleanupapi.Spec{
+				OperationID: test.operationID, Target: test.target, Reason: test.reason,
+				Authority: cleanupapi.Authority{Kind: "ShiftPVMove", Name: moveName, UID: moveUID},
+			}}
+			if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err != nil {
+				t.Fatalf("exact recovery cleanup rejected: %v", err)
+			}
+			if test.reason == "MoveSource" {
+				state.PublishedNodes = nil
+				if err := registry.SetState(context.Background(), volumeID, state); err != nil {
+					t.Fatal(err)
+				}
+				if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+					t.Fatal("postcommit source cleanup was accepted before destination publish intent")
+				}
+				state.PublishedNodes = []string{test.current.NodeName}
+				if err := registry.SetState(context.Background(), volumeID, state); err != nil {
+					t.Fatal(err)
+				}
+				now := metav1.Now()
+				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
+					ObservedGeneration: 1,
+					LastProbeTime:      now,
+					Conditions:         []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+					Inventory: &volumeapi.PoolInventory{
+						ObservedAt: now, Valid: true,
+						Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: false}},
+					},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+					t.Fatal("postcommit source cleanup was accepted before scanner publication proof")
+				}
+				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
+					ObservedGeneration: 1,
+					LastProbeTime:      now,
+					Conditions:         []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+					Inventory: &volumeapi.PoolInventory{
+						ObservedAt: now, Valid: true,
+						Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: true}},
+					},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cleanup.Spec.OperationID = "replacement-operation"
+			if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+				t.Fatal("replacement cleanup operation was accepted")
+			}
+			cleanup.Spec.OperationID = test.operationID
+			state.PublishedNodes = append(state.PublishedNodes, test.target.NodeName)
+			if err := registry.SetState(context.Background(), volumeID, state); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+				t.Fatal("published cleanup target was accepted")
+			}
+		})
 	}
 }
 

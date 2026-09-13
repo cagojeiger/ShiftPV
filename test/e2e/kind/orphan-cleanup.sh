@@ -15,36 +15,57 @@ POOL_PATH=/mnt/shiftpv
 MOUNT_TARGET=/var/lib/kubelet/pods/shiftpv-orphan-probe/volumes/kubernetes.io~csi/shiftpv/mount
 PV_NAME=
 VOLUME_ID=
-CLEANUP_NAME=
+COPY_ID=
 MOUNTED=0
 OLD_POOL_UID=
+
+remove_test_copy() {
+	[[ -n "${VOLUME_ID}" && -n "${COPY_ID}" ]] || return
+	docker exec "${NODE}" rm -rf -- "${POOL_PATH}/volumes/${VOLUME_ID}" >/dev/null 2>&1 || true
+	docker exec "${NODE}" rm -f -- \
+		"${POOL_PATH}/.shiftpv/placements/placement-${COPY_ID}.json" \
+		"${POOL_PATH}/.shiftpv/copy-${COPY_ID}.json" \
+		"${POOL_PATH}/.shiftpv/lock-${VOLUME_ID}" >/dev/null 2>&1 || true
+}
 
 cleanup() {
 	if [[ "${MOUNTED}" == "1" ]]; then
 		docker exec "${NODE}" umount "${MOUNT_TARGET}" >/dev/null 2>&1 || true
 	fi
+	remove_test_copy
 	kubectl delete namespace "${NAMESPACE}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-cleanup_for_volume() {
-	kubectl get shiftpvcleanups -o json | jq -r --arg volume "${VOLUME_ID}" \
-		'[.items[] | select(.spec.target.volumeID == $volume) | .metadata.name] | first // ""'
-}
-
 wait_for_inventory_publication() {
 	local expected=$1 deadline=$((SECONDS + 120))
 	while ((SECONDS < deadline)); do
-		if kubectl get "shiftpvpool/${POOL}" -o json | jq -e --arg volume "${VOLUME_ID}" --argjson expected "${expected}" \
-			'.status.inventory.valid == true and any(.status.inventory.copies[]?; .identity.volumeID == $volume and (.published // false) == $expected and .present == true and (.problem // "") == "")' >/dev/null; then
+		if kubectl get "shiftpvpool/${POOL}" -o json | jq -e --arg volume "${VOLUME_ID}" --arg copy "${COPY_ID}" --argjson expected "${expected}" \
+			'.status.inventory.valid == true and any(.status.inventory.copies[]?; .identity.volumeID == $volume and .identity.copyID == $copy and (.published // false) == $expected and .present == true and (.problem // "") == "")' >/dev/null; then
 			return
 		fi
 		sleep 1
 	done
-	echo "Pool inventory did not observe published=${expected} for ${VOLUME_ID}" >&2
+	echo "Pool inventory did not preserve published=${expected} for ${VOLUME_ID}/${COPY_ID}" >&2
 	kubectl get "shiftpvpool/${POOL}" -o yaml >&2 || true
 	return 1
 }
+
+assert_no_orphan_executor() {
+	if kubectl -n shiftpv-system get jobs -o json | jq -e --arg volume "${VOLUME_ID}" \
+		'any(.items[]?; any(.spec.template.spec.containers[]?.args[]?; . == ("--authority-name=" + $volume)))' >/dev/null; then
+		echo "unknown orphan unexpectedly received a cleanup executor: ${VOLUME_ID}" >&2
+		return 1
+	fi
+}
+
+for resource in shiftpvpools.shiftpv.io shiftpvvolumes.shiftpv.io shiftpvmoves.shiftpv.io; do
+	kubectl get "customresourcedefinition/${resource}" >/dev/null
+done
+if kubectl get customresourcedefinition/shiftpvcleanups.shiftpv.io >/dev/null 2>&1; then
+	echo 'standalone ShiftPVCleanup API is still installed' >&2
+	exit 1
+fi
 
 kubectl create namespace "${NAMESPACE}"
 kubectl -n "${NAMESPACE}" apply -f - <<EOF
@@ -73,7 +94,7 @@ spec:
       image: busybox:1.37
       command: [sh, -ec]
       args:
-        - printf 'ShiftPV exact orphan cleanup\n' > /data/payload; sleep 3600
+        - printf 'ShiftPV unknown orphan preservation\n' > /data/payload; sleep 3600
       volumeMounts:
         - name: data
           mountPath: /data
@@ -84,13 +105,15 @@ spec:
 EOF
 kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod/writer --timeout=5m
 PV_NAME=$(kubectl -n "${NAMESPACE}" get pvc/data -o jsonpath='{.spec.volumeName}')
+PVC_UID=$(kubectl -n "${NAMESPACE}" get pvc/data -o jsonpath='{.metadata.uid}')
 VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
-VOLUME_UID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
 COPY_ID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
-RESERVATION_UID=$(kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
 CONTROLLER_SERVICE_ACCOUNT=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o jsonpath='{.spec.template.spec.serviceAccountName}')
 CHECKSUM=$(kubectl -n "${NAMESPACE}" exec writer -- sha256sum /data/payload | awk '{print $1}')
 test "${CHECKSUM}" = "$(docker exec "${NODE}" sha256sum "${POOL_PATH}/volumes/${VOLUME_ID}/payload" | awk '{print $1}')"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${NODE}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 8388608
 
 kubectl -n "${NAMESPACE}" delete pod/writer --wait=true
 kubectl -n "${NAMESPACE}" delete pvc/data --wait=true
@@ -105,51 +128,29 @@ for _ in {1..30}; do
 	sleep 1
 done
 if [[ "${MOUNTED}" != "1" ]]; then
-	echo "could not establish the synthetic kubelet publication mount" >&2
+	echo 'could not establish the synthetic kubelet publication mount' >&2
 	exit 1
 fi
 wait_for_inventory_publication true
 
+# Deliberately simulate loss of the API authority record. The isolated harness
+# removes the finalizer as the trusted controller; normal users must never do
+# this. Once both Volume and PV parents are gone, the copy is unknown.
+kubectl --as="system:serviceaccount:shiftpv-system:${CONTROLLER_SERVICE_ACCOUNT}" \
+	patch "shiftpvvolume/${VOLUME_ID}" --type=merge -p '{"metadata":{"finalizers":[]}}'
 kubectl --as="system:serviceaccount:shiftpv-system:${CONTROLLER_SERVICE_ACCOUNT}" \
 	delete "shiftpvvolume/${VOLUME_ID}" --wait=true
-sleep 35
-if [[ -n "$(cleanup_for_volume)" ]]; then
-	echo "orphan cleanup was discovered while Retain PersistentVolume ${PV_NAME} still existed" >&2
-	exit 1
-fi
-assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
-
 kubectl delete "pv/${PV_NAME}" --wait=true
-deadline=$((SECONDS + 120))
-while ((SECONDS < deadline)); do
-	CLEANUP_NAME=$(cleanup_for_volume)
-	[[ -n "${CLEANUP_NAME}" ]] && break
-	sleep 1
-done
-if [[ -z "${CLEANUP_NAME}" ]]; then
-	echo "exact orphan cleanup contract was not discovered for ${VOLUME_ID}" >&2
-	exit 1
-fi
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.approved}')" = false
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.target.volumeUID}')" = "${VOLUME_UID}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.target.copyID}')" = "${COPY_ID}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.reservationUID}')" = "${RESERVATION_UID}"
-kubectl wait --for=jsonpath='{.status.reason}'=CopyMounted "shiftpvcleanup/${CLEANUP_NAME}" --timeout=2m
+test -z "$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${VOLUME_ID}')].metadata.name}" 2>/dev/null || true)"
 
-kubectl patch "shiftpvcleanup/${CLEANUP_NAME}" --type merge -p '{"spec":{"approved":true}}'
+# Unknown storage is report-only. A mounted or unmounted copy must remain
+# byte-for-byte intact and must never gain an inferred cleanup intent or Job.
 sleep 35
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.phase}')" = NeedsReview
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.reason}')" = CopyMounted
-if kubectl -n shiftpv-system get "job/${CLEANUP_NAME}-effect" >/dev/null 2>&1; then
-	echo "cleanup Job started while the exact orphan copy was mounted" >&2
-	exit 1
-fi
+wait_for_inventory_publication true
+assert_no_orphan_executor
 assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
-kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
+test "${CHECKSUM}" = "$(docker exec "${NODE}" sha256sum "${POOL_PATH}/volumes/${VOLUME_ID}/payload" | awk '{print $1}')"
 
-# Keep the Pool terminating while the approved orphan cleanup runs. New
-# placement is closed, but the exact cleanup must remain executable so the
-# physical copy blocker and Pool finalizer can converge.
 OLD_POOL_UID=$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.metadata.uid}')
 kubectl delete "shiftpvpool/${POOL}" --wait=false
 kubectl wait --for=condition=Ready=false "shiftpvpool/${POOL}" --timeout=2m
@@ -161,18 +162,15 @@ docker exec "${NODE}" umount "${MOUNT_TARGET}"
 docker exec "${NODE}" rmdir "${MOUNT_TARGET}"
 MOUNTED=0
 wait_for_inventory_publication false
-kubectl wait --for=jsonpath='{.status.phase}'=Completed "shiftpvcleanup/${CLEANUP_NAME}" --timeout=4m
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.receipt.operationID}')" = "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.spec.operationID}')"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.receipt.purged}')" = true
-test -n "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.settledAt}')"
-kubectl -n shiftpv-system wait --for=condition=complete "job/${CLEANUP_NAME}-effect" --timeout=2m
-assert_node_absent "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}"
-assert_node_absent "${NODE}" "${POOL_PATH}/.shiftpv/placements/placement-${COPY_ID}.json"
-assert_node_absent "${NODE}" "${POOL_PATH}/.shiftpv/copy-${COPY_ID}.json"
-if kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null 2>&1; then
-	echo "exact orphan reservation remains after settled cleanup" >&2
-	exit 1
-fi
+sleep 35
+assert_no_orphan_executor
+assert_node_file "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload"
+test -n "$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.metadata.deletionTimestamp}')"
+
+# The product intentionally provides no automatic destructive path for an
+# unknown orphan. Remove this test-owned copy out of band so the shared Kind
+# suite can continue, then prove Pool deregistration converges.
+remove_test_copy
 kubectl wait --for=delete "shiftpvpool/${POOL}" --timeout=2m
 
 kubectl apply -f - <<EOF
@@ -195,4 +193,6 @@ if [[ "${NEW_POOL_UID}" == "${OLD_POOL_UID}" ]]; then
 	exit 1
 fi
 
-echo "ShiftPV exact orphan cleanup E2E passed during Pool deregistration: volume=${VOLUME_ID} cleanup=${CLEANUP_NAME} checksum=${CHECKSUM}"
+trap - EXIT
+cleanup
+echo "ShiftPV unknown orphan report-only E2E passed: volume=${VOLUME_ID} copy=${COPY_ID} checksum=${CHECKSUM}"

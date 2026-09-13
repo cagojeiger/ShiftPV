@@ -9,12 +9,8 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
@@ -198,15 +194,19 @@ func TestMoveJobsUseIdentityHelperAndRejectReplacement(t *testing.T) {
 type receiptCleanupOperator struct{}
 
 func (receiptCleanupOperator) Reclaim(ctx context.Context, request cleanupapi.Cleanup, store *cleanupapi.Store) (cleanupapi.Cleanup, error) {
-	executor := &cleanupapi.Executor{JobName: request.Name + "-effect", JobUID: "job-uid", NodeName: request.Spec.Target.NodeName}
-	if err := store.UpdateStatus(ctx, request.Name, request.UID, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+	executor := &cleanupapi.Executor{JobName: request.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: request.Spec.Target.NodeName}
+	if err := store.UpdateStatus(ctx, request, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 		return cleanupapi.Cleanup{}, err
 	}
-	receipt := &cleanupapi.Receipt{OperationID: request.Spec.OperationID, ExecutorUID: executor.JobUID, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true}
-	if err := store.UpdateStatus(ctx, request.Name, request.UID, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+	receipt := &cleanupapi.Receipt{
+		OperationID: request.Spec.OperationID, ExecutorUID: executor.JobUID,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true,
+		LocalReceiptDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	if err := store.UpdateStatus(ctx, request, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
 		return cleanupapi.Cleanup{}, err
 	}
-	return store.Get(ctx, request.Name)
+	return store.Get(ctx, request.Spec.Authority)
 }
 
 func TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly(t *testing.T) {
@@ -275,28 +275,22 @@ func TestMoveCopyIdentityRejectsPoolRecreatedAfterCapacityApproval(t *testing.T)
 	}
 }
 
-func TestMoveCleanupSettlesOnlyReceiptForExactSource(t *testing.T) {
+func TestMoveCleanupSettlesReceiptAndFreshAbsenceForExactSource(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	source := volume.CopyIdentity{InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "source-copy", NodeName: "source", Role: volume.RoleServing}
 	destination := volume.CopyIdentity{InstallationID: "installation", PoolName: "destination-pool", PoolUID: "destination-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "destination-copy", NodeName: "destination", Role: volume.RoleServing}
 	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: "CleaningSource", SourceCopy: &source, DestinationCopy: &destination, DestinationNode: "destination", DestinationPoolUID: destination.PoolUID}}
 	repository := &memoryRepository{moves: []volumeapi.Move{move}, volumes: map[string]volumeapi.State{volumeID: {UID: source.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name, CurrentCopy: &destination, PublishedNodes: []string{"destination"}}}}
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{cleanupapi.Resource: "ShiftPVCleanupList"})
-	dynamicClient.PrependReactor("create", "shiftpvcleanups", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		object := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
-		object.SetUID("cleanup-uid")
-		return false, nil, nil
-	})
-	reconciler := &Reconciler{Repository: repository, Cleanups: &cleanupapi.Store{Client: dynamicClient}, CleanupOperator: receiptCleanupOperator{}}
+	reconciler := &Reconciler{Repository: repository, Cleanups: newTestCleanupStore(), CleanupOperator: receiptCleanupOperator{}}
 	if err := reconciler.ensureCleanupContract(context.Background(), &move); err != nil {
 		t.Fatal(err)
 	}
 	complete, failed, err := reconciler.cleanupState(context.Background(), move)
-	if err != nil || !complete || failed || move.Status.CleanupName == "" {
+	if err != nil || !complete || failed {
 		t.Fatalf("cleanup complete=%v failed=%v err=%v move=%#v", complete, failed, err, move.Status)
 	}
-	request, err := reconciler.Cleanups.Get(context.Background(), move.Status.CleanupName)
-	if err != nil || request.Status.Phase != cleanupapi.PhaseCompleted || request.Spec.Target != source {
+	request, err := reconciler.Cleanups.Get(context.Background(), cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID})
+	if err != nil || request.Status.Phase != cleanupapi.PhaseCompleted || request.Status.AbsenceProof == nil || request.Spec.Target != source {
 		t.Fatalf("settled cleanup=%#v err=%v", request, err)
 	}
 }

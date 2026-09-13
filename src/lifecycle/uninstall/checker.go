@@ -17,8 +17,6 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
-	"github.com/cagojeiger/ShiftPV/src/pool/capacity"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -93,8 +91,8 @@ func (c *Checker) ReleasePoolProtection(ctx context.Context) error {
 }
 
 // CheckPoolDeleteAfter determines whether one exact Pool registration can be
-// removed without losing authority over a volume, move, cleanup, reservation,
-// PersistentVolume, or physical copy. Other Pools may remain in active use.
+// removed without losing authority over a volume, move, embedded cleanup
+// journal, PersistentVolume, or physical copy. Other Pools may remain in use.
 func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poolUID types.UID, inventoryAfter time.Time) (Report, error) {
 	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
 		return Report{}, fmt.Errorf("Pool deletion checker is not configured")
@@ -102,10 +100,6 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 	if strings.TrimSpace(poolName) == "" || poolUID == "" {
 		return Report{}, fmt.Errorf("exact Pool identity is required")
 	}
-	if strings.TrimSpace(c.Namespace) == "" {
-		return Report{}, fmt.Errorf("ShiftPV namespace is required")
-	}
-
 	pools, err := c.Volumes.ListPoolRegistrations(ctx)
 	if err != nil {
 		return Report{}, fmt.Errorf("list ShiftPVPools: %w", err)
@@ -166,32 +160,6 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		}
 	}
 
-	reservations, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: capacity.ReservationSelector})
-	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPV volume reservations: %w", err)
-	}
-	for _, reservation := range reservations.Items {
-		volumeID := reservation.Data["volumeID"]
-		if state, exists := volumes[volumeID]; exists {
-			if usesPool, known := currentCopyUsesPool(volumeID, state, *target); known {
-				if usesPool {
-					report.Blockers = append(report.Blockers, Blocker{
-						Kind: "VolumeReservation", Namespace: reservation.Namespace, Name: reservation.Name,
-						Reason: "volume=" + volumeID + " pool=" + target.Name + " poolUID=" + target.UID,
-					})
-				}
-				continue
-			}
-		}
-		if reservation.Data["nodeName"] != target.NodeName {
-			continue
-		}
-		report.Blockers = append(report.Blockers, Blocker{
-			Kind: "VolumeReservation", Namespace: reservation.Namespace, Name: reservation.Name,
-			Reason: "volume=" + reservation.Data["volumeID"] + " node=" + target.NodeName,
-		})
-	}
-
 	for volumeID, state := range volumes {
 		usesPool, known := currentCopyUsesPool(volumeID, state, *target)
 		if known && !usesPool {
@@ -214,24 +182,27 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		return Report{}, fmt.Errorf("list ShiftPVMoves: %w", err)
 	}
 	for _, move := range moves {
-		phase := fsm.Phase(move.Status.Phase)
-		if phase == fsm.PhaseSucceeded || phase == fsm.PhaseBlocked {
+		if volumeapi.MoveCleanupSettled(move) {
 			continue
 		}
 		if moveUsesPool(move, *target) {
-			report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVMove", Name: move.Name, Reason: fmt.Sprintf("phase=%s volume=%s", phase, move.Spec.VolumeID)})
+			report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVMove", Name: move.Name, Reason: fmt.Sprintf("phase=%s volume=%s", move.Status.Phase, move.Spec.VolumeID)})
 		}
 	}
 
 	cleanups, err := c.Cleanups.List(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPVCleanups: %w", err)
+		return Report{}, fmt.Errorf("list cleanup journals: %w", err)
 	}
 	for _, cleanup := range cleanups {
 		if cleanup.Status.Phase == cleanupapi.PhaseCompleted || cleanup.Spec.Target.PoolName != target.Name || cleanup.Spec.Target.PoolUID != target.UID {
 			continue
 		}
-		report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVCleanup", Name: cleanup.Name, Reason: "operation=" + cleanup.Spec.OperationID})
+		blocker, err := cleanupJournalBlocker(cleanup)
+		if err != nil {
+			return Report{}, err
+		}
+		report.Blockers = append(report.Blockers, blocker)
 	}
 
 	sort.Slice(report.Blockers, func(left, right int) bool {
@@ -335,10 +306,6 @@ func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Rep
 	if strings.TrimSpace(c.StorageClassName) == "" {
 		return Report{}, fmt.Errorf("ShiftPV StorageClass name is required")
 	}
-	if strings.TrimSpace(c.Namespace) == "" {
-		return Report{}, fmt.Errorf("ShiftPV namespace is required")
-	}
-
 	report := Report{}
 	persistentVolumes, err := c.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -370,26 +337,6 @@ func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Rep
 		report.Blockers = append(report.Blockers, Blocker{Kind: "PersistentVolumeClaim", Namespace: claim.Namespace, Name: claim.Name, Reason: reason})
 	}
 
-	reservations, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: capacity.ReservationSelector})
-	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPV volume reservations: %w", err)
-	}
-	for _, reservation := range reservations.Items {
-		reasonParts := []string{"volume=" + reservation.Data["volumeID"]}
-		if reservation.Data["volumeUID"] != "" {
-			reasonParts = append(reasonParts, "volumeUID="+reservation.Data["volumeUID"])
-		}
-		if reservation.Data["nodeName"] != "" {
-			reasonParts = append(reasonParts, "node="+reservation.Data["nodeName"])
-		}
-		report.Blockers = append(report.Blockers, Blocker{
-			Kind:      "VolumeReservation",
-			Namespace: reservation.Namespace,
-			Name:      reservation.Name,
-			Reason:    strings.Join(reasonParts, " "),
-		})
-	}
-
 	volumes, err := c.Volumes.ListVolumes(ctx)
 	if err != nil {
 		return Report{}, fmt.Errorf("list ShiftPVVolumes: %w", err)
@@ -410,26 +357,28 @@ func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Rep
 		return Report{}, fmt.Errorf("list ShiftPVMoves: %w", err)
 	}
 	for _, move := range moves {
-		phase := fsm.Phase(move.Status.Phase)
-		if phase == fsm.PhaseSucceeded || phase == fsm.PhaseBlocked {
+		if volumeapi.MoveCleanupSettled(move) {
 			continue
 		}
 		report.Blockers = append(report.Blockers, Blocker{
 			Kind:   "ShiftPVMove",
 			Name:   move.Name,
-			Reason: fmt.Sprintf("phase=%s volume=%s", phase, move.Spec.VolumeID),
+			Reason: fmt.Sprintf("phase=%s volume=%s", move.Status.Phase, move.Spec.VolumeID),
 		})
 	}
 	requests, err := c.Cleanups.List(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPVCleanups: %w", err)
+		return Report{}, fmt.Errorf("list cleanup journals: %w", err)
 	}
 	for _, request := range requests {
 		if request.Status.Phase == cleanupapi.PhaseCompleted {
 			continue
 		}
-		reason := fmt.Sprintf("phase=%s operation=%s volume=%s", request.Status.Phase, request.Spec.OperationID, request.Spec.Target.VolumeID)
-		report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVCleanup", Name: request.Name, Reason: reason})
+		blocker, err := cleanupJournalBlocker(request)
+		if err != nil {
+			return Report{}, err
+		}
+		report.Blockers = append(report.Blockers, blocker)
 	}
 
 	pools, err := c.Volumes.ListPools(ctx)
@@ -464,6 +413,20 @@ func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Rep
 		return leftKey < rightKey
 	})
 	return report, nil
+}
+
+func cleanupJournalBlocker(cleanup cleanupapi.Cleanup) (Blocker, error) {
+	kind := cleanup.Spec.Authority.Kind
+	name := cleanup.Spec.Authority.Name
+	if (kind != "ShiftPVVolume" && kind != "ShiftPVMove") || strings.TrimSpace(name) == "" {
+		return Blocker{}, fmt.Errorf("cleanup journal %q has invalid parent authority %q/%q", cleanup.Name, kind, name)
+	}
+	phase := cleanup.Status.Phase
+	if phase == "" {
+		phase = cleanupapi.PhasePending
+	}
+	reason := fmt.Sprintf("cleanupPhase=%s operation=%s volume=%s", phase, cleanup.Spec.OperationID, cleanup.Spec.Target.VolumeID)
+	return Blocker{Kind: kind, Name: name, Reason: reason}, nil
 }
 
 func (r Report) WaitingForInventory() bool {

@@ -8,12 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
@@ -174,22 +175,36 @@ func runMoveCopy(arguments []string) error {
 		}
 		environment := append(os.Environ(), "RSYNC_PASSWORD="+strings.TrimSpace(string(password)))
 		source := "rsync://shiftpv@" + options.sourceService + "/data/"
-		for _, arguments := range [][]string{
-			{"-a", "--delete", source, target + "/"},
-			{"-a", "--checksum", "--delete", "--dry-run", "--itemize-changes", source, target + "/"},
-		} {
-			command := exec.CommandContext(copyCtx, "rsync", arguments...)
-			command.Env = environment
-			output, commandErr := command.CombinedOutput()
-			if commandErr != nil {
-				return fmt.Errorf("rsync copy validation: %w: %s", commandErr, strings.TrimSpace(string(output)))
-			}
-			if len(arguments) > 1 && arguments[1] == "--checksum" && len(output) != 0 {
-				return fmt.Errorf("rsync checksum validation reported differences")
-			}
+		copyArguments, verifyArguments := moveCopyArguments(source, target)
+		copyCommand := exec.CommandContext(copyCtx, "rsync", copyArguments...)
+		copyCommand.Env = environment
+		if output, commandErr := copyCommand.CombinedOutput(); commandErr != nil {
+			return fmt.Errorf("rsync copy: %w: %s", commandErr, strings.TrimSpace(string(output)))
+		}
+		verifyCommand := exec.CommandContext(copyCtx, "rsync", verifyArguments...)
+		verifyCommand.Env = environment
+		output, commandErr := verifyCommand.CombinedOutput()
+		if commandErr != nil {
+			return fmt.Errorf("rsync checksum validation: %w: %s", commandErr, strings.TrimSpace(string(output)))
+		}
+		if difference := strings.TrimSpace(string(output)); difference != "" {
+			return fmt.Errorf("rsync checksum validation reported differences: %s", difference)
 		}
 		return nil
 	})
+}
+
+func moveCopyArguments(source, target string) ([]string, []string) {
+	common := []string{
+		"-aHAXS",
+		"--numeric-ids",
+		"--one-file-system",
+		"--no-devices",
+		"--delete",
+	}
+	copyArguments := append(append([]string{}, common...), "--fsync", source, target+"/")
+	verifyArguments := append(append([]string{}, common...), "--checksum", "--dry-run", "--itemize-changes", source, target+"/")
+	return copyArguments, verifyArguments
 }
 
 func runMovePromote(arguments []string) error {
@@ -432,16 +447,17 @@ func runCreate(arguments []string) error {
 
 func runCleanup(arguments []string) error {
 	flags := flag.NewFlagSet("cleanup", flag.ContinueOnError)
-	cleanupName := flags.String("cleanup-name", "", "ShiftPVCleanup name")
-	cleanupUID := flags.String("cleanup-uid", "", "ShiftPVCleanup UID")
+	authorityKind := flags.String("authority-kind", "", "cleanup parent kind")
+	authorityName := flags.String("authority-name", "", "cleanup parent name")
+	authorityUID := flags.String("authority-uid", "", "cleanup parent UID")
 	operationID := flags.String("operation-id", "", "cleanup operation identity")
 	namespace := flags.String("namespace", "", "helper Pod namespace")
 	root := flags.String("pool-root", "/pool", "mounted Pool root")
-	poolReadinessStaleAfter := flags.Duration("pool-readiness-stale-after", volumeapi.DefaultPoolReadinessStaleAfter, "maximum age of the Pool readiness and inventory observation")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if *cleanupName == "" || *cleanupUID == "" || !volume.ValidIdentityToken(*operationID) || *namespace == "" || os.Getenv("POD_NAME") == "" || *poolReadinessStaleAfter <= 0 {
+	authorityIdentity := cleanupapi.Authority{Kind: *authorityKind, Name: *authorityName, UID: *authorityUID}
+	if authorityIdentity.Validate() != nil || !volume.ValidIdentityToken(*operationID) || *namespace == "" || os.Getenv("POD_NAME") == "" {
 		return fmt.Errorf("cleanup helper identity is incomplete")
 	}
 	config, err := rest.InClusterConfig()
@@ -460,29 +476,51 @@ func runCleanup(arguments []string) error {
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	approved, err := cleanups.Get(ctx, *cleanupName)
-	if err != nil || approved.UID != *cleanupUID || approved.Spec.OperationID != *operationID || !approved.Spec.Approved {
+	approved, err := cleanups.Get(ctx, authorityIdentity)
+	if err != nil || approved.UID != authorityIdentity.UID || approved.Spec.Authority != authorityIdentity || approved.Spec.OperationID != *operationID {
 		return fmt.Errorf("cleanup intent identity changed: %w", errors.Join(err, cleanupapi.ErrConflict))
 	}
 	pod, err := client.CoreV1().Pods(*namespace).Get(ctx, os.Getenv("POD_NAME"), metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("read cleanup executor Pod: %w", err)
 	}
-	jobUID := ""
+	jobName, jobUID := "", ""
 	for _, owner := range pod.OwnerReferences {
 		if owner.Controller != nil && *owner.Controller && owner.Kind == "Job" {
-			jobUID = string(owner.UID)
+			jobName, jobUID = owner.Name, string(owner.UID)
 			break
 		}
 	}
 	if jobUID == "" || approved.Status.Phase != cleanupapi.PhaseRunning || approved.Status.Executor == nil ||
-		approved.Status.Executor.JobUID != jobUID || approved.Status.Executor.NodeName != approved.Spec.Target.NodeName {
+		approved.Status.Executor.JobName != jobName || approved.Status.Executor.JobUID != jobUID ||
+		approved.Status.Executor.NodeName != approved.Spec.Target.NodeName || pod.Spec.NodeName != approved.Spec.Target.NodeName {
 		return fmt.Errorf("cleanup executor is not authorized")
 	}
+	job, err := client.BatchV1().Jobs(*namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil || string(job.UID) != jobUID || job.DeletionTimestamp != nil || !ownedByCleanupParent(job.OwnerReferences, authorityIdentity) {
+		return fmt.Errorf("cleanup Job is not owned by the exact parent: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	}
+	if pod.UID == "" {
+		return fmt.Errorf("cleanup executor Pod has no UID")
+	}
+	executor := *approved.Status.Executor
+	if executor.PodUID != string(pod.UID) {
+		executor.PodUID = string(pod.UID)
+		if err := cleanups.UpdateStatus(ctx, approved, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &executor}); err != nil {
+			return fmt.Errorf("bind cleanup executor retry Pod: %w", err)
+		}
+		approved, err = cleanups.Get(ctx, authorityIdentity)
+		if err != nil {
+			return fmt.Errorf("read Pod-bound cleanup intent: %w", err)
+		}
+	}
+	if !matchesCleanupExecutor(approved.Status.Executor, jobName, jobUID, pod) {
+		return fmt.Errorf("cleanup executor does not match the exact running Pod")
+	}
 	authority := func(checkCtx context.Context, effectStarted bool) error {
-		current, err := cleanups.Get(checkCtx, approved.Name)
+		current, err := cleanups.Get(checkCtx, authorityIdentity)
 		if err != nil || current.UID != approved.UID || current.Spec != approved.Spec || current.Status.Phase != cleanupapi.PhaseRunning ||
-			current.Status.Executor == nil || current.Status.Executor.JobUID != jobUID {
+			!matchesCleanupExecutor(current.Status.Executor, jobName, jobUID, pod) {
 			return fmt.Errorf("cleanup intent changed: %w", errors.Join(err, cleanupapi.ErrConflict))
 		}
 		installationID, err := registry.InstallationID(checkCtx)
@@ -490,10 +528,11 @@ func runCleanup(arguments []string) error {
 			return fmt.Errorf("installation authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 		}
 		pool, err := registry.PoolForIdentity(checkCtx, approved.Spec.Target.PoolName, approved.Spec.Target.PoolUID, approved.Spec.Target.NodeName)
-		if err != nil || pool.Name != approved.Spec.Target.PoolName || pool.UID != approved.Spec.Target.PoolUID {
+		if err != nil || pool.Name != approved.Spec.Target.PoolName || pool.UID != approved.Spec.Target.PoolUID ||
+			!slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) {
 			return fmt.Errorf("Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 		}
-		return verifyCleanupAuthority(checkCtx, client, registry, *namespace, approved, *poolReadinessStaleAfter, effectStarted)
+		return verifyCleanupAuthority(checkCtx, registry, approved, effectStarted)
 	}
 	localReceipt, digest, err := ownership.ReclaimWithResume(ctx, *root, approved.Spec.Target, approved.Spec.OperationID, authority)
 	if err != nil {
@@ -504,12 +543,28 @@ func runCleanup(arguments []string) error {
 		OperationID: approved.Spec.OperationID, ExecutorUID: jobUID, ObservedAt: now,
 		Retired: localReceipt.Retired, Purged: localReceipt.Purged, LocalReceiptDigest: digest,
 	}
-	return cleanups.UpdateStatus(ctx, approved.Name, approved.UID, cleanupapi.Status{
+	return cleanups.UpdateStatus(ctx, approved, cleanupapi.Status{
 		Phase: cleanupapi.PhaseVerifying, Executor: approved.Status.Executor, Receipt: receipt,
 	})
 }
 
-func verifyCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup, freshness time.Duration, effectStarted bool) error {
+func matchesCleanupExecutor(executor *cleanupapi.Executor, jobName, jobUID string, pod *corev1.Pod) bool {
+	return executor != nil && pod != nil && pod.UID != "" && *executor == (cleanupapi.Executor{
+		JobName: jobName, JobUID: jobUID, PodUID: string(pod.UID), NodeName: pod.Spec.NodeName,
+	})
+}
+
+func ownedByCleanupParent(references []metav1.OwnerReference, authority cleanupapi.Authority) bool {
+	for _, owner := range references {
+		if owner.APIVersion == "shiftpv.io/v1alpha1" && owner.Controller != nil && *owner.Controller &&
+			owner.Kind == authority.Kind && owner.Name == authority.Name && string(owner.UID) == authority.UID {
+			return true
+		}
+	}
+	return false
+}
+
+func verifyCleanupAuthority(ctx context.Context, registry *volumeapi.Registry, cleanup cleanupapi.Cleanup, _ bool) error {
 	switch cleanup.Spec.Authority.Kind {
 	case "ShiftPVVolume":
 		state, err := registry.Get(ctx, cleanup.Spec.Authority.Name)
@@ -519,132 +574,55 @@ func verifyCleanupAuthority(ctx context.Context, client kubernetes.Interface, re
 		}
 		return nil
 	case "ShiftPVMove":
-		move, err := registry.GetMove(ctx, cleanup.Spec.Authority.Name)
-		if err != nil || move.UID != cleanup.Spec.Authority.UID || move.Status.SourceCopy == nil || *move.Status.SourceCopy != cleanup.Spec.Target ||
-			move.Status.DestinationCopy == nil || (move.Status.Phase != "WaitingForDestinationPublish" && move.Status.Phase != "CleaningSource") {
-			return fmt.Errorf("move cleanup authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
-		}
-		state, err := registry.Get(ctx, move.Spec.VolumeID)
-		if err != nil || state.UID != cleanup.Spec.Target.VolumeUID || state.Phase != volumeapi.PhaseReady || state.ActiveMove != move.Name ||
-			state.OwnerNode != move.Status.DestinationNode || state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.DestinationCopy ||
-			!containsString(state.PublishedNodes, move.Status.DestinationNode) || containsString(state.PublishedNodes, move.Spec.SourceNode) {
-			return fmt.Errorf("committed move cleanup authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
-		}
-		return nil
-	case "Namespace":
-		return verifyOrphanCleanupAuthority(ctx, client, registry, namespace, cleanup, freshness, effectStarted)
+		return verifyMoveCleanupAuthority(ctx, registry, cleanup)
 	default:
 		return fmt.Errorf("cleanup authority %q is not implemented", cleanup.Spec.Authority.Kind)
 	}
 }
 
-func verifyOrphanCleanupAuthority(ctx context.Context, client kubernetes.Interface, registry *volumeapi.Registry, namespace string, cleanup cleanupapi.Cleanup, poolReadinessStaleAfter time.Duration, effectStarted bool) error {
-	if client == nil || namespace == "" || cleanup.Spec.Reason != "OrphanReclaim" || !cleanup.Spec.Approved ||
-		cleanup.Spec.Authority.Name != "kube-system" || cleanup.Spec.Authority.UID != cleanup.Spec.Target.InstallationID {
-		return fmt.Errorf("orphan cleanup authority is incomplete: %w", volumeapi.ErrStateConflict)
+func verifyMoveCleanupAuthority(ctx context.Context, registry *volumeapi.Registry, cleanup cleanupapi.Cleanup) error {
+	move, err := registry.GetMove(ctx, cleanup.Spec.Authority.Name)
+	if err != nil || move.UID != cleanup.Spec.Authority.UID || move.Spec.VolumeID != cleanup.Spec.Target.VolumeID ||
+		move.Status.SourceCopy == nil || move.Status.SourceCopy.NodeName != move.Spec.SourceNode {
+		return fmt.Errorf("move cleanup authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 	}
-	installation, err := client.CoreV1().Namespaces().Get(ctx, cleanup.Spec.Authority.Name, metav1.GetOptions{})
-	if err != nil || string(installation.UID) != cleanup.Spec.Authority.UID {
-		return fmt.Errorf("installation namespace authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	state, err := registry.Get(ctx, move.Spec.VolumeID)
+	if err != nil || state.UID != cleanup.Spec.Target.VolumeUID || state.ActiveMove != move.Name || state.CurrentCopy == nil {
+		return fmt.Errorf("move cleanup volume authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 	}
-	persistentVolumes, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("list PersistentVolumes before orphan cleanup: %w", err)
-	}
-	volumes, err := registry.ListVolumes(ctx)
-	if err != nil {
-		return err
-	}
-	authority := volumeapi.ClassifyCopyAuthority(volumes, cleanup.Spec.Target)
-	if authority == volumeapi.CopyAuthorityCurrent || authority == volumeapi.CopyAuthorityUncertain {
-		return fmt.Errorf("ShiftPVVolume still has orphan authority: %w", volumeapi.ErrStateConflict)
-	}
-	if authority != volumeapi.CopyAuthoritySuperseded {
-		for index := range persistentVolumes.Items {
-			persistentVolume := &persistentVolumes.Items[index]
-			if persistentVolume.Spec.CSI != nil && persistentVolume.Spec.CSI.Driver == "csi.shiftpv.io" && persistentVolume.Spec.CSI.VolumeHandle == cleanup.Spec.Target.VolumeID {
-				return fmt.Errorf("PersistentVolume %q still references orphan target: %w", persistentVolume.Name, volumeapi.ErrStateConflict)
-			}
+	switch cleanup.Spec.Reason {
+	case "MoveSource":
+		if cleanup.Spec.OperationID != "cleanup-"+move.UID || *move.Status.SourceCopy != cleanup.Spec.Target || move.Status.DestinationCopy == nil {
+			return fmt.Errorf("move source cleanup identity changed: %w", volumeapi.ErrStateConflict)
 		}
-	}
-	moves, err := registry.ListMoves(ctx)
-	if err != nil {
-		return err
-	}
-	pool, err := registry.PoolForIdentity(ctx, cleanup.Spec.Target.PoolName, cleanup.Spec.Target.PoolUID, cleanup.Spec.Target.NodeName)
-	if err != nil || pool.Name != cleanup.Spec.Target.PoolName || pool.UID != cleanup.Spec.Target.PoolUID {
-		return fmt.Errorf("orphan Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
-	}
-	for _, move := range moves {
-		if !effectStarted && volumeapi.TerminalMoveInventoryPending(move, cleanup.Spec.Target, pool) {
-			return fmt.Errorf("terminal ShiftPVMove %q is waiting for a newer Pool inventory: %w", move.Name, volumeapi.ErrStateConflict)
+		normal := (move.Status.Phase == "WaitingForDestinationPublish" || move.Status.Phase == "CleaningSource") &&
+			state.Phase == volumeapi.PhaseReady && state.OwnerNode == move.Status.DestinationNode &&
+			*state.CurrentCopy == *move.Status.DestinationCopy && containsString(state.PublishedNodes, move.Status.DestinationNode) &&
+			!containsString(state.PublishedNodes, move.Spec.SourceNode)
+		recovery := move.Status.Phase == "Blocked" && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase == "Retiring" &&
+			move.Status.RecoveryOwner == move.Status.DestinationNode && state.Phase == volumeapi.PhaseReady &&
+			state.OwnerNode == move.Status.DestinationNode && *state.CurrentCopy == *move.Status.DestinationCopy &&
+			containsString(state.PublishedNodes, move.Status.DestinationNode) && !containsString(state.PublishedNodes, move.Spec.SourceNode)
+		if !normal && !recovery {
+			return fmt.Errorf("move source cleanup authority changed: %w", volumeapi.ErrStateConflict)
 		}
-		if move.Status.Phase == "Succeeded" || move.Status.RecoveryPhase == "Recovered" {
-			continue
-		}
-		for _, candidate := range []*volume.CopyIdentity{move.Status.SourceCopy, move.Status.IncomingCopy, move.Status.DestinationCopy} {
-			if candidate != nil && *candidate == cleanup.Spec.Target {
-				return fmt.Errorf("ShiftPVMove %q still has orphan authority: %w", move.Name, volumeapi.ErrStateConflict)
-			}
-		}
-	}
-	now := time.Now().UTC()
-	if ready, reason := pool.CleanupReadyAt(now, poolReadinessStaleAfter); !ready {
-		return fmt.Errorf("orphan Pool is not available for cleanup (%s): %w", reason, volumeapi.ErrStateConflict)
-	}
-	if !effectStarted {
-		if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.ObservedAt.IsZero() ||
-			now.Before(pool.Status.Inventory.ObservedAt.Time) || now.Sub(pool.Status.Inventory.ObservedAt.Time) > poolReadinessStaleAfter {
-			return fmt.Errorf("orphan inventory is unavailable or stale: %w", volumeapi.ErrStateConflict)
-		}
-		observed := false
-		for _, candidate := range pool.Status.Inventory.Copies {
-			if candidate.Identity == nil || *candidate.Identity != cleanup.Spec.Target {
-				continue
-			}
-			observed = true
-			if !candidate.Present || candidate.Published || candidate.Problem != "" {
-				return fmt.Errorf("orphan copy is absent, published, or invalid: %w", volumeapi.ErrStateConflict)
-			}
-		}
-		if !observed {
-			return fmt.Errorf("orphan copy is not present in the exact Pool inventory: %w", volumeapi.ErrStateConflict)
-		}
-	}
-	reservationVolumeUID := cleanup.Spec.Target.VolumeUID
-	if authority == volumeapi.CopyAuthoritySuperseded {
-		liveVolume, exists := volumes[cleanup.Spec.Target.VolumeID]
-		if !exists {
-			return fmt.Errorf("active volume identity is unavailable: %w", volumeapi.ErrStateConflict)
-		}
-		reservationVolumeUID = liveVolume.UID
-	}
-	return verifyOrphanReservation(ctx, client, namespace, cleanup, authority, reservationVolumeUID)
-}
-
-func verifyOrphanReservation(ctx context.Context, client kubernetes.Interface, namespace string, cleanup cleanupapi.Cleanup, authority volumeapi.CopyAuthority, reservationVolumeUID string) error {
-	reservation, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, cleanup.Spec.Target.VolumeID, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		if authority == volumeapi.CopyAuthoritySuperseded {
-			return fmt.Errorf("active volume capacity reservation is missing: %w", volumeapi.ErrStateConflict)
+		destinationPool, err := registry.ReadyPoolForNode(ctx, move.Status.DestinationNode)
+		if err != nil || !volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy) {
+			return fmt.Errorf("move source cleanup publication proof changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
 		}
 		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read orphan capacity reservation: %w", err)
-	}
-	if reservation.Labels["app.kubernetes.io/name"] != "shiftpv" || reservation.Labels["app.kubernetes.io/component"] != "volume-reservation" ||
-		reservation.Data["volumeID"] != cleanup.Spec.Target.VolumeID || reservation.Data["volumeUID"] != reservationVolumeUID {
-		return fmt.Errorf("orphan capacity reservation identity changed: %w", volumeapi.ErrStateConflict)
-	}
-	if authority == volumeapi.CopyAuthoritySuperseded {
-		if cleanup.Spec.ReservationUID != "" {
-			return fmt.Errorf("cleanup owns an active volume capacity reservation: %w", volumeapi.ErrStateConflict)
+	case "MoveRollback":
+		targetIsDestination := (move.Status.IncomingCopy != nil && *move.Status.IncomingCopy == cleanup.Spec.Target) ||
+			(move.Status.DestinationCopy != nil && *move.Status.DestinationCopy == cleanup.Spec.Target)
+		if cleanup.Spec.OperationID != "rollback-"+move.UID || !targetIsDestination ||
+			cleanup.Spec.Target.NodeName != move.Status.DestinationNode || cleanup.Spec.Target.PoolUID != move.Status.DestinationPoolUID ||
+			move.Status.Phase != "Blocked" || move.Spec.Recovery != "ResumeOwner" || move.Status.RecoveryPhase != "Retiring" ||
+			move.Status.RecoveryOwner != move.Spec.SourceNode || state.Phase != volumeapi.PhaseBlocked || state.OwnerNode != move.Spec.SourceNode ||
+			*state.CurrentCopy != *move.Status.SourceCopy || containsString(state.PublishedNodes, cleanup.Spec.Target.NodeName) {
+			return fmt.Errorf("move rollback cleanup authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		return nil
+	default:
+		return fmt.Errorf("move cleanup reason %q is not implemented", cleanup.Spec.Reason)
 	}
-	if cleanup.Spec.ReservationUID == "" || string(reservation.UID) != cleanup.Spec.ReservationUID {
-		return fmt.Errorf("orphan capacity reservation identity changed: %w", volumeapi.ErrStateConflict)
-	}
-	return nil
 }

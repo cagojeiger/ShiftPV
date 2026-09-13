@@ -3,13 +3,9 @@ package metrics
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
@@ -32,8 +28,6 @@ type Controller struct {
 	Exporter   *Exporter
 	Inventory  Inventory
 	Cleanups   CleanupInventory
-	Client     kubernetes.Interface
-	Namespace  string
 	Interval   time.Duration
 	StaleAfter time.Duration
 }
@@ -77,15 +71,11 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 	if err != nil {
 		return err
 	}
-	reservations, err := c.Client.CoreV1().ConfigMaps(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: capacity.ReservationSelector})
-	if err != nil {
-		return err
-	}
 	staleAfter := c.StaleAfter
 	if staleAfter <= 0 {
 		staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 	}
-	values := c.poolSamples(pools, volumes, moves, reservations.Items, staleAfter)
+	values := c.poolSamples(pools, volumes, moves, staleAfter)
 	counts := make(map[string]int)
 	for _, state := range volumes {
 		counts[bounded(state.Phase, volumePhases)]++
@@ -118,7 +108,7 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 		values = append(values, sample{"moves", float64(counts[phase]), []string{phase}})
 	}
 	cleanupCounts := map[string]int{}
-	cleanupPhases := []string{cleanupapi.PhasePending, cleanupapi.PhaseRunning, cleanupapi.PhaseVerifying, cleanupapi.PhaseNeedsReview, cleanupapi.PhaseCompleted, "Unknown"}
+	cleanupPhases := []string{cleanupapi.PhasePending, cleanupapi.PhaseRunning, cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence, cleanupapi.PhaseNeedsReview, cleanupapi.PhaseCompleted, "Unknown"}
 	var cleanupContracts []cleanupapi.Cleanup
 	if c.Cleanups != nil {
 		cleanups, err := c.Cleanups.List(ctx)
@@ -142,7 +132,7 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 	return nil
 }
 
-func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, reservations []corev1.ConfigMap, staleAfter time.Duration) []sample {
+func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, staleAfter time.Duration) []sample {
 	var values []sample
 	for _, pool := range pools {
 		labels := []string{pool.Name, pool.NodeName}
@@ -158,28 +148,21 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 		)
 		q, err := resource.ParseQuantity(pool.CapacityLimit)
 		limit, exact := q.AsInt64()
-		reserved, accountingErr := capacity.ReservedBytes(reservations, volumes, moves, pool.NodeName)
+		reserved, accountingErr := capacity.ReservedBytes(volumes, moves, pool.NodeName)
 		valid := err == nil && exact && limit > 0 && accountingErr == nil
 		values = append(values, sample{"pool_accounting_valid", boolValue(valid), labels})
 		if !valid {
 			// Keep only this Pool's last good numbers; validity explicitly marks them stale.
 			c.Exporter.Cache.mu.RLock()
 			for _, previous := range c.Exporter.Cache.groups["metadata"].samples {
-				if (previous.name == "pool_capacity_limit_bytes" || previous.name == "pool_reserved_bytes" || previous.name == "pool_unregistered_reserved_bytes") && previous.labels[0] == pool.Name && previous.labels[1] == pool.NodeName {
+				if (previous.name == "pool_capacity_limit_bytes" || previous.name == "pool_reserved_bytes") && previous.labels[0] == pool.Name && previous.labels[1] == pool.NodeName {
 					values = append(values, previous)
 				}
 			}
 			c.Exporter.Cache.mu.RUnlock()
 			continue
 		}
-		var unregistered int64
-		for _, reservation := range reservations {
-			if _, exists := volumes[reservation.Name]; !exists && reservation.Data["nodeName"] == pool.NodeName {
-				n, _ := strconv.ParseInt(reservation.Data["capacity"], 10, 64)
-				unregistered += n // A validated subset of reserved, so it cannot overflow.
-			}
-		}
-		values = append(values, sample{"pool_capacity_limit_bytes", float64(limit), labels}, sample{"pool_reserved_bytes", float64(reserved), labels}, sample{"pool_unregistered_reserved_bytes", float64(unregistered), labels})
+		values = append(values, sample{"pool_capacity_limit_bytes", float64(limit), labels}, sample{"pool_reserved_bytes", float64(reserved), labels})
 	}
 	return values
 }

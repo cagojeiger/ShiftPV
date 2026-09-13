@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -40,7 +41,7 @@ func (r *Reconciler) reconcileRecovery(ctx context.Context, move volumeapi.Move)
 	if move.Status.DestinationNode == "" && (move.Status.CopyJobName != "" || move.Status.PromotionJobName != "") {
 		return r.recoveryError(ctx, move, "DestinationUnknown", fmt.Errorf("disk work was recorded without a destination; operator investigation required"))
 	}
-	canBeReady := move.Status.RecoveryPhase == recoveryResuming || move.Status.RecoveryPhase == recoveryCompleting
+	canBeReady := move.Status.RecoveryPhase == recoveryResuming || move.Status.RecoveryPhase == recoveryRetiring || move.Status.RecoveryPhase == recoveryCompleting
 	if state.Phase != volumeapi.PhaseBlocked && !(canBeReady && state.Phase == volumeapi.PhaseReady) {
 		return r.recoveryError(ctx, move, "StateMismatch", fmt.Errorf("cannot recover volume in phase %q", state.Phase))
 	}
@@ -62,6 +63,9 @@ func (r *Reconciler) reconcileRecovery(ctx context.Context, move volumeapi.Move)
 	}
 	err = r.recoveryStep(ctx, move, state, claim)
 	if err != nil {
+		if errors.Is(err, errRecoveryCleanupNeedsReview) {
+			return r.recoveryError(ctx, move, "CleanupNeedsReview", err)
+		}
 		return r.recoveryError(ctx, move, "RecoveryStepFailed", err)
 	}
 	return nil
@@ -80,13 +84,21 @@ func (r *Reconciler) recoveryStep(ctx context.Context, move volumeapi.Move, stat
 		if err != nil || !done {
 			return err
 		}
+		if state.OwnerNode == move.Status.DestinationNode {
+			// Postcommit recovery must restore the committed destination and
+			// observe its actual publication before retiring the old source.
+			return r.recoveryAdvance(ctx, move, recoveryResuming)
+		}
 		return r.recoveryAdvance(ctx, move, recoveryRetiring)
 	case recoveryRetiring:
-		done, err := r.recoveryJob(ctx, move, false)
+		done, err := r.settleRecoveryArtifacts(ctx, &move, state)
 		if err != nil || !done {
 			return err
 		}
-		return r.recoveryAdvance(ctx, move, recoveryResuming)
+		if state.OwnerNode == move.Spec.SourceNode {
+			return r.recoveryAdvance(ctx, move, recoveryResuming)
+		}
+		return r.recoveryAdvance(ctx, move, recoveryCompleting)
 	case recoveryResuming:
 		if state.Phase == volumeapi.PhaseBlocked {
 			// Keep the lock until the workload has published on the same owner.
@@ -97,6 +109,9 @@ func (r *Reconciler) recoveryStep(ctx context.Context, move volumeapi.Move, stat
 		placed, err := r.recoverPlacement(ctx, move, claim)
 		if err != nil || !placed || !contains(state.PublishedNodes, state.OwnerNode) {
 			return err
+		}
+		if state.OwnerNode == move.Status.DestinationNode {
+			return r.recoveryAdvance(ctx, move, recoveryRetiring)
 		}
 		return r.recoveryAdvance(ctx, move, recoveryCompleting)
 	case recoveryCompleting:

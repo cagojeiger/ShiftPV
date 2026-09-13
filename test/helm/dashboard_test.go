@@ -104,7 +104,7 @@ func TestDashboardContract(t *testing.T) {
 			t.Fatalf("panel %d must be %s", id, kind)
 		}
 	}
-	for _, metric := range []string{"pool_capacity_limit_bytes", "pool_reserved_bytes", "pool_unregistered_reserved_bytes",
+	for _, metric := range []string{"pool_capacity_limit_bytes", "pool_reserved_bytes",
 		"pool_accounting_valid", "pool_ready", "pool_filesystem_size_bytes", "pool_filesystem_available_bytes",
 		"pool_filesystem_available_inodes", "metrics_snapshot_success", "metrics_snapshot_last_success_timestamp_seconds",
 		"volumes", "moves", "mobility_deferred_volumes", "csi_requests_total", "csi_request_duration_seconds_bucket"} {

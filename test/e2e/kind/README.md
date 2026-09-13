@@ -1,107 +1,61 @@
-# Isolated kind E2E
+# Isolated Kind E2E
 
-This test creates a dedicated Kubernetes 1.35.8 cluster with one control-plane
-node and two workers. Each worker mounts a different temporary host directory at
-different node-local paths (`/mnt/shiftpv` and `/srv/shiftpv-b`); a shared
-directory or one global path would not prove the registered-pool contract.
+Status: 0.4 target suite contract. A scenario is evidence only after its product path is implemented and the
+script completes without direct status success patches or host-side replacement effects.
 
-Requirements:
+The suite uses one control-plane and at least two Linux workers backed by different temporary host directories.
+A shared directory cannot prove node-local storage behavior.
 
-- a healthy Docker-compatible engine
+```text
+control-plane
+├── worker-a ── /mnt/shiftpv-a
+└── worker-b ── /srv/shiftpv-b
+```
+
+## Requirements
+
+- healthy Docker-compatible engine
 - kind 0.33.0 or newer
 - kubectl and Helm 3
-- enough space for the pinned kind node and CSI sidecar images
-
-Run from the repository root:
+- space for pinned node, CSI sidecar, and ShiftPV images
 
 ```bash
 ./test/e2e/kind/run.sh
 ```
 
-The script builds and loads `shiftpv:dev` and installs the Helm chart with
-ShiftPV marked as the default StorageClass. It first registers an ordinary
-directory inside a worker's root filesystem, proves the path is not a mount point,
-and verifies missing-path rejection followed by Pool readiness, provisioning,
-Pod write-through, Retain preservation followed by explicit Delete reclamation,
-Pool deregistration fencing until that retained copy is reclaimed, exact
-finalizer release, Pool re-registration with a new identity,
-and a checksum-preserving cordon move to an
-ordinary directory on the other worker. The terminal Move remains as history while
-the deleted volume no longer blocks later capacity admission. It then overlays one Pool with a
-bounded tmpfs, proves that external filesystem consumption blocks admission,
-then proves that an empty PVC still consumes aggregate reservation until deletion.
-It also preserves an unreferenced copy as review-only while a Retain PV or mount
-still exists, then deletes the Pool and proves an explicitly approved exact
-orphan cleanup can finish through `PoolDeregistering`; the finalizer releases
-only after physical cleanup, and the same path accepts a new Pool identity.
-It creates a PVC without
-`storageClassName`, verifies Kubernetes defaults it to `shiftpv`, provisions it
-through `csi.shiftpv.io`, and starts a Pod that writes through the mounted RWO
-filesystem volume. Before provisioning, it verifies that a direct server-side
-dry-run DELETE cannot create uninstall permission. It force-replaces the
-controller Pod and the node plugin Pod
-on the volume owner node, verifies both UIDs change without losing the mounted
-data, then verifies checksum retention after ordinary Pod recreation. It proves
-that Helm uninstall is rejected both while the Pod is running and after the Pod
-is stopped but retained PVC/PV/Volume state remains, and that a rejected attempt
-cancels quiescing while restoring lifecycle validation. It then explicitly removes
-lifecycle validation and uses the `--no-hooks` recovery path, verifies that
-PVC/PV/reservation/host data remain,
-reinstalls the same release, and verifies the checksum again. Finally, it
-installs an unrelated default StorageClass,
-reinstalls ShiftPV with `defaultClass=false`, verifies an implicit PVC keeps the
-existing default, and provisions an explicitly selected ShiftPV PVC and Pod.
-It then overlays one worker pool with an inode-exhausted tmpfs to exercise a
-real ENOSPC provisioning failure and remounts the recovered pool read-only to
-exercise deletion failure. Both failures must surface as retryable
-`Unavailable` operations, preserve reservation/data state, and converge after
-the pool is restored. Deletion uses a test-only `Delete` reclaim policy; the
-chart's `Retain` policy is unchanged.
+## Required scenarios
 
-The suite also enables mobility and faults the destination during an actual
-move. A full tmpfs must leave the Move at `Blocked/CopyFailed`, preserve source
-authority, and quarantine partial staging during `ResumeOwner`. A read-only
-destination after verified copy must stop at `Blocked/PromotionFailed` before
-owner commit and recover to the same source after the mount becomes writable.
-Run only these two cases with an isolated cluster when iterating:
+| Area | Evidence |
+|---|---|
+| Pool | existing ordinary directories, exact identity, generation-fenced complete inventory |
+| Provision | `WaitForFirstConsumer`, exact topology, Volume owner hold before directory effect |
+| Publish | RWO owner-only bind mount and scan/publish race serialization |
+| Capacity | filesystem pressure plus Volume/Move holds; no release before cleanup closure |
+| Retain/Delete | data preservation, explicit retirement, Volume journal/finalizer convergence |
+| Mobility | bidirectional cold move, stable PVC/PV/handle/checksum, one owner |
+| Restart | Controller and Node restart at every intent/effect/receipt boundary |
+| Node outage | source and destination stop/start before and after owner commit |
+| Filesystem fault | partial copy, ENOSPC, inode exhaustion, read-only, checksum mismatch |
+| GC | parent-owned cleanup only; unknown orphan report-only and Pool removal blocked |
+| Removal | mounted, retained, moving, deleting, hold, stale inventory and API error all fail closed |
+
+Every scenario checks API state, actual paths and mounts, capacity holds, logs/events, restart count and final
+fixture cleanup. One successful Move or checksum is not sufficient.
+
+## Focused runs
 
 ```bash
-MOBILITY_FILESYSTEM_FAULTS_ONLY=1 \
-  CLUSTER_NAME=shiftpv-mobility-fs-focused \
-  ./test/e2e/kind/run.sh
+POOL_CAPACITY_ONLY=1 CLUSTER_NAME=shiftpv-capacity-focused ./test/e2e/kind/run.sh
+DIRECTORY_POOL_ONLY=1 CLUSTER_NAME=shiftpv-directory-focused ./test/e2e/kind/run.sh
+VOLUME_DELETE_CLEANUP_ONLY=1 CLUSTER_NAME=shiftpv-delete-focused ./test/e2e/kind/run.sh
+CLEANUP_JOB_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
+MOBILITY_FILESYSTEM_FAULTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-fs-focused ./test/e2e/kind/run.sh
+MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./test/e2e/kind/run.sh
 ```
 
-Run only Pool capacity admission with:
+Each run owns a unique cluster name, kubeconfig, image tag and host directories. It removes exactly those
+resources on success or failure. `KEEP_CLUSTER=1` is for bounded diagnosis only.
 
-```bash
-POOL_CAPACITY_ONLY=1 \
-  CLUSTER_NAME=shiftpv-capacity-focused \
-  ./test/e2e/kind/run.sh
-```
-
-Run only orphan cleanup during Pool deregistration with:
-
-```bash
-ORPHAN_CLEANUP_ONLY=1 \
-  CLUSTER_NAME=shiftpv-orphan-focused \
-  ./test/e2e/kind/run.sh
-```
-
-Run only the ordinary directory Pool contract with:
-
-```bash
-DIRECTORY_POOL_ONLY=1 \
-  CLUSTER_NAME=shiftpv-directory-focused \
-  ./test/e2e/kind/run.sh
-```
-
-The cluster and its temporary host directories are removed on exit. Set
-`KEEP_CLUSTER=1` only while diagnosing a failure.
-
-Argo CD Application deletion uses a separate cluster and entry point documented
-in [`argocd/README.md`](argocd/README.md). Its cluster name, kubeconfig, worker
-directory, and image tag do not overlap this suite.
-
-Published chart/image integration uses another independent cluster and the pinned
-lock documented in [`artifact/README.md`](artifact/README.md). It does not build
-product images from the checkout and does not replace this source E2E suite.
+The mobility-specific contract is in [`mobility/README.md`](mobility/README.md). Argo CD removal and public
+artifact provenance use isolated suites in [`argocd/`](argocd/README.md) and
+[`artifact/`](artifact/README.md).

@@ -44,12 +44,44 @@ func testCopyIdentities(volumeID, sourceNode, destinationNode string) (volume.Co
 }
 
 func newTestCleanupStore() *cleanupapi.Store {
+	parent := func(name, uid string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
+			"metadata": map[string]any{
+				"name": name, "uid": uid, "resourceVersion": "1", "generation": int64(1),
+				"finalizers": []any{cleanupapi.MoveProtectionFinalizer},
+			},
+			"spec": map[string]any{},
+		}}
+	}
+	pool := func(name, uid, node string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool",
+			"metadata": map[string]any{
+				"name": name, "uid": uid, "resourceVersion": "1", "generation": int64(1),
+				"finalizers": []any{cleanupapi.PoolProtectionFinalizer},
+			},
+			"spec": map[string]any{"nodeName": node, "scanEpoch": int64(0)},
+			"status": map[string]any{
+				"observedGeneration": int64(1),
+				"inventory":          map[string]any{"valid": true, "truncated": false, "message": "", "copies": []any{}},
+			},
+		}}
+	}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		cleanupapi.Resource: "ShiftPVCleanupList",
-	})
-	client.PrependReactor("create", "shiftpvcleanups", func(action ktesting.Action) (bool, runtime.Object, error) {
-		object := action.(ktesting.CreateAction).GetObject().(*unstructured.Unstructured)
-		object.SetUID(types.UID(object.GetName() + "-uid"))
+		cleanupapi.VolumeResource: "ShiftPVVolumeList",
+		cleanupapi.MoveResource:   "ShiftPVMoveList",
+		cleanupapi.PoolResource:   "ShiftPVPoolList",
+	}, parent("move-test", "move-uid"), parent("move-cleanup", "move-cleanup-uid"),
+		pool("source-pool", "source-pool-uid", "source"), pool("source", "source-pool-uid", "source"),
+		pool("destination-pool", "destination-pool-uid", "destination"))
+	client.PrependReactor("update", "shiftpvpools", func(action ktesting.Action) (bool, runtime.Object, error) {
+		update := action.(ktesting.UpdateAction)
+		if update.GetSubresource() == "" {
+			object := update.GetObject().(*unstructured.Unstructured)
+			object.SetGeneration(object.GetGeneration() + 1)
+			_ = unstructured.SetNestedField(object.Object, object.GetGeneration(), "status", "observedGeneration")
+		}
 		return false, nil, nil
 	})
 	return &cleanupapi.Store{Client: client}

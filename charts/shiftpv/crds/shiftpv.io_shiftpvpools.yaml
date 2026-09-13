@@ -60,6 +60,11 @@ spec:
                     limit:
                       type: string
                       minLength: 1
+                scanEpoch:
+                  description: Monotonic causal inventory request. Incrementing it advances metadata.generation and requires a new complete node observation.
+                  type: integer
+                  format: int64
+                  minimum: 0
             status:
               type: object
               properties:

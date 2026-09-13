@@ -13,7 +13,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -22,22 +21,31 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
-var Resource = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvcleanups"}
+var (
+	VolumeResource = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvvolumes"}
+	MoveResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvmoves"}
+	PoolResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvpools"}
+)
 
-var ErrConflict = errors.New("ShiftPVCleanup state precondition failed")
-
-const VolumeIDLabel = "shiftpv.io/volume-id"
+var ErrConflict = errors.New("cleanup journal state precondition failed")
 
 const (
-	PhasePending     = "Pending"
-	PhaseRunning     = "Running"
-	PhaseVerifying   = "Verifying"
-	PhaseCompleted   = "Completed"
-	PhaseNeedsReview = "NeedsReview"
+	VolumeProtectionFinalizer = "shiftpv.io/volume-protection"
+	MoveProtectionFinalizer   = "shiftpv.io/move-protection"
+	PoolProtectionFinalizer   = "shiftpv.io/pool-protection"
+
+	PhasePending           = "Pending"
+	PhaseRunning           = "Running"
+	PhaseVerifying         = "Verifying"
+	PhaseConfirmingAbsence = "ConfirmingAbsence"
+	PhaseCompleted         = "Completed"
+	PhaseNeedsReview       = "NeedsReview"
 )
 
 type CopyIdentity = volume.CopyIdentity
 
+// Authority identifies the exact durable parent that owns a cleanup journal.
+// The parent's UID, rather than its reusable name, is the authority boundary.
 type Authority struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
@@ -45,12 +53,10 @@ type Authority struct {
 }
 
 type Spec struct {
-	OperationID    string       `json:"operationID"`
-	Target         CopyIdentity `json:"target"`
-	Reason         string       `json:"reason"`
-	Authority      Authority    `json:"authority"`
-	ReservationUID string       `json:"reservationUID,omitempty"`
-	Approved       bool         `json:"approved"`
+	OperationID string       `json:"operationID"`
+	Target      CopyIdentity `json:"target"`
+	Reason      string       `json:"reason"`
+	Authority   Authority    `json:"authority"`
 }
 
 type Executor struct {
@@ -69,17 +75,36 @@ type Receipt struct {
 	LocalReceiptDigest string `json:"localReceiptDigest,omitempty"`
 }
 
-type Status struct {
-	Phase              string    `json:"phase,omitempty"`
-	ObservedGeneration int64     `json:"observedGeneration,omitempty"`
-	Reason             string    `json:"reason,omitempty"`
-	Message            string    `json:"message,omitempty"`
-	LastTransitionTime string    `json:"lastTransitionTime,omitempty"`
-	Executor           *Executor `json:"executor,omitempty"`
-	Receipt            *Receipt  `json:"receipt,omitempty"`
-	SettledAt          string    `json:"settledAt,omitempty"`
+// AbsenceProof records the generation fence and the later exact negative
+// observation used to close cleanup. ConfirmedAt is diagnostic only; the
+// generation fence, validity, completeness, and exact absence are authority.
+type AbsenceProof struct {
+	RequestID          string `json:"requestID"`
+	PoolName           string `json:"poolName"`
+	PoolUID            string `json:"poolUID"`
+	RequiredGeneration int64  `json:"requiredGeneration"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	Valid              bool   `json:"valid,omitempty"`
+	Complete           bool   `json:"complete,omitempty"`
+	Absent             bool   `json:"absent,omitempty"`
+	ConfirmedAt        string `json:"confirmedAt,omitempty"`
 }
 
+type Status struct {
+	Phase              string        `json:"phase,omitempty"`
+	ObservedGeneration int64         `json:"observedGeneration,omitempty"`
+	Reason             string        `json:"reason,omitempty"`
+	Message            string        `json:"message,omitempty"`
+	LastTransitionTime string        `json:"lastTransitionTime,omitempty"`
+	Executor           *Executor     `json:"executor,omitempty"`
+	Receipt            *Receipt      `json:"receipt,omitempty"`
+	AbsenceProof       *AbsenceProof `json:"absenceProof,omitempty"`
+	SettledAt          string        `json:"settledAt,omitempty"`
+}
+
+// Cleanup is a synthesized view of a journal embedded at status.cleanup on an
+// exact ShiftPVVolume or ShiftPVMove. UID, resourceVersion, and generation are
+// those of the parent; Name is only a deterministic executor name component.
 type Cleanup struct {
 	Name            string
 	UID             string
@@ -87,6 +112,11 @@ type Cleanup struct {
 	Generation      int64
 	Spec            Spec
 	Status          Status
+}
+
+type journal struct {
+	Spec   Spec   `json:"spec"`
+	Status Status `json:"status"`
 }
 
 type Store struct {
@@ -100,31 +130,36 @@ func Name(target CopyIdentity) string {
 	return "shiftpv-cleanup-" + hex.EncodeToString(sum[:16])
 }
 
+func (a Authority) Validate() error {
+	if !volume.ValidObjectName(a.Name) || !volume.ValidIdentityToken(a.UID) {
+		return fmt.Errorf("invalid cleanup parent identity")
+	}
+	switch a.Kind {
+	case "ShiftPVVolume", "ShiftPVMove":
+		return nil
+	default:
+		return fmt.Errorf("invalid cleanup authority %q", a.Kind)
+	}
+}
+
 func (s Spec) Validate() error {
-	if !volume.ValidIdentityToken(s.OperationID) || s.Target.Validate() != nil ||
-		!volume.ValidIdentityToken(s.Authority.UID) || !volume.ValidObjectName(s.Authority.Name) ||
-		(s.ReservationUID != "" && !volume.ValidIdentityToken(s.ReservationUID)) {
+	if !volume.ValidIdentityToken(s.OperationID) || s.Target.Validate() != nil {
 		return fmt.Errorf("invalid cleanup identity")
 	}
-	if s.Reason != "MoveSource" && s.Reason != "VolumeDelete" && s.Reason != "OrphanReclaim" {
-		return fmt.Errorf("invalid cleanup reason %q", s.Reason)
-	}
-	if s.Authority.Kind != "Namespace" && s.Authority.Kind != "ShiftPVVolume" && s.Authority.Kind != "ShiftPVMove" {
-		return fmt.Errorf("invalid cleanup authority %q", s.Authority.Kind)
+	if err := s.Authority.Validate(); err != nil {
+		return err
 	}
 	switch s.Reason {
 	case "VolumeDelete":
-		if !s.Approved || s.Authority.Kind != "ShiftPVVolume" || s.Authority.Name != s.Target.VolumeID || s.Authority.UID != s.Target.VolumeUID {
+		if s.Authority.Kind != "ShiftPVVolume" || s.Authority.Name != s.Target.VolumeID || s.Authority.UID != s.Target.VolumeUID {
 			return fmt.Errorf("volume cleanup authority does not match the target")
 		}
-	case "MoveSource":
-		if !s.Approved || s.Authority.Kind != "ShiftPVMove" {
-			return fmt.Errorf("move cleanup requires approved ShiftPVMove authority")
+	case "MoveSource", "MoveRollback":
+		if s.Authority.Kind != "ShiftPVMove" {
+			return fmt.Errorf("move cleanup requires ShiftPVMove authority")
 		}
-	case "OrphanReclaim":
-		if s.Authority.Kind != "Namespace" || s.Authority.Name != "kube-system" || s.Authority.UID != s.Target.InstallationID {
-			return fmt.Errorf("orphan cleanup authority does not match the installation")
-		}
+	default:
+		return fmt.Errorf("invalid cleanup reason %q", s.Reason)
 	}
 	return nil
 }
@@ -136,119 +171,362 @@ func (s *Store) Ensure(ctx context.Context, spec Spec) (Cleanup, error) {
 	if err := spec.Validate(); err != nil {
 		return Cleanup{}, err
 	}
-	name := Name(spec.Target)
-	resource := s.Client.Resource(Resource)
-	object, err := resource.Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		encoded, encodeErr := runtime.DefaultUnstructuredConverter.ToUnstructured(&spec)
-		if encodeErr != nil {
-			return Cleanup{}, encodeErr
+	var result Cleanup
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		resource, finalizer, err := s.parentResource(spec.Authority)
+		if err != nil {
+			return err
 		}
-		object, err = resource.Create(ctx, &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": "shiftpv.io/v1alpha1",
-			"kind":       "ShiftPVCleanup",
-			"metadata":   map[string]any{"name": name, "labels": map[string]any{VolumeIDLabel: spec.Target.VolumeID}},
-			"spec":       encoded,
-		}}, metav1.CreateOptions{})
-		if apierrors.IsAlreadyExists(err) {
-			object, err = resource.Get(ctx, name, metav1.GetOptions{})
+		object, err := resource.Get(ctx, spec.Authority.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
 		}
-	}
+		if err := validateParent(object, spec.Authority, finalizer); err != nil {
+			return err
+		}
+		current, found, err := journalFromParent(object)
+		if err != nil {
+			return err
+		}
+		if found {
+			if !reflect.DeepEqual(current.Spec, spec) {
+				return fmt.Errorf("%w: parent cleanup slot is bound to another intent", ErrConflict)
+			}
+			result = current
+			return nil
+		}
+		status := Status{
+			Phase:              PhasePending,
+			ObservedGeneration: object.GetGeneration(),
+			LastTransitionTime: s.now().Format(time.RFC3339Nano),
+		}
+		if err := setJournal(object, journal{Spec: spec, Status: status}); err != nil {
+			return err
+		}
+		updated, err := resource.UpdateStatus(ctx, object, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		result, _, err = journalFromParent(updated)
+		return err
+	})
 	if err != nil {
-		return Cleanup{}, fmt.Errorf("ensure ShiftPVCleanup: %w", err)
+		return Cleanup{}, fmt.Errorf("ensure parent cleanup journal: %w", err)
 	}
-	cleanup, err := fromUnstructured(object)
+	return result, nil
+}
+
+// Get reads status.cleanup from the exact parent identity. A terminating
+// parent remains usable while its ShiftPV protection finalizer is present.
+func (s *Store) Get(ctx context.Context, authority Authority) (Cleanup, error) {
+	if err := s.validate(); err != nil {
+		return Cleanup{}, err
+	}
+	resource, finalizer, err := s.parentResource(authority)
 	if err != nil {
 		return Cleanup{}, err
 	}
-	if !reflect.DeepEqual(cleanup.Spec, spec) {
-		return Cleanup{}, fmt.Errorf("%w: operation ID is bound to another intent", ErrConflict)
+	object, err := resource.Get(ctx, authority.Name, metav1.GetOptions{})
+	if err != nil {
+		return Cleanup{}, err
+	}
+	if err := validateParent(object, authority, finalizer); err != nil {
+		return Cleanup{}, err
+	}
+	cleanup, found, err := journalFromParent(object)
+	if err != nil {
+		return Cleanup{}, err
+	}
+	if !found {
+		return Cleanup{}, apierrors.NewNotFound(schema.GroupResource{Group: "shiftpv.io", Resource: "cleanupjournals"}, authority.Name)
 	}
 	return cleanup, nil
 }
 
-func (s *Store) Get(ctx context.Context, name string) (Cleanup, error) {
-	if err := s.validate(); err != nil {
-		return Cleanup{}, err
-	}
-	object, err := s.Client.Resource(Resource).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return Cleanup{}, err
-	}
-	return fromUnstructured(object)
-}
-
 func (s *Store) List(ctx context.Context) ([]Cleanup, error) {
-	return s.list(ctx, metav1.ListOptions{})
+	return s.list(ctx, "")
 }
 
 func (s *Store) ListForVolume(ctx context.Context, volumeID string) ([]Cleanup, error) {
 	if err := volume.ValidateID(volumeID); err != nil {
 		return nil, err
 	}
-	selector := labels.Set{VolumeIDLabel: volumeID}.AsSelector().String()
-	return s.list(ctx, metav1.ListOptions{LabelSelector: selector})
+	return s.list(ctx, volumeID)
 }
 
-func (s *Store) list(ctx context.Context, options metav1.ListOptions) ([]Cleanup, error) {
+func (s *Store) list(ctx context.Context, volumeID string) ([]Cleanup, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
-	objects, err := s.Client.Resource(Resource).List(ctx, options)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]Cleanup, 0, len(objects.Items))
-	for index := range objects.Items {
-		cleanup, decodeErr := fromUnstructured(&objects.Items[index])
-		if decodeErr != nil {
-			return nil, decodeErr
+	result := make([]Cleanup, 0)
+	for _, resource := range []schema.GroupVersionResource{VolumeResource, MoveResource} {
+		objects, err := s.Client.Resource(resource).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
 		}
-		result = append(result, cleanup)
+		for index := range objects.Items {
+			cleanup, found, decodeErr := journalFromParent(&objects.Items[index])
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			if found && (volumeID == "" || cleanup.Spec.Target.VolumeID == volumeID) {
+				result = append(result, cleanup)
+			}
+		}
 	}
 	return result, nil
 }
 
-func (s *Store) UpdateStatus(ctx context.Context, name, uid string, next Status) error {
+func (s *Store) UpdateStatus(ctx context.Context, expected Cleanup, next Status) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
+	if expected.UID == "" || expected.Name != Name(expected.Spec.Target) || expected.UID != expected.Spec.Authority.UID || expected.Spec.Validate() != nil {
+		return ErrConflict
+	}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		resource := s.Client.Resource(Resource)
-		object, err := resource.Get(ctx, name, metav1.GetOptions{})
+		resource, finalizer, err := s.parentResource(expected.Spec.Authority)
 		if err != nil {
 			return err
 		}
-		current, err := fromUnstructured(object)
+		object, err := resource.Get(ctx, expected.Spec.Authority.Name, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
-		if uid == "" || current.UID != uid || object.GetDeletionTimestamp() != nil {
+		if err := validateParent(object, expected.Spec.Authority, finalizer); err != nil {
+			return err
+		}
+		current, found, err := journalFromParent(object)
+		if err != nil {
+			return err
+		}
+		if !found || current.UID != expected.UID || current.Name != expected.Name || !reflect.DeepEqual(current.Spec, expected.Spec) {
 			return ErrConflict
 		}
 		if next.ObservedGeneration == 0 {
-			next.ObservedGeneration = current.Generation
+			next.ObservedGeneration = object.GetGeneration()
 		}
 		if next.LastTransitionTime == "" {
-			now := time.Now().UTC()
-			if s.Now != nil {
-				now = s.Now().UTC()
+			if next.Phase == current.Status.Phase && current.Status.LastTransitionTime != "" {
+				next.LastTransitionTime = current.Status.LastTransitionTime
+			} else {
+				next.LastTransitionTime = s.now().Format(time.RFC3339Nano)
 			}
-			next.LastTransitionTime = now.Format(time.RFC3339Nano)
+		}
+		if reflect.DeepEqual(current.Status, next) {
+			return nil
 		}
 		if err := validateTransition(current, next); err != nil {
 			return err
 		}
-		encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&next)
-		if err != nil {
-			return err
-		}
-		if err := unstructured.SetNestedMap(object.Object, encoded, "status"); err != nil {
+		if err := setJournal(object, journal{Spec: current.Spec, Status: next}); err != nil {
 			return err
 		}
 		_, err = resource.UpdateStatus(ctx, object, metav1.UpdateOptions{})
 		return err
 	})
+}
+
+// ReconcileAbsence advances a receipt-bearing journal through a causal Pool
+// scan fence. The first call after Verifying bumps spec.scanEpoch and records
+// the generation returned by the API. Later calls complete only when the exact
+// current Pool generation has a valid, complete, non-truncated inventory whose
+// per-copy evidence is internally consistent and shows the target neither
+// present nor published. A failed or ambiguous fence write is safe to retry: an
+// unrecorded bump is followed by another bump.
+func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup, bool, error) {
+	current, err := s.Get(ctx, expected.Spec.Authority)
+	if err != nil {
+		return Cleanup{}, false, err
+	}
+	if current.UID != expected.UID || current.Name != expected.Name || !reflect.DeepEqual(current.Spec, expected.Spec) {
+		return Cleanup{}, false, ErrConflict
+	}
+	switch current.Status.Phase {
+	case PhaseCompleted:
+		if !validPurgedReceipt(current, current.Status) || !validAbsenceFence(current.Spec.Target, current.Status.AbsenceProof) ||
+			!confirmedAbsence(current.Status.AbsenceProof) || current.Status.SettledAt == "" {
+			return Cleanup{}, false, fmt.Errorf("%w: completed cleanup proof is invalid", ErrConflict)
+		}
+		return current, true, nil
+	case PhaseVerifying:
+		if !validPurgedReceipt(current, current.Status) {
+			return Cleanup{}, false, fmt.Errorf("%w: absence scan requires a purged API receipt", ErrConflict)
+		}
+		generation, err := s.requestPoolScan(ctx, current.Spec.Target)
+		if err != nil {
+			return Cleanup{}, false, err
+		}
+		next := current.Status
+		next.Phase = PhaseConfirmingAbsence
+		next.AbsenceProof = &AbsenceProof{
+			RequestID:          absenceRequestID(current, generation),
+			PoolName:           current.Spec.Target.PoolName,
+			PoolUID:            current.Spec.Target.PoolUID,
+			RequiredGeneration: generation,
+		}
+		if err := s.UpdateStatus(ctx, current, next); err != nil {
+			return Cleanup{}, false, err
+		}
+		current, err = s.Get(ctx, current.Spec.Authority)
+		return current, false, err
+	case PhaseConfirmingAbsence:
+		if !validPurgedReceipt(current, current.Status) {
+			return Cleanup{}, false, fmt.Errorf("%w: absence confirmation requires a purged API receipt", ErrConflict)
+		}
+	default:
+		return Cleanup{}, false, fmt.Errorf("%w: cleanup is phase=%q", ErrConflict, current.Status.Phase)
+	}
+
+	pool, err := s.Client.Resource(PoolResource).Get(ctx, current.Spec.Target.PoolName, metav1.GetOptions{})
+	if err != nil {
+		return Cleanup{}, false, err
+	}
+	if string(pool.GetUID()) != current.Spec.Target.PoolUID || !hasFinalizer(pool, PoolProtectionFinalizer) {
+		return Cleanup{}, false, fmt.Errorf("%w: cleanup Pool identity or protection changed", ErrConflict)
+	}
+	proof := current.Status.AbsenceProof
+	if !validAbsenceFence(current.Spec.Target, proof) {
+		return Cleanup{}, false, fmt.Errorf("%w: cleanup absence fence is invalid", ErrConflict)
+	}
+	observedGeneration, _, err := unstructured.NestedInt64(pool.Object, "status", "observedGeneration")
+	if err != nil {
+		return Cleanup{}, false, err
+	}
+	if observedGeneration != pool.GetGeneration() || observedGeneration < proof.RequiredGeneration {
+		return current, false, nil
+	}
+	inventory, found, err := poolInventoryFrom(pool)
+	if err != nil {
+		return Cleanup{}, false, err
+	}
+	if !found || !inventory.Valid || inventory.Truncated || inventory.Message != "" {
+		return current, false, nil
+	}
+	poolNode, found, err := unstructured.NestedString(pool.Object, "spec", "nodeName")
+	if err != nil {
+		return Cleanup{}, false, err
+	}
+	if !found || !inventoryProvesAbsence(inventory, pool.GetName(), string(pool.GetUID()), poolNode, current.Spec.Target) {
+		return current, false, nil
+	}
+
+	next := current.Status
+	next.Phase = PhaseCompleted
+	next.AbsenceProof = &AbsenceProof{
+		RequestID:          proof.RequestID,
+		PoolName:           proof.PoolName,
+		PoolUID:            proof.PoolUID,
+		RequiredGeneration: proof.RequiredGeneration,
+		ObservedGeneration: observedGeneration,
+		Valid:              true,
+		Complete:           true,
+		Absent:             true,
+		ConfirmedAt:        s.now().Format(time.RFC3339Nano),
+	}
+	next.SettledAt = s.now().Format(time.RFC3339Nano)
+	if err := s.UpdateStatus(ctx, current, next); err != nil {
+		return Cleanup{}, false, err
+	}
+	current, err = s.Get(ctx, current.Spec.Authority)
+	if err != nil {
+		return Cleanup{}, false, err
+	}
+	return current, current.Status.Phase == PhaseCompleted, nil
+}
+
+type poolInventory struct {
+	Valid     bool              `json:"valid"`
+	Truncated bool              `json:"truncated,omitempty"`
+	Message   string            `json:"message,omitempty"`
+	Copies    []copyObservation `json:"copies,omitempty"`
+}
+
+type copyObservation struct {
+	Marker    string        `json:"marker"`
+	Identity  *CopyIdentity `json:"identity,omitempty"`
+	Present   bool          `json:"present"`
+	Published bool          `json:"published,omitempty"`
+	Problem   string        `json:"problem,omitempty"`
+}
+
+func inventoryProvesAbsence(inventory poolInventory, poolName, poolUID, nodeName string, target CopyIdentity) bool {
+	for _, observed := range inventory.Copies {
+		if observed.Marker == "" || observed.Problem != "" || observed.Identity == nil || observed.Identity.Validate() != nil {
+			return false
+		}
+		identity := *observed.Identity
+		if identity.InstallationID != target.InstallationID || identity.PoolName != poolName || identity.PoolUID != poolUID || identity.NodeName != nodeName ||
+			observed.Marker != "placement-"+identity.CopyID+".json" || observed.Published && !observed.Present {
+			return false
+		}
+		if reflect.DeepEqual(identity, target) && (observed.Present || observed.Published) {
+			return false
+		}
+	}
+	return true
+}
+
+func poolInventoryFrom(pool *unstructured.Unstructured) (poolInventory, bool, error) {
+	value, found, err := unstructured.NestedMap(pool.Object, "status", "inventory")
+	if err != nil || !found {
+		return poolInventory{}, found, err
+	}
+	var inventory poolInventory
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(value, &inventory); err != nil {
+		return poolInventory{}, true, fmt.Errorf("decode Pool inventory: %w", err)
+	}
+	return inventory, true, nil
+}
+
+func (s *Store) requestPoolScan(ctx context.Context, target CopyIdentity) (int64, error) {
+	var generation int64
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		resource := s.Client.Resource(PoolResource)
+		pool, err := resource.Get(ctx, target.PoolName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if string(pool.GetUID()) != target.PoolUID || !hasFinalizer(pool, PoolProtectionFinalizer) {
+			return fmt.Errorf("%w: cleanup Pool identity or protection changed", ErrConflict)
+		}
+		nodeName, _, err := unstructured.NestedString(pool.Object, "spec", "nodeName")
+		if err != nil || nodeName != target.NodeName {
+			return fmt.Errorf("%w: cleanup Pool node changed", ErrConflict)
+		}
+		epoch, found, err := unstructured.NestedInt64(pool.Object, "spec", "scanEpoch")
+		if err != nil {
+			return err
+		}
+		if !found {
+			epoch = 0
+		}
+		if epoch == int64(^uint64(0)>>1) {
+			return fmt.Errorf("%w: Pool scan epoch is exhausted", ErrConflict)
+		}
+		if err := unstructured.SetNestedField(pool.Object, epoch+1, "spec", "scanEpoch"); err != nil {
+			return err
+		}
+		updated, err := resource.Update(ctx, pool, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		if updated.GetGeneration() <= 0 {
+			return fmt.Errorf("%w: Pool scan request returned no generation", ErrConflict)
+		}
+		generation = updated.GetGeneration()
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("request post-receipt Pool scan: %w", err)
+	}
+	return generation, nil
+}
+
+func absenceRequestID(cleanup Cleanup, generation int64) string {
+	encoded := cleanup.Spec.Authority.UID + "\x00" + cleanup.Spec.OperationID + "\x00" + fmt.Sprint(generation)
+	sum := sha256.Sum256([]byte(encoded))
+	return "scan-" + hex.EncodeToString(sum[:16])
 }
 
 func validateTransition(current Cleanup, next Status) error {
@@ -257,29 +535,21 @@ func validateTransition(current Cleanup, next Status) error {
 		phase = PhasePending
 	}
 	allowed := map[string]map[string]bool{
-		PhasePending:     {PhasePending: true, PhaseRunning: true, PhaseNeedsReview: true},
-		PhaseRunning:     {PhaseRunning: true, PhaseVerifying: true, PhaseNeedsReview: true},
-		PhaseVerifying:   {PhaseVerifying: true, PhaseCompleted: true, PhaseNeedsReview: true},
-		PhaseCompleted:   {PhaseCompleted: true, PhaseNeedsReview: true},
-		PhaseNeedsReview: {PhasePending: true, PhaseNeedsReview: true},
+		PhasePending:           {PhasePending: true, PhaseRunning: true, PhaseNeedsReview: true},
+		PhaseRunning:           {PhaseRunning: true, PhaseVerifying: true, PhaseNeedsReview: true},
+		PhaseVerifying:         {PhaseVerifying: true, PhaseConfirmingAbsence: true, PhaseNeedsReview: true},
+		PhaseConfirmingAbsence: {PhaseConfirmingAbsence: true, PhaseCompleted: true, PhaseNeedsReview: true},
+		PhaseCompleted:         {PhaseCompleted: true},
+		PhaseNeedsReview:       {PhaseNeedsReview: true},
 	}
 	if !allowed[phase][next.Phase] {
 		return fmt.Errorf("%w: phase %s cannot transition to %s", ErrConflict, phase, next.Phase)
 	}
-	if phase == PhaseCompleted && next.Phase == PhaseNeedsReview &&
-		(next.Reason != "CopyReappeared" || !reflect.DeepEqual(current.Status.Executor, next.Executor) ||
-			!reflect.DeepEqual(current.Status.Receipt, next.Receipt) || current.Status.SettledAt == "" || current.Status.SettledAt != next.SettledAt) {
-		return fmt.Errorf("%w: only an observed exact-copy reappearance may reopen a completed cleanup", ErrConflict)
-	}
-	if phase == PhaseNeedsReview && next.Phase == PhasePending &&
-		(!current.Spec.Approved || current.Spec.Reason != "OrphanReclaim" || current.Status.Executor != nil || current.Status.Receipt != nil || next.Executor != nil || next.Receipt != nil) {
-		return fmt.Errorf("%w: only an unexecuted approved orphan may be re-evaluated", ErrConflict)
-	}
-	if current.Status.Executor != nil && !reflect.DeepEqual(current.Status.Executor, next.Executor) {
+	if current.Status.Executor != nil && !executorTransitionAllowed(phase, next.Phase, current.Status.Executor, next.Executor, current.Status.Receipt, next.Receipt) {
 		return fmt.Errorf("%w: executor identity is immutable", ErrConflict)
 	}
-	if next.Phase == PhaseRunning && (next.Executor == nil || !current.Spec.Approved) {
-		return fmt.Errorf("%w: Running requires an approved intent and executor", ErrConflict)
+	if next.Phase == PhaseRunning && next.Executor == nil {
+		return fmt.Errorf("%w: Running requires an executor", ErrConflict)
 	}
 	if current.Status.Receipt != nil && !reflect.DeepEqual(current.Status.Receipt, next.Receipt) {
 		return fmt.Errorf("%w: receipt is immutable", ErrConflict)
@@ -292,12 +562,27 @@ func validateTransition(current Cleanup, next Status) error {
 			return fmt.Errorf("%w: invalid receipt time", ErrConflict)
 		}
 	}
-	if next.Phase == PhaseVerifying && next.Receipt == nil {
-		return fmt.Errorf("%w: Verifying requires a receipt", ErrConflict)
+	if next.Phase == PhaseVerifying {
+		if !validPurgedReceipt(current, next) || next.AbsenceProof != nil {
+			return fmt.Errorf("%w: Verifying requires a Pod-bound executor and only the API receipt", ErrConflict)
+		}
+	}
+	if current.Status.AbsenceProof != nil {
+		if next.AbsenceProof == nil || !sameAbsenceFence(current.Status.AbsenceProof, next.AbsenceProof) {
+			return fmt.Errorf("%w: absence fence identity is immutable", ErrConflict)
+		}
+		if current.Status.AbsenceProof.ConfirmedAt != "" && !reflect.DeepEqual(current.Status.AbsenceProof, next.AbsenceProof) {
+			return fmt.Errorf("%w: confirmed absence proof is immutable", ErrConflict)
+		}
+	}
+	if next.Phase == PhaseConfirmingAbsence || next.Phase == PhaseCompleted {
+		if !validPurgedReceipt(current, next) || !validAbsenceFence(current.Spec.Target, next.AbsenceProof) {
+			return fmt.Errorf("%w: cleanup confirmation requires a post-receipt absence fence", ErrConflict)
+		}
 	}
 	if next.Phase == PhaseCompleted {
-		if next.Receipt == nil || !next.Receipt.Purged || next.SettledAt == "" {
-			return fmt.Errorf("%w: Completed requires a purged receipt and settlement time", ErrConflict)
+		if !confirmedAbsence(next.AbsenceProof) || next.SettledAt == "" {
+			return fmt.Errorf("%w: Completed requires a purged receipt and later complete exact absence proof", ErrConflict)
 		}
 		if _, err := time.Parse(time.RFC3339Nano, next.SettledAt); err != nil {
 			return fmt.Errorf("%w: invalid settlement time", ErrConflict)
@@ -306,27 +591,124 @@ func validateTransition(current Cleanup, next Status) error {
 	return nil
 }
 
-func fromUnstructured(object *unstructured.Unstructured) (Cleanup, error) {
-	var spec Spec
-	value, found, err := unstructured.NestedMap(object.Object, "spec")
-	if err != nil || !found {
-		return Cleanup{}, fmt.Errorf("decode ShiftPVCleanup %q spec", object.GetName())
+func validPurgedReceipt(cleanup Cleanup, status Status) bool {
+	if status.Executor == nil || status.Receipt == nil || !volume.ValidObjectName(status.Executor.JobName) ||
+		!volume.ValidIdentityToken(status.Executor.JobUID) || !volume.ValidIdentityToken(status.Executor.PodUID) ||
+		status.Executor.NodeName != cleanup.Spec.Target.NodeName ||
+		status.Receipt.OperationID != cleanup.Spec.OperationID || status.Receipt.ExecutorUID != status.Executor.JobUID ||
+		!status.Receipt.Retired || !status.Receipt.Purged || !validSHA256Digest(status.Receipt.LocalReceiptDigest) {
+		return false
 	}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(value, &spec); err != nil {
-		return Cleanup{}, err
+	_, err := time.Parse(time.RFC3339Nano, status.Receipt.ObservedAt)
+	return err == nil
+}
+
+func validSHA256Digest(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
+}
+
+func executorTransitionAllowed(currentPhase, nextPhase string, current, next *Executor, currentReceipt, nextReceipt *Receipt) bool {
+	if reflect.DeepEqual(current, next) {
+		return true
 	}
-	if err := spec.Validate(); err != nil {
-		return Cleanup{}, err
+	// A Job retry gets a new Pod UID. Before any API receipt exists, the exact
+	// parent may rebind execution to that new Pod while retaining the same Job
+	// UID, operation, and node. The node-local per-volume lock and operation
+	// intent serialize an old Pod with its retry and make the effect idempotent.
+	// Once a receipt exists, the complete executor identity is immutable.
+	return currentPhase == PhaseRunning && nextPhase == PhaseRunning && currentReceipt == nil && nextReceipt == nil && current != nil && next != nil &&
+		volume.ValidIdentityToken(next.PodUID) && current.JobName == next.JobName && current.JobUID == next.JobUID && current.NodeName == next.NodeName
+}
+
+func sameAbsenceFence(current, next *AbsenceProof) bool {
+	return current != nil && next != nil && current.RequestID == next.RequestID && current.PoolName == next.PoolName &&
+		current.PoolUID == next.PoolUID && current.RequiredGeneration == next.RequiredGeneration
+}
+
+func validAbsenceFence(target CopyIdentity, proof *AbsenceProof) bool {
+	return proof != nil && volume.ValidIdentityToken(proof.RequestID) && proof.PoolName == target.PoolName &&
+		proof.PoolUID == target.PoolUID && proof.RequiredGeneration > 0
+}
+
+func confirmedAbsence(proof *AbsenceProof) bool {
+	if proof == nil || !proof.Valid || !proof.Complete || !proof.Absent || proof.ObservedGeneration < proof.RequiredGeneration || proof.ConfirmedAt == "" {
+		return false
 	}
-	var status Status
-	if value, found, err = unstructured.NestedMap(object.Object, "status"); err != nil {
-		return Cleanup{}, err
-	} else if found {
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(value, &status); err != nil {
-			return Cleanup{}, err
+	_, err := time.Parse(time.RFC3339Nano, proof.ConfirmedAt)
+	return err == nil
+}
+
+func (s *Store) parentResource(authority Authority) (dynamic.ResourceInterface, string, error) {
+	if err := authority.Validate(); err != nil {
+		return nil, "", err
+	}
+	switch authority.Kind {
+	case "ShiftPVVolume":
+		return s.Client.Resource(VolumeResource), VolumeProtectionFinalizer, nil
+	case "ShiftPVMove":
+		return s.Client.Resource(MoveResource), MoveProtectionFinalizer, nil
+	default:
+		return nil, "", fmt.Errorf("invalid cleanup authority %q", authority.Kind)
+	}
+}
+
+func validateParent(object *unstructured.Unstructured, authority Authority, finalizer string) error {
+	if object == nil || string(object.GetUID()) != authority.UID || object.GetName() != authority.Name {
+		return fmt.Errorf("%w: cleanup parent identity changed", ErrConflict)
+	}
+	if hasFinalizer(object, finalizer) {
+		return nil
+	}
+	return fmt.Errorf("%w: cleanup parent lacks %q", ErrConflict, finalizer)
+}
+
+func hasFinalizer(object *unstructured.Unstructured, finalizer string) bool {
+	if object == nil {
+		return false
+	}
+	for _, current := range object.GetFinalizers() {
+		if current == finalizer {
+			return true
 		}
 	}
-	return Cleanup{Name: object.GetName(), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(), Generation: object.GetGeneration(), Spec: spec, Status: status}, nil
+	return false
+}
+
+func journalFromParent(object *unstructured.Unstructured) (Cleanup, bool, error) {
+	value, found, err := unstructured.NestedMap(object.Object, "status", "cleanup")
+	if err != nil || !found {
+		return Cleanup{}, found, err
+	}
+	var stored journal
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(value, &stored); err != nil {
+		return Cleanup{}, true, fmt.Errorf("decode cleanup journal on %s %q: %w", object.GetKind(), object.GetName(), err)
+	}
+	if err := stored.Spec.Validate(); err != nil {
+		return Cleanup{}, true, err
+	}
+	if stored.Spec.Authority.Kind != object.GetKind() || stored.Spec.Authority.Name != object.GetName() || stored.Spec.Authority.UID != string(object.GetUID()) {
+		return Cleanup{}, true, fmt.Errorf("%w: embedded cleanup authority does not match its parent", ErrConflict)
+	}
+	return Cleanup{
+		Name: Name(stored.Spec.Target), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(), Generation: object.GetGeneration(),
+		Spec: stored.Spec, Status: stored.Status,
+	}, true, nil
+}
+
+func setJournal(object *unstructured.Unstructured, stored journal) error {
+	encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&stored)
+	if err != nil {
+		return err
+	}
+	return unstructured.SetNestedMap(object.Object, encoded, "status", "cleanup")
+}
+
+func (s *Store) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (s *Store) validate() error {

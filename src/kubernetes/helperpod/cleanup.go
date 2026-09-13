@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -26,10 +27,10 @@ const (
 )
 
 func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store *cleanupapi.Store) (cleanupapi.Cleanup, error) {
-	if r == nil || r.Client == nil || r.Pools == nil || r.Namespace == "" || r.Image == "" || r.Timeout <= 0 || store == nil || cleanup.UID == "" || cleanup.Name == "" || cleanup.Spec.Validate() != nil || !cleanup.Spec.Approved {
+	if r == nil || r.Client == nil || r.Pools == nil || r.Namespace == "" || r.Image == "" || r.Timeout <= 0 || store == nil || cleanup.UID == "" || cleanup.Name == "" || cleanup.Spec.Validate() != nil {
 		return cleanupapi.Cleanup{}, fmt.Errorf("cleanup runner configuration is incomplete")
 	}
-	if cleanup.Status.Phase == cleanupapi.PhaseCompleted {
+	if cleanup.Status.Phase == cleanupapi.PhaseCompleted || cleanup.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
 		return cleanup, nil
 	}
 	if cleanup.Status.Phase == cleanupapi.PhaseNeedsReview {
@@ -45,11 +46,14 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 	if pool.Name != cleanup.Spec.Target.PoolName || pool.UID != cleanup.Spec.Target.PoolUID {
 		return cleanupapi.Cleanup{}, r.needsReview(ctx, store, cleanup, "PoolIdentityChanged", "registered Pool no longer matches the approved cleanup target")
 	}
+	if !slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) {
+		return cleanupapi.Cleanup{}, r.needsReview(ctx, store, cleanup, "PoolProtectionChanged", "cleanup Pool no longer has lifecycle protection")
+	}
 	cleanup, err = refreshCleanup(ctx, store, cleanup)
 	if err != nil {
 		return cleanupapi.Cleanup{}, err
 	}
-	if cleanup.Status.Phase == cleanupapi.PhaseCompleted {
+	if cleanup.Status.Phase == cleanupapi.PhaseCompleted || cleanup.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
 		return cleanup, nil
 	}
 	if cleanup.Status.Phase == cleanupapi.PhaseNeedsReview {
@@ -90,7 +94,7 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 	if err != nil {
 		return cleanupapi.Cleanup{}, err
 	}
-	if cleanup.Status.Phase == cleanupapi.PhaseCompleted {
+	if cleanup.Status.Phase == cleanupapi.PhaseCompleted || cleanup.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
 		return cleanup, nil
 	}
 	if cleanup.Status.Phase == cleanupapi.PhaseNeedsReview {
@@ -102,18 +106,18 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 	}
 	executor := &cleanupapi.Executor{JobName: created.Name, JobUID: string(created.UID), NodeName: cleanup.Spec.Target.NodeName}
 	if cleanup.Status.Phase == "" || cleanup.Status.Phase == cleanupapi.PhasePending {
-		if err := store.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+		if err := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 			return cleanupapi.Cleanup{}, fmt.Errorf("bind cleanup executor: %w", err)
 		}
 		cleanup.Status = cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}
-	} else if cleanup.Status.Executor == nil || !reflect.DeepEqual(cleanup.Status.Executor, executor) {
+	} else if cleanup.Status.Executor == nil || !sameBoundExecutor(cleanup.Status.Executor, executor) {
 		return cleanupapi.Cleanup{}, r.needsReview(ctx, store, cleanup, "ExecutorIdentityChanged", "cleanup executor differs from the durable cleanup status")
 	}
 	if err := r.startCleanupJob(ctx, store, cleanup, created, job); err != nil {
 		return cleanupapi.Cleanup{}, err
 	}
 	err = wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, r.Timeout, true, func(pollCtx context.Context) (bool, error) {
-		current, getErr := store.Get(pollCtx, cleanup.Name)
+		current, getErr := store.Get(pollCtx, cleanup.Spec.Authority)
 		if getErr != nil {
 			return false, getErr
 		}
@@ -121,7 +125,7 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 			return false, cleanupapi.ErrConflict
 		}
 		switch current.Status.Phase {
-		case cleanupapi.PhaseCompleted:
+		case cleanupapi.PhaseCompleted, cleanupapi.PhaseConfirmingAbsence:
 			cleanup = current
 			return true, nil
 		case cleanupapi.PhaseNeedsReview:
@@ -182,7 +186,7 @@ func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup
 		if err != nil {
 			return false, err
 		}
-		if current.Status.Phase == cleanupapi.PhaseCompleted {
+		if current.Status.Phase == cleanupapi.PhaseCompleted || current.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
 			result = current
 			return true, nil
 		}
@@ -240,7 +244,7 @@ func ownedByJob(pod *corev1.Pod, uid types.UID) bool {
 }
 
 func refreshCleanup(ctx context.Context, store *cleanupapi.Store, expected cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
-	current, err := store.Get(ctx, expected.Name)
+	current, err := store.Get(ctx, expected.Spec.Authority)
 	if err != nil {
 		return cleanupapi.Cleanup{}, fmt.Errorf("read cleanup intent: %w", classifyKubernetesAPIError(err))
 	}
@@ -274,7 +278,7 @@ func (r *Runner) startCleanupJob(ctx context.Context, store *cleanupapi.Store, c
 }
 
 func (r *Runner) needsReview(ctx context.Context, store *cleanupapi.Store, cleanup cleanupapi.Cleanup, reason, message string) error {
-	if updateErr := store.UpdateStatus(ctx, cleanup.Name, cleanup.UID, cleanupapi.Status{
+	if updateErr := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{
 		Phase: cleanupapi.PhaseNeedsReview, Reason: reason, Message: message,
 		Executor: cleanup.Status.Executor, Receipt: cleanup.Status.Receipt,
 	}); updateErr != nil {
@@ -298,7 +302,13 @@ func (r *Runner) cleanupJob(cleanup cleanupapi.Cleanup, poolRoot string) *batchv
 		cleanupUIDLabel:               cleanup.UID,
 	}
 	return &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{Name: cleanup.Name + "-effect", Namespace: r.Namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: cleanup.Name + "-effect", Namespace: r.Namespace, Labels: labels,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "shiftpv.io/v1alpha1", Kind: cleanup.Spec.Authority.Kind, Name: cleanup.Spec.Authority.Name,
+				UID: types.UID(cleanup.Spec.Authority.UID), Controller: boolPtr(true), BlockOwnerDeletion: boolPtr(true),
+			}},
+		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff, TTLSecondsAfterFinished: &ttl, ActiveDeadlineSeconds: &deadline, Suspend: &suspended,
 			Template: corev1.PodTemplateSpec{
@@ -310,9 +320,9 @@ func (r *Runner) cleanupJob(cleanup cleanupapi.Cleanup, poolRoot string) *batchv
 						Name: "cleanup", Image: r.Image,
 						Command: []string{"/shiftpv-volume-helper"},
 						Args: []string{
-							"cleanup", "--cleanup-name=" + cleanup.Name, "--cleanup-uid=" + cleanup.UID,
+							"cleanup", "--authority-kind=" + cleanup.Spec.Authority.Kind,
+							"--authority-name=" + cleanup.Spec.Authority.Name, "--authority-uid=" + cleanup.Spec.Authority.UID,
 							"--operation-id=" + cleanup.Spec.OperationID, "--namespace=" + r.Namespace,
-							"--pool-readiness-stale-after=" + r.poolReadinessStaleAfter().String(),
 						},
 						Env:       []corev1.EnvVar{{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}}},
 						Resources: r.Resources,
@@ -328,19 +338,13 @@ func (r *Runner) cleanupJob(cleanup cleanupapi.Cleanup, poolRoot string) *batchv
 	}
 }
 
-func (r *Runner) poolReadinessStaleAfter() time.Duration {
-	if r.PoolReadinessStaleAfter > 0 {
-		return r.PoolReadinessStaleAfter
-	}
-	return volumeapi.DefaultPoolReadinessStaleAfter
-}
-
 func sameCleanupJob(current, expected *batchv1.Job) bool {
 	if current == nil || expected == nil || current.Labels[cleanupUIDLabel] != expected.Labels[cleanupUIDLabel] || current.Labels[cleanupNameLabel] != expected.Labels[cleanupNameLabel] {
 		return false
 	}
 	currentPod, expectedPod := current.Spec.Template.Spec, expected.Spec.Template.Spec
 	if current.DeletionTimestamp != nil || current.Namespace != expected.Namespace || current.Name != expected.Name ||
+		!reflect.DeepEqual(current.OwnerReferences, expected.OwnerReferences) ||
 		!oneOrDefault(current.Spec.Parallelism) || !oneOrDefault(current.Spec.Completions) ||
 		(current.Spec.ManualSelector != nil && *current.Spec.ManualSelector) ||
 		(current.Spec.CompletionMode != nil && *current.Spec.CompletionMode != batchv1.NonIndexedCompletion) ||
@@ -370,5 +374,10 @@ func sameCleanupJob(current, expected *batchv1.Job) bool {
 }
 
 func oneOrDefault(value *int32) bool { return value == nil || *value == 1 }
+
+func sameBoundExecutor(current, expected *cleanupapi.Executor) bool {
+	return current != nil && expected != nil && current.JobName == expected.JobName && current.JobUID == expected.JobUID &&
+		current.NodeName == expected.NodeName && (expected.PodUID == "" || current.PodUID == expected.PodUID)
+}
 
 func hostPathTypePtr(value corev1.HostPathType) *corev1.HostPathType { return &value }

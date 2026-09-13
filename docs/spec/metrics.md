@@ -1,108 +1,80 @@
-# Metrics
+# Metrics Contract
 
-## Data flow
+> **Status:** 현재 0.4 구현 후보가 내보내는 metric 계약이다. Metric은 운영 관찰면이며 storage
+> authority가 아니다.
 
-```text
-Node Pool probe + bounded copy inventory ── 메모리 ── /metrics
-Controller           ── API snapshot ─ 메모리 ── /metrics
-                     └─ CSI / discovery 완료 결과
-```
+Metrics는 `ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`와 node-local observation의 수렴 상태를 보여 주는
+관찰면이다. Controller, Node 또는 운영 절차는 Prometheus 값을 allocation, publication, promotion, deletion,
+cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 
-| 경계 | 계약 |
-|---|---|
-| 활성화 | Helm `metrics.enabled`; 기본 false |
-| Target 식별 | ServiceMonitor의 `shiftpv="true"`; dashboard query 범위를 ShiftPV로 한정 |
-| 수집 요청 | 완료된 메모리 snapshot만 반환 |
-| Node | 기존 Pool probe 주기 재사용; 등록 directory를 포함한 filesystem |
-| Controller | 기본 30s마다 Pool·Volume·Move·Cleanup·reservation List; 한 pass timeout 10s |
-| API 예산 | 전용 client 두 개가 2 QPS / burst 4 limiter를 공유; storage client 예산과 분리 |
-| 저장소 판단 | 기존 admission 검사와 Move journal이 담당 |
-| HTTP | 내부 HTTP `:8080/metrics`; webhook TLS와 별개 |
+## Collection contract
 
-## Metric families
+- Exporter는 API와 node probe의 완료된 snapshot만 게시하며 storage state를 변경하지 않는다.
+- scrape 실패와 exporter 재시작은 durable API journal이나 capacity hold에 영향을 주지 않는다.
+- deletion closure의 safety 기준은 wall clock이 아니라 cleanup journal이 요청한 `scanEpoch` generation과
+  Pool `status.observedGeneration`의 일치다. Pool readiness freshness는 운영 관찰 evidence다.
+- timestamp와 duration은 지연 감지와 운영 SLO에만 사용한다. 시간이 지났다는 이유로 hold나 data를
+  해제하지 않는다.
+- 식별자와 상세 오류는 CR status, Event와 log에서 찾는다.
 
-아래 이름에는 모두 `shiftpv_` 접두사가 붙는다.
+## Emitted signals
 
-| 이름 | 유형 | Label | 의미 |
-|---|---|---|---|
-| `pool_capacity_limit_bytes` | gauge | pool, node | 논리 예약 한도 |
-| `pool_reserved_bytes` | gauge | pool, node | owner + 승인된 incoming 예약 합계 |
-| `pool_unregistered_reserved_bytes` | gauge | pool, node | Volume CR 없는 예약 부분합; 생성 중 상태도 포함 |
-| `pool_accounting_valid` | gauge | pool, node | 최근 예약 집계 유효성 0/1 |
-| `pool_ready` | gauge | pool, node | snapshot 시점의 generation·probe freshness 적용 Ready |
-| `pool_filesystem_size_bytes` | gauge | pool, node | directory를 포함한 filesystem 전체 크기 |
-| `pool_filesystem_available_bytes` | gauge | pool, node | statfs BAvail 기반 여유; 외부 writer 사용량 포함 |
-| `pool_filesystem_available_inodes` | gauge | pool, node | statfs Ffree 기반 inode 여유 |
-| `pool_inventory_valid` | gauge | pool, node | 최신 bounded node inventory의 유효성 0/1 |
-| `pool_inventory_truncated` | gauge | pool, node | 고정 관찰 상한 초과 여부 0/1 |
-| `metrics_snapshot_success` | gauge | source | 최근 관찰 성공 0/1 |
-| `metrics_snapshot_last_success_timestamp_seconds` | gauge | source | 마지막 성공 Unix 시각; 첫 성공 전 0 |
-| `volumes` | gauge | phase | 현재 Volume CR 수 |
-| `moves` | gauge | phase | 현재 Volume의 activeMove로 연결된 Move와 미완료 Completing 수; 중복 제외 |
-| `cleanup_requests` | gauge | state | Pending·Running·Verifying·NeedsReview·Completed·Unknown 정리 요청 수 |
-| `copy_observations` | gauge | state | Current·InFlight·CleanupTarget·OrphanPreserved·Missing·NeedsReview copy 수 |
-| `mobility_deferred_volumes` | gauge | reason | 완료된 cordon discovery에서 보류된 Volume 수 |
-| `csi_requests_total` | counter | method, code | CSI lifecycle RPC 완료 호출 수; 재시도 포함 |
-| `csi_request_duration_seconds` | histogram | method | 해당 RPC 처리 시간 |
+아래 이름과 label은 현재 구현의 public metric surface다.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `shiftpv_pool_capacity_limit_bytes` | `pool`, `node` | Pool의 논리 capacity limit |
+| `shiftpv_pool_reserved_bytes` | `pool`, `node` | Volume owner와 미정산 Move hold의 합계; disk usage가 아님 |
+| `shiftpv_pool_accounting_valid` | `pool`, `node` | 최신 hold 계산이 유효한지 여부 |
+| `shiftpv_pool_ready` | `pool`, `node` | generation과 probe freshness를 포함한 Pool readiness |
+| `shiftpv_pool_filesystem_size_bytes` | `pool`, `node` | 등록 directory가 속한 filesystem 전체 크기 |
+| `shiftpv_pool_filesystem_available_bytes` | `pool`, `node` | `statfs`가 보고한 비특권 사용자 가용 bytes |
+| `shiftpv_pool_filesystem_available_inodes` | `pool`, `node` | `statfs`가 보고한 가용 inode |
+| `shiftpv_pool_inventory_valid` | `pool`, `node` | 최신 bounded inventory의 validity |
+| `shiftpv_pool_inventory_truncated` | `pool`, `node` | inventory가 최대 항목 수를 초과했는지 여부 |
+| `shiftpv_metrics_snapshot_success` | `source` | `metadata`, `filesystem`, `discovery` snapshot의 최근 성공 여부 |
+| `shiftpv_metrics_snapshot_last_success_timestamp_seconds` | `source` | source별 마지막 성공 snapshot 시각 |
+| `shiftpv_volumes` | `phase` | 고정 enum phase별 Volume 수 |
+| `shiftpv_moves` | `phase` | live Volume이 `activeMove`로 참조하는 Move와 미정산 `Completing` Move 수 |
+| `shiftpv_cleanup_requests` | `state` | Volume/Move에 내장된 cleanup journal 수 |
+| `shiftpv_copy_observations` | `state` | Pool inventory copy를 API authority와 대조한 분류 수 |
+| `shiftpv_mobility_deferred_volumes` | `reason` | 마지막 완료된 cordon discovery의 보류 사유별 Volume 수 |
+| `shiftpv_csi_requests_total` | `method`, `code` | 지원하는 CSI lifecycle RPC 완료 횟수 |
+| `shiftpv_csi_request_duration_seconds` | `method` | 지원하는 CSI lifecycle RPC 처리 시간 |
+
+`pool`과 `node`는 등록된 Pool 집합으로 제한한다. Phase, state, source, method, code와 reason은 코드에
+고정된 집합 밖의 값을 `Unknown`으로 접는다. Volume UID, Move UID, copy ID, operation/executor ID,
+filesystem path, Pod UID, 오류 문자열과 timestamp를 label로 사용하지 않는다.
 
 ## Interpretation
 
-| 상황 | 관측 계약 |
+| 관측 | 운영 의미 |
 |---|---|
-| `source` | Controller: metadata, mobility 활성 시 discovery; Node: filesystem |
-| API 또는 probe 오류 | 마지막 성공 값·시각 유지, success=0 |
-| 아직 관찰하지 못한 capacity | 수치 시계열 미발행 |
-| 예약 집계 오류 | 해당 Pool accounting_valid=0, 마지막 정상 예약 수치 유지 |
-| Pool 삭제 확인 | 다음 성공 관찰에서 해당 Pool 시계열 제거 |
-| Node Pool 미등록 | filesystem 시계열 제거, success=0, 마지막 성공 시각 유지 |
-| Volume 없는 예약 | 논리 예약으로 계수; 삭제 여부는 별도 운영 판단 |
-| API owner 없는 exact copy | `OrphanPreserved`; unapproved cleanup으로 보존 |
-| API current/in-flight copy가 inventory에 없음 | `Missing` |
-| 손상 marker·unrecorded path | `NeedsReview` |
-| inventory 상한 초과 | truncated=1; 보이지 않은 copy를 Missing/absent 증거로 사용하지 않음 |
-| Recovered 이력 | activeMove 연결이 해제된 종결 Move는 현재 Move 수에서 제외 |
-| 완료 기록 재시도 | Completing은 잠금 해제·Volume 삭제 뒤에도 종결까지 집계 |
-| 잘못된 activeMove 연결 | metadata snapshot 실패로 표시 |
-| mobility 비활성화 | discovery 시계열 미발행 |
-| listener 실패 | 오류 log 기록; CSI process와 readiness 유지 |
-| process 재시작 | CSI counter 초기화; snapshot은 첫 관찰부터 재구성 |
+| `pool_ready=0` | generation, probe condition 또는 wall-clock freshness 중 하나 이상이 admission-ready가 아님 |
+| inventory invalid/truncated | scan 실패, identity 문제 또는 bounded scan 전체를 증명하지 못함 |
+| reserved bytes 증가 | current owner hold 또는 미정산 destination/retained-source Move hold가 증가함 |
+| cleanup `Pending`/`Running` | exact intent가 filesystem effect 또는 API receipt를 기다림 |
+| cleanup `Verifying`/`ConfirmingAbsence` | receipt 확인 또는 post-receipt generation absence를 기다림 |
+| cleanup `NeedsReview` | parent-owned cleanup 모순으로 자동 destructive action이 닫힘 |
+| copy `OrphanPreserved` | inventory에는 있지만 현재 API transaction이 소유하지 않아 report-only로 보존함 |
+| Move/Volume `Blocked` | API phase상 자동 진행이 닫혀 운영자 판단이 필요함 |
 
-예약량은 파일 크기가 아니다. Filesystem 여유는 같은 filesystem을 공유하는 모든 사용자의 영향을
-받는다. `size - available`에는 OS 예약 block도 포함될 수 있다. 실제 할당은 기존 fresh admission
-검사가 결정한다.
+API receipt만 있고 absence가 없거나 absence만 있고 receipt가 없는 상태는 정상적인 pending으로 계속
+노출한다. 한 Move 동안 source와 destination hold가 함께 보이는 것은 보수적 double accounting이며 곧바로
+누수로 판정하지 않는다. 반대로 physical copy 가능성이 있는데 hold가 0인 상태는 safety violation이다.
 
-`phase`, `reason`은 코드의 고정 enum이며 알 수 없는 값은 `Unknown`으로 집계한다.
-CSI method는 CreateVolume, DeleteVolume, NodePublishVolume, NodeUnpublishVolume 네 개다.
-code는 gRPC status code다. 식별자·경로·오류 원문은 CR/Event/log에서 찾는다.
+## Alerts and dashboards
 
-## Freshness
+기본 dashboard는 collection 상태, Pool readiness/inventory, Pool별 aggregate hold와 filesystem 여유,
+Volume/active Move phase, mobility deferral, CSI rate/error/latency를 분리해 보여 준다. 기본 alert rules는
+snapshot 실패·staleness, invalid Pool accounting, invalid/truncated inventory, cleanup `NeedsReview`, 그리고
+orphan/missing/unsafe copy observation을 경고한다.
 
-```promql
-time() - (shiftpv_metrics_snapshot_last_success_timestamp_seconds{source="filesystem"} > 0)
-shiftpv_metrics_snapshot_success == 0
-shiftpv_pool_accounting_valid == 0
-```
+현재 metric에는 개별 hold owner/role, cleanup reason class, journal별 age가 label로 노출되지 않는다.
+상세 원인은 해당 Volume/Move status, Event와 log에서 확인한다.
 
-success=1은 마지막 작업 성공을 뜻한다. 작업 정지나 장시간 지연은 마지막 성공 시각의 경과로
-판단한다. 서로 다른 process의 값은 관찰 시점도 다르다. 동일 filesystem을 가리키는 여러 Pool의
-filesystem 수치를 합산하면 중복될 수 있다.
+경보의 지속 시간은 paging noise를 줄이는 관찰 조건일 뿐 state transition이나 GC timer가 아니다. Alert가
+해제되어도 API receipt와 fresh absence proof가 없으면 cleanup과 capacity release는 완료되지 않는다.
 
-설정과 접근 범위는 [Helm guide](../../charts/shiftpv/README.md#metrics)가 소유한다.
-
-## Alerts
-
-`metrics.prometheusRule.enabled=true`는 Prometheus Operator의 `PrometheusRule`을 만든다. 모든 규칙은
-`shiftpv="true"` target label만 평가하고 조건이 5분 지속될 때 firing된다. 값이 정상으로 돌아오면
-다음 평가에서 해제된다.
-
-| Alert | 조건 |
-|---|---|
-| `ShiftPVObservationFailed` | 최근 snapshot 작업 실패 |
-| `ShiftPVObservationStale` | 마지막 성공이 5분보다 오래됨, 전체 관측 시계열이 없음, 최근 15분 내 개별 source가 사라짐, 또는 metrics target 수집 실패 |
-| `ShiftPVPoolAccountingInvalid` | 예약 회계를 capacity 판단에 사용할 수 없음 |
-| `ShiftPVPoolInventoryUnsafe` | copy inventory가 invalid 또는 truncated |
-| `ShiftPVCleanupNeedsReview` | 운영자 확인을 기다리는 Cleanup 존재 |
-| `ShiftPVCopyNeedsReview` | orphan-preserved, missing, unsafe identity copy 존재 |
-
-Prometheus가 ServiceMonitor 없이 직접 수집할 때도 target에 `shiftpv="true"`, `release`, `component`와 node target의 `node` label을 추가한다. Alert는
-삭제 명령이 아니라 관찰 결과이며, 대상 CR과 Pool inventory를 확인한 뒤 조치한다.
+영구 node/disk 손실은 자동 정상화 metric으로 감추지 않고 `Blocked`/cleanup `NeedsReview`와 보존된 hold로 계속 노출한다.
+HA/replication, RWX, snapshot과 hard-quota 사용량은 0.4 metrics 계약 범위 밖이다.

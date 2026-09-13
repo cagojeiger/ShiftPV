@@ -11,22 +11,20 @@ LOGICAL_NAME=shiftpv-capacity-logical
 PHYSICAL_PV=
 LOGICAL_PV=
 
-reservation_count() {
-	kubectl -n shiftpv-system get configmap \
-		-l app.kubernetes.io/name=shiftpv,app.kubernetes.io/component=volume-reservation \
-		-o name | wc -l | tr -d ' '
+volume_hold_count() {
+	kubectl get shiftpvvolumes -o name | wc -l | tr -d ' '
 }
 
-wait_for_reservation_count() {
+wait_for_volume_hold_count() {
 	local expected=$1
 	local attempt
 	for ((attempt = 0; attempt < 120; attempt++)); do
-		if [[ "$(reservation_count)" == "${expected}" ]]; then
+		if [[ "$(volume_hold_count)" == "${expected}" ]]; then
 			return
 		fi
 		sleep 1
 	done
-	echo "reservation count did not become ${expected}" >&2
+	echo "ShiftPVVolume capacity hold count did not become ${expected}" >&2
 	return 1
 }
 
@@ -113,40 +111,51 @@ allowVolumeExpansion: false
 volumeBindingMode: WaitForFirstConsumer
 EOF
 
-# statfs must see bytes consumed outside ShiftPV and reject before reserving.
+# statfs must see bytes consumed outside ShiftPV and reject before creating a
+# Volume-owned capacity hold.
 create_workload "${PHYSICAL_NAME}" 64Mi
 wait_for_resource_exhausted "${PHYSICAL_NAME}"
-wait_for_reservation_count 0
+wait_for_volume_hold_count 0
 
 # Removing the external file makes the same pending claim converge.
 docker exec "${CAPACITY_NODE}" rm -f "${CAPACITY_PATH}/external-fill"
 kubectl wait --for=condition=Ready "pod/${PHYSICAL_NAME}" --timeout=5m
 kubectl wait --for=jsonpath='{.status.phase}'=Bound "pvc/${PHYSICAL_NAME}" --timeout=2m
 PHYSICAL_PV=$(kubectl get pvc "${PHYSICAL_NAME}" -o jsonpath='{.spec.volumeName}')
-wait_for_reservation_count 1
+PHYSICAL_VOLUME=$(kubectl get "pv/${PHYSICAL_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
+PHYSICAL_PVC_UID=$(kubectl get "pvc/${PHYSICAL_NAME}" -o jsonpath='{.metadata.uid}')
+wait_for_volume_hold_count 1
+test "$(kubectl get "shiftpvvolume/${PHYSICAL_VOLUME}" -o jsonpath='{.spec.requestName}')" = "pvc-${PHYSICAL_PVC_UID}"
+test "$(kubectl get "shiftpvvolume/${PHYSICAL_VOLUME}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
+test "$(kubectl get "shiftpvvolume/${PHYSICAL_VOLUME}" -o jsonpath='{.spec.initialNode}')" = "${CAPACITY_NODE}"
 
-# An empty 64Mi PVC uses almost no bytes, but its reservation must still leave
-# only 64Mi of the Pool limit and reject a new 80Mi request.
+# An empty 64Mi PVC uses almost no bytes, but its Volume-owned hold must still
+# leave only 64Mi of the Pool limit and reject a new 80Mi request.
 create_workload "${LOGICAL_NAME}" 80Mi
 wait_for_resource_exhausted "${LOGICAL_NAME}"
-wait_for_reservation_count 1
+wait_for_volume_hold_count 1
 
-# Releasing the first reservation allows the pending second claim to converge.
+# Releasing the first Volume hold allows the pending second claim to converge.
 kubectl delete pod "${PHYSICAL_NAME}" --wait=true
 kubectl delete pvc "${PHYSICAL_NAME}" --wait=true
 kubectl wait --for=delete "pv/${PHYSICAL_PV}" --timeout=2m
 PHYSICAL_PV=
-wait_for_reservation_count 0
+wait_for_volume_hold_count 0
 kubectl wait --for=condition=Ready "pod/${LOGICAL_NAME}" --timeout=5m
 kubectl wait --for=jsonpath='{.status.phase}'=Bound "pvc/${LOGICAL_NAME}" --timeout=2m
 LOGICAL_PV=$(kubectl get pvc "${LOGICAL_NAME}" -o jsonpath='{.spec.volumeName}')
-wait_for_reservation_count 1
+LOGICAL_VOLUME=$(kubectl get "pv/${LOGICAL_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
+LOGICAL_PVC_UID=$(kubectl get "pvc/${LOGICAL_NAME}" -o jsonpath='{.metadata.uid}')
+wait_for_volume_hold_count 1
+test "$(kubectl get "shiftpvvolume/${LOGICAL_VOLUME}" -o jsonpath='{.spec.requestName}')" = "pvc-${LOGICAL_PVC_UID}"
+test "$(kubectl get "shiftpvvolume/${LOGICAL_VOLUME}" -o jsonpath='{.spec.capacityBytes}')" = 83886080
+test "$(kubectl get "shiftpvvolume/${LOGICAL_VOLUME}" -o jsonpath='{.spec.initialNode}')" = "${CAPACITY_NODE}"
 
 kubectl delete pod "${LOGICAL_NAME}" --wait=true
 kubectl delete pvc "${LOGICAL_NAME}" --wait=true
 kubectl wait --for=delete "pv/${LOGICAL_PV}" --timeout=2m
 LOGICAL_PV=
-wait_for_reservation_count 0
+wait_for_volume_hold_count 0
 
 trap - EXIT
 cleanup_capacity_test

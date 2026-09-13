@@ -57,7 +57,7 @@ recover_source_only() {
 }
 
 recover_after_commit_failure() {
-	local return_move current_pod latest_checksum failed_job destination_mount source_copy cleanup_name
+	local return_move current_pod latest_checksum failed_job destination_mount source_copy
 	# The current owner becomes the return Move source. The test helper fails the
 	# approved cleanup before filesystem mutation without invalidating inventory.
 	source_copy=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
@@ -79,10 +79,10 @@ recover_after_commit_failure() {
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.spec.sourceNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.reason}')" = "CleanupFailed"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	cleanup_name=$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanupName}')
-	test -n "${cleanup_name}"
-	test "$(kubectl get "shiftpvcleanup/${cleanup_name}" -o jsonpath='{.status.phase}')" = NeedsReview
-	failed_job=$(kubectl get "shiftpvcleanup/${cleanup_name}" -o jsonpath='{.status.executor.jobName}')
+	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanup.status.phase}')" = NeedsReview
+	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanup.spec.authority.name}')" = "${return_move}"
+	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanup.spec.target.copyID}')" = "${source_copy}"
+	failed_job=$(cleanup_job_name "shiftpvmove/${return_move}")
 	test -n "${failed_job}"
 	kubectl -n shiftpv-system logs "job/${failed_job}" >"${WORK_DIR}/cleanup-failure.txt" 2>&1
 	grep -Fq 'injected cleanup failure before filesystem mutation' "${WORK_DIR}/cleanup-failure.txt"

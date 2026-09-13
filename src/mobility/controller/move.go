@@ -22,6 +22,9 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 	}
 	if pendingMoveObsoleted(move, observed) {
 		klog.Infof("deleting unstarted ShiftPVMove %s because source node %s is schedulable", move.Name, move.Spec.SourceNode)
+		if err := r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID); err != nil {
+			return err
+		}
 		return r.Repository.DeleteMove(ctx, move.Name, move.UID)
 	}
 	decision, err := fsm.Decide(fsm.Phase(move.Status.Phase), observed.FSM)

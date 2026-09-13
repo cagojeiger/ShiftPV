@@ -8,7 +8,7 @@ metadata:
     {{- include "shiftpv.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["pods", "configmaps"]
+    resources: ["pods"]
     verbs: ["get"]
   - apiGroups: ["batch"]
     resources: ["jobs"]

@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 	"github.com/cagojeiger/ShiftPV/src/volume"
@@ -95,10 +96,41 @@ func (m *memoryRepository) ReadyPools(context.Context) ([]volumeapi.Pool, error)
 	}
 	return identifiedReadyTestPools(m.pools, m.volumes, m.pools), nil
 }
+func (m *memoryRepository) ReadyPoolForNode(_ context.Context, nodeName string) (volumeapi.Pool, error) {
+	pools := m.pools
+	if m.readyPoolsConfigured {
+		pools = m.readyPools
+	}
+	for _, pool := range identifiedReadyTestPools(pools, m.volumes, m.pools) {
+		if pool.NodeName == nodeName {
+			return pool, nil
+		}
+	}
+	return volumeapi.Pool{}, volumeapi.ErrPoolNotReady
+}
 func (m *memoryRepository) CreateMove(_ context.Context, _ string, spec volumeapi.MoveSpec) (volumeapi.Move, error) {
 	move := volumeapi.Move{Name: "move-generated", UID: "uid", Spec: spec}
 	m.moves = append(m.moves, move)
 	return move, nil
+}
+func (m *memoryRepository) RemoveMoveFinalizer(_ context.Context, name, uid string) error {
+	for index := range m.moves {
+		if m.moves[index].Name != name {
+			continue
+		}
+		if m.moves[index].UID != uid {
+			return volumeapi.ErrStateConflict
+		}
+		filtered := m.moves[index].Finalizers[:0]
+		for _, finalizer := range m.moves[index].Finalizers {
+			if finalizer != volumeapi.MoveProtectionFinalizer {
+				filtered = append(filtered, finalizer)
+			}
+		}
+		m.moves[index].Finalizers = filtered
+		return nil
+	}
+	return nil
 }
 func (m *memoryRepository) DeleteMove(_ context.Context, name, uid string) error {
 	for index := range m.moves {
@@ -107,6 +139,11 @@ func (m *memoryRepository) DeleteMove(_ context.Context, name, uid string) error
 		}
 		if string(m.moves[index].UID) != uid {
 			return volumeapi.ErrStateConflict
+		}
+		for _, finalizer := range m.moves[index].Finalizers {
+			if finalizer == volumeapi.MoveProtectionFinalizer {
+				return fmt.Errorf("delete protected move: %w", volumeapi.ErrStateConflict)
+			}
 		}
 		m.moves = append(m.moves[:index], m.moves[index+1:]...)
 		return nil
@@ -136,6 +173,9 @@ func identifiedTestPools(pools []volumeapi.Pool) []volumeapi.Pool {
 		if result[index].UID == "" {
 			result[index].UID = result[index].Name + "-uid"
 		}
+		if !contains(result[index].Finalizers, volumeapi.PoolProtectionFinalizer) {
+			result[index].Finalizers = append(result[index].Finalizers, volumeapi.PoolProtectionFinalizer)
+		}
 	}
 	return result
 }
@@ -153,7 +193,9 @@ func identifiedReadyTestPools(pools []volumeapi.Pool, states map[string]volumeap
 				continue
 			}
 			copy := *state.CurrentCopy
-			inventory.Copies = append(inventory.Copies, volumeapi.CopyObservation{Marker: "test-copy", Identity: &copy, Present: true})
+			inventory.Copies = append(inventory.Copies, volumeapi.CopyObservation{
+				Marker: "test-copy", Identity: &copy, Present: true, Published: contains(state.PublishedNodes, copy.NodeName),
+			})
 		}
 		result[index].Status.Inventory = inventory
 	}
@@ -308,8 +350,9 @@ func TestPendingMoveIsCancelledWhenSourceWasUncordonedBeforeLock(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	move := volumeapi.Move{
 		Name: "move-test", UID: "move-uid",
-		Spec:   volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
-		Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)},
+		Finalizers: []string{volumeapi.MoveProtectionFinalizer},
+		Spec:       volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status:     volumeapi.MoveStatus{Phase: string(fsm.PhasePending)},
 	}
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source"}},
@@ -331,6 +374,54 @@ func TestPendingMoveIsCancelledWhenSourceWasUncordonedBeforeLock(t *testing.T) {
 	state := repository.volumes[volumeID]
 	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || state.OwnerNode != "source" {
 		t.Fatalf("obsolete move cancellation changed volume authority: %#v", state)
+	}
+}
+
+func TestReconcileAllReleasesOnlySucceededMoveFinalizer(t *testing.T) {
+	for name, test := range map[string]struct {
+		status      volumeapi.MoveStatus
+		wantRelease bool
+		wantError   bool
+	}{
+		"settled succeeded":   {status: volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}, wantRelease: true},
+		"unsettled succeeded": {status: volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded)}, wantError: true},
+		"blocked":             {status: volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked)}},
+		"unsettled recovered": {
+			status: volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked), RecoveryPhase: recoveryRecovered}, wantError: true,
+		},
+		"settled recovered": {
+			status: volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked), RecoveryPhase: recoveryRecovered, CapacityReason: recoveryCapacitySettled}, wantRelease: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := &memoryRepository{
+				volumes: map[string]volumeapi.State{},
+				moves: []volumeapi.Move{{
+					Name: "move-test", UID: "move-uid",
+					Finalizers: []string{volumeapi.MoveProtectionFinalizer, "example.test/other"},
+					Spec:       volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
+					Status:     test.status,
+				}},
+			}
+			reconciler := &Reconciler{
+				Client: fake.NewSimpleClientset(), Repository: repository,
+				Namespace: "system", HelperImage: "helper",
+			}
+			err := reconciler.ReconcileAll(context.Background())
+			if (err != nil) != test.wantError {
+				t.Fatalf("ReconcileAll error = %v, wantError=%t", err, test.wantError)
+			}
+			got := repository.moves[0].Finalizers
+			if test.wantRelease {
+				if len(got) != 1 || got[0] != "example.test/other" {
+					t.Fatalf("succeeded finalizers = %#v", got)
+				}
+				return
+			}
+			if len(got) != 2 || got[0] != volumeapi.MoveProtectionFinalizer {
+				t.Fatalf("non-succeeded finalizers = %#v", got)
+			}
+		})
 	}
 }
 

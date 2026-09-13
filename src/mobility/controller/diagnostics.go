@@ -31,7 +31,6 @@ type progressSnapshot struct {
 	EvictionRequested    bool
 	CopyJobName          string
 	PromotionJobName     string
-	CleanupJobName       string
 	RecoveryOwner        string
 	CopyOperationID      string
 	PromotionOperationID string
@@ -89,9 +88,9 @@ func progressOf(status volumeapi.MoveStatus) progressSnapshot {
 		ReplacementName: status.ReplacementName, ReplacementUID: status.ReplacementUID, DestinationNode: status.DestinationNode,
 		DestinationPoolUID: status.DestinationPoolUID,
 		EvictionRequested:  status.EvictionRequested, CopyJobName: status.CopyJobName,
-		PromotionJobName: status.PromotionJobName, CleanupJobName: status.CleanupJobName,
-		RecoveryOwner:   status.RecoveryOwner,
-		CopyOperationID: status.CopyOperationID, PromotionOperationID: status.PromotionOperationID,
+		PromotionJobName: status.PromotionJobName,
+		RecoveryOwner:    status.RecoveryOwner,
+		CopyOperationID:  status.CopyOperationID, PromotionOperationID: status.PromotionOperationID,
 		SourceCopyID: copyID(status.SourceCopy), IncomingCopyID: copyID(status.IncomingCopy), DestinationCopyID: copyID(status.DestinationCopy),
 	}
 }

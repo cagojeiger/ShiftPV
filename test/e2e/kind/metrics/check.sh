@@ -56,4 +56,4 @@ while IFS= read -r expression; do
   query "${expression}" >/dev/null
 done <<< "${expressions}"
 
-echo "ShiftPV metrics passed: 3 live targets, Pool capacity, CSI calls, observed copy and zero active moves/reservations after cleanup"
+echo "ShiftPV metrics passed: 3 live targets, Pool capacity, CSI calls, observed copy and zero active moves/capacity holds after cleanup"

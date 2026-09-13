@@ -3,6 +3,9 @@ set -euo pipefail
 
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORK_DIR:?WORK_DIR is required}"
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# shellcheck source=test/e2e/kind/cleanup-journal.sh
+source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
 
 POOL_A_NAME=ordinary-directory-a
 POOL_B_NAME=ordinary-directory-b
@@ -202,15 +205,15 @@ kubectl wait --for=jsonpath='{.status.phase}'=Ready "shiftpvvolume/${VOLUME_ID}"
 test -z "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')"
 kubectl delete pvc "${WORKLOAD}" --wait=true
 kubectl wait --for=jsonpath='{.status.phase}'=Released "pv/${PV_NAME}" --timeout=2m
-kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
-kubectl get "shiftpvvolume/${VOLUME_ID}" >/dev/null
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.claimRef.uid}')"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${POOL_A_NODE}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 8388608
 docker exec "${POOL_A_NODE}" grep -Fx \
 	'ShiftPV ordinary directory Pool' "${POOL_A_PATH}/volumes/${VOLUME_ID}/payload"
 
 kubectl patch pv "${PV_NAME}" --type=merge \
 	-p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
 kubectl wait --for=delete "pv/${PV_NAME}" --timeout=2m
-kubectl -n shiftpv-system wait --for=delete "configmap/${VOLUME_ID}" --timeout=2m
 kubectl wait --for=delete "shiftpvvolume/${VOLUME_ID}" --timeout=2m
 docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/volumes/${VOLUME_ID}"
 kubectl wait --for=delete "shiftpvpool/${POOL_A_NAME}" --timeout=2m
@@ -336,17 +339,15 @@ docker exec "${POOL_B_NODE}" grep -Fx \
 	'ShiftPV ordinary directory mobility' "${POOL_B_PATH}/volumes/${MOBILITY_VOLUME}/payload"
 docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/volumes/${MOBILITY_VOLUME}"
 SOURCE_COPY_ID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
-CLEANUP_NAME=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanupName}')
 test -n "${SOURCE_COPY_ID}"
-test -n "${CLEANUP_NAME}"
 docker exec "${POOL_A_NODE}" test ! -e "${POOL_A_PATH}/.shiftpv/retired/${SOURCE_COPY_ID}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP_NAME}" -o jsonpath='{.status.phase}')" = Completed
+assert_cleanup_journal "shiftpvmove/${MOVE_NAME}" MoveSource "${MOBILITY_VOLUME}" "${SOURCE_COPY_ID}" ShiftPVMove
 
 kubectl uncordon "${POOL_A_NODE}"
 kubectl -n "${MOBILITY_NAMESPACE}" delete deployment/writer --wait=true
 kubectl -n "${MOBILITY_NAMESPACE}" delete pvc/data --wait=true
 kubectl wait --for=delete "pv/${MOBILITY_PV}" --timeout=2m
-kubectl -n shiftpv-system wait --for=delete "configmap/${MOBILITY_VOLUME}" --timeout=2m
+kubectl wait --for=delete "shiftpvvolume/${MOBILITY_VOLUME}" --timeout=2m
 kubectl delete namespace "${MOBILITY_NAMESPACE}" --wait=true
 
 trap - EXIT

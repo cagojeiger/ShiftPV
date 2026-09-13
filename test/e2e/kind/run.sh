@@ -112,16 +112,38 @@ run_directory_pool() {
 		"${ROOT_DIR}/test/e2e/kind/directory-pool.sh"
 }
 
-run_orphan_cleanup() {
+run_orphan_preservation() {
 	CLUSTER_NAME="${CLUSTER_NAME}" WORKER_A_POOL="${WORKER_A_POOL}" \
 		"${ROOT_DIR}/test/e2e/kind/orphan-cleanup.sh"
+}
+
+run_volume_delete_cleanup() {
+	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/volume-delete-cleanup.sh"
+}
+
+run_cleanup_job_retry() {
+	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
+		WORKER_A_POOL="${WORKER_A_POOL}" WORKER_B_POOL="${WORKER_B_POOL}" \
+		"${ROOT_DIR}/test/e2e/kind/cleanup-job-retry.sh"
 }
 
 install_shiftpv true
 
 if [[ "${ORPHAN_CLEANUP_ONLY:-0}" == "1" ]]; then
-	run_orphan_cleanup
-	echo "ShiftPV focused orphan cleanup during Pool deregistration E2E passed"
+	run_orphan_preservation
+	echo "ShiftPV focused unknown-orphan preservation during Pool deregistration E2E passed"
+	exit 0
+fi
+
+if [[ "${VOLUME_DELETE_CLEANUP_ONLY:-0}" == "1" ]]; then
+	run_volume_delete_cleanup
+	echo "ShiftPV focused DeleteVolume cleanup ordering E2E passed"
+	exit 0
+fi
+
+if [[ "${CLEANUP_JOB_RETRY_ONLY:-0}" == "1" ]]; then
+	run_cleanup_job_retry
+	echo "ShiftPV focused cleanup Job retry E2E passed"
 	exit 0
 fi
 
@@ -138,7 +160,7 @@ if [[ "${DIRECTORY_POOL_ONLY:-0}" == "1" ]]; then
 fi
 
 run_pool_capacity
-run_orphan_cleanup
+run_orphan_preservation
 
 if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
 	echo "ShiftPV focused Pool capacity E2E passed"
@@ -153,9 +175,12 @@ fi
 
 if [[ "${MOBILITY_NODE_RESTARTS_ONLY:-0}" == "1" ]]; then
 	run_mobility_node_restarts
+	run_cleanup_job_retry
 	echo "ShiftPV focused mobility node-container restart E2E passed"
 	exit 0
 fi
+
+run_volume_delete_cleanup
 
 # Lifecycle admission is read-only. A direct dry-run DELETE must not mint an
 # uninstall permit even when no storage dependency exists.
@@ -195,6 +220,7 @@ kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-e2e --timeout=2m
 
 PV_NAME=$(kubectl get pvc shiftpv-e2e -o jsonpath='{.spec.volumeName}')
+PVC_UID=$(kubectl get pvc shiftpv-e2e -o jsonpath='{.metadata.uid}')
 OWNER_NODE=$(kubectl get pod shiftpv-e2e -o jsonpath='{.spec.nodeName}')
 CHECKSUM_BEFORE=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
 VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
@@ -203,6 +229,9 @@ if [[ "${PV_DRIVER}" != "csi.shiftpv.io" ]]; then
   echo "PVC was not provisioned by ShiftPV: ${PV_DRIVER}" >&2
   exit 1
 fi
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${OWNER_NODE}"
 
 # Force replacement of both controller and owner-node plugin Pods while the
 # workload keeps the volume mounted. Their Kubernetes UIDs must change.
@@ -294,7 +323,8 @@ helm uninstall shiftpv --namespace shiftpv-system --no-hooks
 
 kubectl get pvc shiftpv-e2e >/dev/null
 kubectl get "pv/${PV_NAME}" >/dev/null
-kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
 
 case "${OWNER_NODE}" in
   "${CLUSTER_NAME}-worker") DATA_MOUNT=/mnt/shiftpv ;;

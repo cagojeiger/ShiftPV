@@ -38,17 +38,22 @@ func (r cleanupRepository) List(context.Context) ([]cleanupapi.Cleanup, error) {
 
 func TestCheckBlocksUnsettledCleanupContract(t *testing.T) {
 	items := []cleanupapi.Cleanup{
-		{Name: "pending", Spec: cleanupapi.Spec{OperationID: "cleanup-a", Target: volume.CopyIdentity{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef"}}, Status: cleanupapi.Status{Phase: cleanupapi.PhaseRunning}},
+		{Name: "volume-journal", Spec: cleanupapi.Spec{OperationID: "cleanup-a", Target: volume.CopyIdentity{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef"}, Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: "shiftpv-0123456789abcdef0123456789abcdef"}}, Status: cleanupapi.Status{Phase: cleanupapi.PhaseRunning}},
+		{Name: "move-journal", Spec: cleanupapi.Spec{OperationID: "cleanup-b", Target: volume.CopyIdentity{VolumeID: "shiftpv-fedcba9876543210fedcba9876543210"}, Authority: cleanupapi.Authority{Kind: "ShiftPVMove", Name: "move-a"}}, Status: cleanupapi.Status{Phase: cleanupapi.PhaseVerifying}},
 		{Name: "settled", Status: cleanupapi.Status{Phase: cleanupapi.PhaseCompleted}},
 	}
 	checker := &Checker{Client: fake.NewClientset(), Volumes: &memoryRepository{}, Cleanups: cleanupRepository{items: items}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 	report, err := checker.Check(context.Background())
-	if err != nil || len(report.Blockers) != 1 || report.Blockers[0].Kind != "ShiftPVCleanup" || report.Blockers[0].Name != "pending" {
+	if err != nil || len(report.Blockers) != 2 || report.Blockers[0].Kind != "ShiftPVMove" || report.Blockers[0].Name != "move-a" || report.Blockers[1].Kind != "ShiftPVVolume" {
 		t.Fatalf("cleanup blockers=%#v err=%v", report.Blockers, err)
 	}
 	checker.Cleanups = cleanupRepository{err: errors.New("cleanup api unavailable")}
 	if _, err := checker.Check(context.Background()); err == nil {
 		t.Fatal("cleanup API failure did not close uninstall gate")
+	}
+	checker.Cleanups = cleanupRepository{items: []cleanupapi.Cleanup{{Name: "invalid-parent", Status: cleanupapi.Status{Phase: cleanupapi.PhaseRunning}}}}
+	if _, err := checker.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid parent authority") {
+		t.Fatalf("invalid embedded cleanup journal did not close uninstall gate: %v", err)
 	}
 }
 
@@ -115,9 +120,6 @@ func TestCheckPoolDeleteAllowsExactEmptyPoolWhileOtherPoolsRemainActive(t *testi
 	client := fake.NewClientset(
 		shiftPVPersistentVolumeOnNode("pv-other", poolB.NodeName),
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "app"}, Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: &storageClassName, VolumeName: "pv-other"}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "shiftpv-system", Labels: map[string]string{
-			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
-		}}, Data: map[string]string{"volumeID": "other", "nodeName": poolB.NodeName}},
 	)
 	repository := &memoryRepository{
 		pools:   []volumeapi.Pool{poolA, poolB},
@@ -156,12 +158,7 @@ func TestCheckPoolDeleteAllowsEmptyDuplicateWhenLiveVolumeIdentifiesOtherPool(t 
 		VolumeID: destinationVolumeID, VolumeUID: "destination-volume-uid", CopyID: "destination-copy-id",
 		NodeName: target.NodeName, Role: volume.RoleServing,
 	}
-	client := fake.NewClientset(
-		shiftPVPersistentVolumeOnNode(volumeID, target.NodeName),
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "shiftpv-system", Labels: map[string]string{
-			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
-		}}, Data: map[string]string{"volumeID": volumeID, "volumeUID": currentCopy.VolumeUID, "nodeName": target.NodeName}},
-	)
+	client := fake.NewClientset(shiftPVPersistentVolumeOnNode(volumeID, target.NodeName))
 	repository := &memoryRepository{
 		pools: []volumeapi.Pool{target, {Name: currentCopy.PoolName, UID: currentCopy.PoolUID, NodeName: target.NodeName}},
 		volumes: map[string]volumeapi.State{volumeID: {
@@ -191,12 +188,7 @@ func TestCheckPoolDeleteBlocksEveryTargetPoolDependency(t *testing.T) {
 		}},
 	}
 	currentCopy := volume.CopyIdentity{PoolName: target.Name, PoolUID: target.UID, NodeName: target.NodeName}
-	client := fake.NewClientset(
-		shiftPVPersistentVolumeOnNode("pv-data", target.NodeName),
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "shiftpv-system", Labels: map[string]string{
-			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
-		}}, Data: map[string]string{"volumeID": "data", "nodeName": target.NodeName}},
-	)
+	client := fake.NewClientset(shiftPVPersistentVolumeOnNode("pv-data", target.NodeName))
 	foreignCopy := volume.CopyIdentity{PoolName: "pool-b", PoolUID: "pool-b-uid", NodeName: "node-b"}
 	repository := &memoryRepository{
 		pools: []volumeapi.Pool{target},
@@ -209,7 +201,7 @@ func TestCheckPoolDeleteBlocksEveryTargetPoolDependency(t *testing.T) {
 		}},
 	}
 	cleanups := cleanupRepository{items: []cleanupapi.Cleanup{{
-		Name: "cleanup-data", Spec: cleanupapi.Spec{OperationID: "cleanup-operation", Target: currentCopy}, Status: cleanupapi.Status{Phase: cleanupapi.PhaseRunning},
+		Name: "cleanup-data", Spec: cleanupapi.Spec{OperationID: "cleanup-operation", Target: currentCopy, Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: "data"}}, Status: cleanupapi.Status{Phase: cleanupapi.PhaseRunning},
 	}}}
 	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanups, Namespace: "shiftpv-system", Now: func() time.Time { return now }}
 
@@ -218,7 +210,7 @@ func TestCheckPoolDeleteBlocksEveryTargetPoolDependency(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := blockersText(report.Blockers)
-	for _, expected := range []string{"PersistentVolume//pv-data/", "ShiftPVCleanup//cleanup-data/", "ShiftPVMove//move-data/", "ShiftPVPoolCopy//pool-a/", "ShiftPVVolume//data/", "ShiftPVVolume//foreign-published/", "VolumeReservation/shiftpv-system/data/"} {
+	for _, expected := range []string{"PersistentVolume//pv-data/", "ShiftPVMove//move-data/", "ShiftPVPoolCopy//pool-a/", "ShiftPVVolume//data/cleanupPhase=Running operation=cleanup-operation", "ShiftPVVolume//foreign-published/"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("Pool blockers do not contain %q: %s", expected, joined)
 		}
@@ -249,6 +241,36 @@ func TestCheckPoolDeleteFencesMoveCandidateBeforeCapacityAdmission(t *testing.T)
 	}
 }
 
+func TestCheckPoolDeleteKeepsUnsettledBlockedMoveDependency(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 9, 30, 0, 0, time.UTC)
+	target := volumeapi.Pool{
+		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1, Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true}},
+	}
+	move := volumeapi.Move{
+		Name: "move-blocked", Spec: volumeapi.MoveSpec{VolumeID: "volume", SourceNode: "node-source"},
+		Status: volumeapi.MoveStatus{
+			Phase: "Blocked", DestinationNode: target.NodeName, DestinationPoolUID: target.UID,
+			CapacityApproved: true,
+		},
+	}
+	repository := &memoryRepository{pools: []volumeapi.Pool{target}, moves: []volumeapi.Move{move}}
+	checker := &Checker{Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, Namespace: "shiftpv-system", Now: func() time.Time { return now }}
+
+	report, err := checker.CheckPoolDeleteAfter(context.Background(), target.Name, types.UID(target.UID), time.Time{})
+	if err != nil || report.Safe() || !strings.Contains(blockersText(report.Blockers), "ShiftPVMove//move-blocked/") {
+		t.Fatalf("unsettled blocked Move did not retain Pool protection: report=%#v err=%v", report, err)
+	}
+
+	repository.moves[0].Status.RecoveryPhase = "Recovered"
+	repository.moves[0].Status.CapacityApproved = false
+	repository.moves[0].Status.CapacityReason = "RecoverySettled"
+	report, err = checker.CheckPoolDeleteAfter(context.Background(), target.Name, types.UID(target.UID), time.Time{})
+	if err != nil || !report.Safe() {
+		t.Fatalf("settled recovered Move still blocked empty Pool deletion: report=%#v err=%v", report, err)
+	}
+}
+
 func shiftPVPersistentVolumeOnNode(name, nodeName string) *corev1.PersistentVolume {
 	return &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: corev1.PersistentVolumeSpec{
 		PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: DriverName, VolumeHandle: name}},
@@ -258,26 +280,16 @@ func shiftPVPersistentVolumeOnNode(name, nodeName string) *corev1.PersistentVolu
 	}}
 }
 
-func TestCheckBlocksReservationUntilItIsReleased(t *testing.T) {
-	reservation := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Name: "shiftpv-a", Namespace: "shiftpv-system", Labels: map[string]string{
-			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
-		},
-	}, Data: map[string]string{"volumeID": "shiftpv-a", "volumeUID": "volume-uid", "nodeName": "node-a"}}
-	unrelated := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "shiftpv-system"}}
-	client := fake.NewClientset(reservation, unrelated)
+func TestCheckIgnoresLegacyReservationConfigMaps(t *testing.T) {
+	legacyReservation := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "shiftpv-a", Namespace: "shiftpv-system", Labels: map[string]string{
+		"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
+	}}}
+	client := fake.NewClientset(legacyReservation)
 	checker := &Checker{Client: client, Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
 
 	report, err := checker.Check(context.Background())
-	if err != nil || len(report.Blockers) != 1 || report.Blockers[0].Kind != "VolumeReservation" || report.Blockers[0].Name != reservation.Name {
-		t.Fatalf("reservation blockers=%#v err=%v", report.Blockers, err)
-	}
-	if err := client.CoreV1().ConfigMaps(reservation.Namespace).Delete(context.Background(), reservation.Name, metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	report, err = checker.Check(context.Background())
 	if err != nil || !report.Safe() {
-		t.Fatalf("released reservation remained blocked: %#v err=%v", report.Blockers, err)
+		t.Fatalf("legacy reservation affected uninstall: %#v err=%v", report.Blockers, err)
 	}
 }
 
@@ -299,9 +311,6 @@ func TestCheckReportsEveryShiftPVDependency(t *testing.T) {
 			ClaimRef:               &corev1.ObjectReference{Namespace: "app", Name: "data"},
 		}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "app"}, Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: &storageClassName, VolumeName: "pv-data"}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "shiftpv-a", Namespace: "shiftpv-system", Labels: map[string]string{
-			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
-		}}, Data: map[string]string{"volumeID": "shiftpv-a", "volumeUID": "volume-uid", "nodeName": "node-a"}},
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-other"}, Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "other.csi.example", VolumeHandle: "other"}},
 		}},
@@ -310,8 +319,9 @@ func TestCheckReportsEveryShiftPVDependency(t *testing.T) {
 		volumes: map[string]volumeapi.State{"shiftpv-a": {Phase: volumeapi.PhaseMoving, OwnerNode: "node-a", ActiveMove: "move-a", PublishedNodes: []string{"node-a"}}},
 		moves: []volumeapi.Move{
 			{Name: "move-a", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-a"}, Status: volumeapi.MoveStatus{Phase: "Copying"}},
-			{Name: "move-complete", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-b"}, Status: volumeapi.MoveStatus{Phase: "Succeeded"}},
-			{Name: "move-blocked", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-c"}, Status: volumeapi.MoveStatus{Phase: "Blocked"}},
+			{Name: "move-complete", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-b"}, Status: volumeapi.MoveStatus{Phase: "Succeeded", CleanupPhase: "Completed"}},
+			{Name: "move-blocked", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-c"}, Status: volumeapi.MoveStatus{Phase: "Blocked", RecoveryPhase: "Recovered", CapacityReason: "RecoverySettled"}},
+			{Name: "move-blocked-unsettled", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-d"}, Status: volumeapi.MoveStatus{Phase: "Blocked", CapacityApproved: true}},
 		},
 	}
 
@@ -330,14 +340,14 @@ func TestCheckReportsEveryShiftPVDependency(t *testing.T) {
 		"PersistentVolume//pv-data/driver=csi.shiftpv.io volumeHandle=shiftpv-a claim=app/data",
 		"PersistentVolumeClaim/app/data/references the ShiftPV StorageClass volume=pv-data",
 		"ShiftPVMove//move-a/phase=Copying volume=shiftpv-a",
+		"ShiftPVMove//move-blocked-unsettled/phase=Blocked volume=shiftpv-d",
 		"ShiftPVVolume//shiftpv-a/phase=Moving owner=node-a activeMove=move-a publishedNodes=node-a",
-		"VolumeReservation/shiftpv-system/shiftpv-a/volume=shiftpv-a volumeUID=volume-uid node=node-a",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("blockers do not contain %q: %s", expected, joined)
 		}
 	}
-	if strings.Contains(joined, "pv-other") || strings.Contains(joined, "move-complete") || strings.Contains(joined, "move-blocked") {
+	if strings.Contains(joined, "pv-other") || strings.Contains(joined, "move-complete") || strings.Contains(joined, "ShiftPVMove//move-blocked/") {
 		t.Fatalf("blockers include unrelated or terminal resources: %s", joined)
 	}
 }
@@ -354,15 +364,17 @@ func TestCheckFailsClosedOnAPIError(t *testing.T) {
 	}
 }
 
-func TestCheckFailsClosedWhenReservationsCannotBeListed(t *testing.T) {
+func TestCheckDoesNotListLegacyReservations(t *testing.T) {
 	client := fake.NewClientset()
+	listed := false
 	client.PrependReactor("list", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+		listed = true
 		return true, nil, errors.New("reservation API unavailable")
 	})
 	checker := &Checker{Client: client, Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
-	_, err := checker.Check(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "list ShiftPV volume reservations") {
-		t.Fatalf("Check() error = %v", err)
+	report, err := checker.Check(context.Background())
+	if err != nil || !report.Safe() || listed {
+		t.Fatalf("legacy reservation API was consulted: report=%#v err=%v listed=%t", report, err, listed)
 	}
 }
 
@@ -480,9 +492,9 @@ func TestCheckValidatesConfiguration(t *testing.T) {
 
 	checker.StorageClassName = "shiftpv"
 	checker.Namespace = ""
-	_, err = checker.Check(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "namespace") {
-		t.Fatalf("Check() empty namespace error = %v", err)
+	report, err := checker.Check(context.Background())
+	if err != nil || !report.Safe() {
+		t.Fatalf("Check() retained a reservation namespace dependency: report=%#v err=%v", report, err)
 	}
 }
 
