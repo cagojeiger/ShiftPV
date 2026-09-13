@@ -47,6 +47,34 @@ EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
 The command must end with `PREFLIGHT_OK`. Treat `PREFLIGHT_BLOCKED` as a safety
 decision, not as a test failure to bypass.
 
+## Service interruption
+
+`service-interruption.sh` performs only stage 2. The fault node must be the
+source node. It first interrupts the source during `Copying` and proves
+`ResumeOwner` restores the original PVC/PV/volume identity and checksum. It then
+interrupts the source after the owner commit but before source cleanup, and
+proves cleanup eventually reaches `Completed` after the node returns.
+
+The script never drains the shared node and never edits non-ShiftPV workload
+specs. Those workloads still experience downtime while MicroK8s is stopped. It
+records their specs plus all existing PVCs, PVs, and StorageClasses before the
+test and requires exact equality afterward. A failed run restores MicroK8s and
+uncordons both nodes, but deliberately preserves test storage for diagnosis.
+
+```bash
+KUBECTL_CONTEXT=home-prod-kr \
+SOURCE_NODE=server-02 \
+DESTINATION_NODE=server-01 \
+FAULT_NODE=server-02 \
+FAULT_SSH_TARGET=ubuntu@home-server-02 \
+SOURCE_SSH_TARGET=ubuntu@home-server-02 \
+DESTINATION_SSH_TARGET=ubuntu@home-server-01 \
+EXPECTED_CONTROLLER_IMAGE=ghcr.io/example/controller:candidate@sha256:... \
+EXPECTED_NODE_IMAGE=ghcr.io/example/node:candidate@sha256:... \
+EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
+./test/e2e/real-node/service-interruption.sh
+```
+
 ## Acceptance contract
 
 Every interruption, soak iteration, and canary move must preserve all of these
