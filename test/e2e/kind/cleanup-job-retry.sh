@@ -56,6 +56,8 @@ fi
 
 kubectl create namespace "${NAMESPACE}"
 kubectl label namespace "${NAMESPACE}" shiftpv.io/admission=enabled
+kubectl uncordon "${SOURCE_NODE}" >/dev/null 2>&1 || true
+kubectl cordon "${DESTINATION_NODE}"
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -100,7 +102,6 @@ spec:
             claimName: data
 EOF
 
-kubectl cordon "${DESTINATION_NODE}"
 kubectl -n "${NAMESPACE}" rollout status deployment/writer --timeout=180s
 kubectl -n "${NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Bound pvc/data --timeout=120s
 PVC_UID=$(kubectl -n "${NAMESPACE}" get pvc/data -o jsonpath='{.metadata.uid}')
@@ -189,8 +190,11 @@ test "${receipt_executor_uid}" = "${cleanup_job_uid_before}"
 
 test "$(kubectl -n "${NAMESPACE}" get pvc/data -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 test "$(kubectl -n "${NAMESPACE}" get pvc/data -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
-DESTINATION_POD=$(kubectl -n "${NAMESPACE}" get pod -l "app=${NAMESPACE}" -o jsonpath='{.items[0].metadata.name}')
-test "$(kubectl -n "${NAMESPACE}" get "pod/${DESTINATION_POD}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
+kubectl -n "${NAMESPACE}" rollout status deployment/writer --timeout=180s
+DESTINATION_POD=$(kubectl -n "${NAMESPACE}" get pod -l "app=${NAMESPACE}" \
+	--field-selector "spec.nodeName=${DESTINATION_NODE}" -o jsonpath='{.items[0].metadata.name}')
+test -n "${DESTINATION_POD}"
+kubectl -n "${NAMESPACE}" wait --for=condition=Ready "pod/${DESTINATION_POD}" --timeout=120s
 test "$(kubectl -n "${NAMESPACE}" exec "${DESTINATION_POD}" -- sha256sum /data/payload | awk '{print $1}')" = "${SOURCE_CHECKSUM}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
