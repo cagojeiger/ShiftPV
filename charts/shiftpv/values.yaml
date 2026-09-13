@@ -2,9 +2,6 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-runtime:
-  identityContract: true
-
 metrics:
   enabled: false
   port: 8080

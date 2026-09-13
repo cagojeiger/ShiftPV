@@ -37,7 +37,7 @@ tests:
         alertname: ShiftPVPoolAccountingInvalid
         exp_alerts:
           - exp_labels: {namespace: shiftpv-system, node: worker-a, pool: pool-a, severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV Pool accounting is invalid", description: "The Pool reservation snapshot cannot be used for capacity decisions."}
+            exp_annotations: {summary: "ShiftPV Pool accounting is invalid", description: "The Pool capacity accounting state cannot be used for admission decisions."}
       - eval_time: 6m
         alertname: ShiftPVPoolInventoryUnsafe
         exp_alerts:

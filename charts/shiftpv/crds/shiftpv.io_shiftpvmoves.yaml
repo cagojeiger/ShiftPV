@@ -122,10 +122,6 @@ spec:
                   type: string
                 promotionJobName:
                   type: string
-                cleanupJobName:
-                  type: string
-                cleanupName:
-                  type: string
                 copyOperationID:
                   type: string
                 promotionOperationID:
@@ -151,5 +147,117 @@ spec:
                   items:
                     type: string
                   x-kubernetes-list-type: set
+                cleanup:
+                  type: object
+                  required: [spec, status]
+                  properties:
+                    spec:
+                      type: object
+                      required: [operationID, target, reason, authority]
+                      properties:
+                        operationID:
+                          type: string
+                          minLength: 1
+                        target: *copyIdentity
+                        reason:
+                          type: string
+                          enum: [MoveSource, MoveRollback]
+                        authority:
+                          type: object
+                          required: [kind, name, uid]
+                          properties:
+                            kind:
+                              type: string
+                              enum: [ShiftPVMove]
+                            name:
+                              type: string
+                              minLength: 1
+                            uid:
+                              type: string
+                              minLength: 1
+                    status:
+                      type: object
+                      required: [phase]
+                      properties:
+                        phase:
+                          type: string
+                          enum: [Pending, Running, Verifying, ConfirmingAbsence, Completed, NeedsReview]
+                        observedGeneration:
+                          type: integer
+                          format: int64
+                        reason:
+                          type: string
+                        message:
+                          type: string
+                        lastTransitionTime:
+                          type: string
+                          format: date-time
+                        executor:
+                          type: object
+                          required: [jobName, jobUID, nodeName]
+                          properties:
+                            jobName:
+                              type: string
+                              minLength: 1
+                            jobUID:
+                              type: string
+                              minLength: 1
+                            podUID:
+                              type: string
+                            nodeName:
+                              type: string
+                              minLength: 1
+                        receipt:
+                          type: object
+                          required: [operationID, executorUID, observedAt, retired, purged, localReceiptDigest]
+                          properties:
+                            operationID:
+                              type: string
+                              minLength: 1
+                            executorUID:
+                              type: string
+                              minLength: 1
+                            observedAt:
+                              type: string
+                              format: date-time
+                            retired:
+                              type: boolean
+                            purged:
+                              type: boolean
+                            localReceiptDigest:
+                              type: string
+                              pattern: '^[0-9a-f]{64}$'
+                        absenceProof:
+                          type: object
+                          required: [requestID, poolName, poolUID, requiredGeneration]
+                          properties:
+                            requestID:
+                              type: string
+                              minLength: 1
+                            poolName:
+                              type: string
+                              minLength: 1
+                            poolUID:
+                              type: string
+                              minLength: 1
+                            requiredGeneration:
+                              type: integer
+                              format: int64
+                              minimum: 1
+                            observedGeneration:
+                              type: integer
+                              format: int64
+                            valid:
+                              type: boolean
+                            complete:
+                              type: boolean
+                            absent:
+                              type: boolean
+                            confirmedAt:
+                              type: string
+                              format: date-time
+                        settledAt:
+                          type: string
+                          format: date-time
       subresources:
         status: {}

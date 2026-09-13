@@ -14,8 +14,3 @@ func Path(poolRoot, id string) (string, error) {
 	}
 	return filepath.Join(filepath.Clean(poolRoot), "volumes", id), nil
 }
-
-func IsWithin(root, path string) bool {
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
-	return err == nil && rel != ".." && rel != "." && !filepath.IsAbs(rel) && len(rel) > 0 && rel[:1] != "."
-}

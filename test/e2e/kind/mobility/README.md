@@ -1,70 +1,63 @@
-# Closed-loop mobility E2E
+# Closed-loop Mobility E2E
 
-이 디렉터리는 ShiftPV 제품 Controller의 automatic cordon mobility를 격리된 kind
-cluster에서 검증한다. 이동 진행을 위해 CR status를 직접 patch하거나 host-side rsync를
-실행하지 않는다.
+Status: 0.4 target suite contract.
 
 ```bash
 ./test/e2e/kind/mobility/run.sh
 ```
 
-테스트는 control-plane 1개와 서로 다른 host directory를 가진 worker 2개를 만들고
-다음 사전 점검과 이동/복구 경로를 실행한다.
+The product Controller must create and advance the Move. Tests may inject API, process, node, network and
+filesystem failures, but must not patch a successful status or perform the product copy/purge from the host.
 
-## Non-disruptive preflight
+## Preconditions
 
-`preflight.sh`는 source-only hostname selector, required node affinity, destination
-NoSchedule taint, PDB minAvailable=1을 각각 독립적으로 만든다. source cordon 뒤 두 번 이상
-reconcile 간격 동안 같은 Pod UID, deletionTimestamp 없음, Volume Ready, Move 없음과 데이터
-읽기/쓰기를 확인한다. selector는 controller 재시작 후에도 재검증한다.
-PDB 제거 후에는 같은 volume의 자동 이동 성공과 checksum 유지까지 확인한다.
-같은 namespace/PVC 이름을 재사용하되 삭제 후 남은 Retain PV/Volume은 별개 UID로 취급해야
-한다. 각 시나리오와 전체 시험 끝에서 이전 volume에 새 Move/activeMove가 없고 Ready를
-유지하는지도 확인한다. 특정 이동의 성공 메시지만으로 전체 검증을 통과시키지 않는다.
+- source and destination Pools have fresh, valid, complete inventory
+- Volume is Ready, RWO Filesystem, and has one exact owner
+- workload selector, affinity, taints/tolerations and PDB permit a destination
+- source publication can quiesce without an in-flight NodePublish race
 
-## Pre-commit failure and owner recovery
+An unsatisfied preflight preserves the same consumer UID and data and creates no filesystem effect.
 
-1. portable Deployment/PVC를 만든다.
-2. destination staging 위치에 미등록 파일을 만든 뒤 source를 cordon한다.
-   Pool은 fail-closed가 되고 Move, volume lock, helper Job이 시작되지 않아야 한다.
-3. 미등록 파일을 제거하면 자동 재개되는지 확인한다. 이어서 테스트 전용 helper image가
-   production helper 호출 직전에 실패하도록 해 실제 Job 실패를 만든다. CR status는 주입하지 않는다.
-4. 정상 eviction/unpublish 후 copy Job이 실패하고 `Blocked/CopyFailed`로 끝나는지 확인한다.
-5. dynamic owner와 source payload가 유지되고 destination final directory가 생기지 않았는지
-   확인한다.
-6. fault sentinel 제거와 uncordon 후 `spec.recovery=ResumeOwner`를 두 번 요청한다. 잘못된 enum과 요청 제거는
-   실제 CRD에서 거부해야 한다.
-7. 복구 Verifying 중 Controller를 재시작하고 Recovered, 같은 owner/PVC UID/checksum과
-   activeMove 해제를 확인한다. 원래 Move.phase=Blocked 이력은 유지해야 한다.
-
-## Successful transaction and restart recovery
-
-1. `WaitForFirstConsumer` PVC와 Deployment를 만들고 payload checksum을 기록한다.
-   bound PVC의 Pod를 한 번 재생성해 admission의 owner hostname pin이 있는 상태도 검증한다.
-2. owner source를 cordon한다.
-3. 제품 Controller가 Move CR을 자동 생성하고 FSM을 진행하는지 관찰한다.
-4. `Copying`, `Promoting`, `Committing` phase에서 Controller Pod를 각각 강제 삭제한다.
-5. 재시작한 Controller가 기존 CR과 helper resource를 관찰해 같은 transaction을
-   `Succeeded`까지 이어 가는지 확인한다.
-6. replacement Pod가 destination에서 Running인지, PVC UID/PV/volume handle/checksum이
-   같은지, dynamic owner가 destination인지 확인한다.
-7. destination final payload가 있고 source final과 source `copyID`의 retired 경로가 모두 없는지 확인한다.
-
-## Post-commit failure and owner recovery
-
-다시 반대 방향으로 이동시킨다. 테스트 전용 helper가 production helper 호출 직전에 종료하도록 해
-Pool inventory를 오염시키지 않고 exact cleanup Job을 실제 실패시킨다. commit 이후 새 owner에 payload를 기록하고
-복구를 요청한다. 복구 중 Controller 재시작 후에도 최신 owner 데이터, PVC/PV identity와 owner가
-유지돼야 한다. 미완료 cleanup의 non-owner copy는 원래 경로에 보존되고 `ShiftPVCleanup`은
-`NeedsReview`로 수렴한다. Controller를 다시 재시작해도 effect Job을 재생하지 않으며 uninstall
-admission은 이 의무를 blocker로 보고한다. 자세한 실행 절차는 `recovery.sh`를 따른다.
-
-합격 시 다음 두 메시지를 출력한다.
+## Transaction evidence
 
 ```text
-ShiftPV blocked mobility E2E passed
-ShiftPV closed-loop mobility E2E passed
+source publish fence
+  -> observed empty publication fence
+  -> destination capacity hold
+  -> partial copy + full verification
+  -> destination promotion
+  -> owner CAS
+  -> actual destination publish proof
+  -> source cleanup intent/effect/API receipt
+  -> later generation-fenced absence proof
+  -> source hold release and terminal Move
 ```
 
-`KEEP_CLUSTER=1`을 지정하면 실패 진단을 위해 cluster와 임시 pool directory를 남긴다.
-기본값은 성공과 실패 모두 자동 정리다.
+| Fault boundary | Required result after node/process recovery |
+|---|---|
+| Before owner CAS | Source remains owner; retry or recovery returns to source |
+| Owner CAS response lost | Read-back determines the side of commit; never guess |
+| After owner CAS | Destination remains owner; only forward convergence |
+| Partial copy / checksum failure | No promotion; source and both holds remain safe |
+| Destination unavailable postcommit | Before cleanup effect the source is preserved; after effect/receipt, settlement and hold release wait |
+| Source unavailable postcommit | Destination serves; cleanup resumes when source returns |
+| Unlink before receipt | Exact prior intent reconstructs result and later absence proof closes cleanup |
+| Stale/invalid/incomplete scan | No promote, purge, completion or hold release |
+| Identity contradiction | Move `Blocked` or cleanup `NeedsReview`; no destructive transition |
+
+## Assertions
+
+Each case validates:
+
+1. unchanged PVC UID, PV and CSI volume handle
+2. exactly one metadata owner and no dual writable mount
+3. authoritative payload plus hardlink/symlink/FIFO/UID/GID/mode/sparse/ACL/xattr semantics
+4. exact Pool/Volume/Move/copy/operation identities
+5. correct source and destination capacity holds at every boundary
+6. parent journal/finalizer persistence across Controller, helper and node restart
+7. no source purge before actual destination publication
+8. API purge receipt and a later fresh absence proof before completion
+9. no parentless executor or unexplained physical copy after terminal success/recovery
+
+Permanent loss of the authoritative disk/node is not a recovery-success scenario. The suite must show a safe,
+observable wait or review state without inventing another owner.

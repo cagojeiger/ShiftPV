@@ -1,31 +1,55 @@
-# ShiftPV Contracts
+# ShiftPV 0.4 Contracts
 
-이 디렉터리는 현재 바이너리와 Helm chart가 구현하는 계약만 포함한다.
+이 디렉터리는 0.4 구현과 운영 승인에 사용하는 normative contract다. 현재 checkout의 구현 후보가 이
+계약을 따르지만, fault·power-loss·soak gate와 별도 release가 끝나기 전에는 운영 보증이 아니다.
 
 | 문서 | 단일 책임 |
-|------|-----------|
-| [csi-driver.md](csi-driver.md) | CSI RPC, topology, provision/publish와 mount 동작 |
-| [storage-class.md](storage-class.md) | StorageClass, 기본 클래스 설정과 용량 의미 |
-| [volume-mobility.md](volume-mobility.md) | 정상 cordon cold migration과 안전 경계 |
-| [source-cleanup.md](source-cleanup.md) | exact copy cleanup·GC 관찰·receipt 수렴 |
-| [metrics.md](metrics.md) | Pool·이동·CSI 관측 지표와 freshness |
-
-## Current scope
-
-| Capability | Current contract |
 |---|---|
-| Volume | RWO Filesystem |
-| Pool | node별 기존 absolute non-root directory 하나 |
-| Filesystem layout | root filesystem 하위 directory 또는 별도 mount |
-| Capacity | Pool reservation과 filesystem available bytes 기반 신규 할당 |
-| Mobility | 정상인 cordon owner의 계획된 cold migration |
-| Authority | owner node 하나와 active Move 하나 |
-| Recovery | 재시작 후 reconcile과 명시적 `ResumeOwner` |
-| Cleanup / GC | 승인된 exact copy만 삭제; orphan과 불명확한 상태는 `NeedsReview` 보존 |
-| Replication, HA, unavailable-node failover | 외부 storage architecture |
-| Snapshot과 backup | 외부 data-protection system |
-| RWX, raw block, volume expansion | 현재 제품 범위 밖 |
-| Per-volume filesystem quota | filesystem 또는 외부 quota manager |
-| 기존 PV migration | workload별 migration 절차 |
+| [csi-driver.md](csi-driver.md) | CSI RPC, topology, Pool 관측과 publish 권한 |
+| [storage-class.md](storage-class.md) | StorageClass, placement와 보수적 capacity admission |
+| [volume-mobility.md](volume-mobility.md) | 계획된 cold move, owner commit과 장애 수렴 |
+| [source-cleanup.md](source-cleanup.md) | parent journal, exact-copy 삭제와 GC 경계 |
+| [metrics.md](metrics.md) | 운영 관측 신호와 freshness; 권한 증거와의 경계 |
 
-계약 변경이 구조적 결정을 바꾸면 ADR을 먼저 추가하거나 대체한다.
+`MUST`, `MUST NOT`, `SHOULD`는 구현과 테스트가 따라야 할 요구사항을 뜻한다. 필드명이 확정되지 않은
+설명은 개념 이름이며 CRD schema를 먼저 고정한 뒤 코드와 동일하게 유지한다.
+
+## Product boundary
+
+| 영역 | 0.4 계약 |
+|---|---|
+| Volume | Linux filesystem의 node-local RWO PVC |
+| Pool | 참여 node마다 운영자가 준비한 absolute non-root host directory 하나 |
+| Placement | `WaitForFirstConsumer`; 현재 owner node에만 publish |
+| Mobility | source와 destination이 다시 사용 가능해지는 계획된 cold move |
+| Consistency | 일시 장애와 재시작 뒤 동일 transaction이 eventually converge |
+| Authority | 정확히 한 Volume owner; owner compare-and-swap만 commit |
+| Durable APIs | `ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove` |
+| Cleanup | Volume/Move에 내장된 journal과 finalizer가 의무를 보존 |
+| GC | 알려진 transaction garbage만 자동 정리; unknown orphan은 report-only |
+| Capacity | 물리 copy와 미완료 reservation을 보수적으로 모두 계산 |
+
+다음 기능은 제품 경계 밖이다.
+
+- 영구적으로 유실된 authoritative node 또는 disk에서의 데이터 복구
+- replication, HA failover, remote shared storage, RWX
+- snapshot, backup, raw block, online expansion
+- hard per-volume filesystem quota와 application I/O 성능 보증
+
+## Non-negotiable invariants
+
+1. authoritative copy가 확인되지 않은 상태에서 owner를 바꾸거나 해당 copy를 삭제하지 않는다.
+2. NodePublish/NodeUnpublish와 cleanup effect는 exact volume의 node-local lock과 API publication fence를 지킨다. Pool scanner는 그 critical section 밖의 관찰자다.
+3. stale, invalid, incomplete inventory는 allocation과 destination publication 판정을 승인하지 않는다. Cleanup release는 wall clock이 아니라 post-receipt generation fence와 valid·complete absence를 필요로 한다.
+4. partial copy는 검증 receipt 전까지 promotion 또는 owner commit에 사용할 수 없다.
+5. commit 전 실패는 source로 abort하고, commit 후 실패는 destination으로만 수렴한다.
+6. destination의 실제 publish 증거 전에는 source cleanup을 시작하지 않는다.
+7. cleanup은 durable intent, exact executor, local receipt, API receipt, fresh absence proof 순서를 지킨다.
+8. API receipt와 fresh absence proof가 모두 있어야 cleanup 의무와 capacity hold를 해제한다.
+9. Parent-owned identity contradiction은 Move `Blocked` 또는 cleanup `NeedsReview`로 격리한다. Intent가 없는 path와 unknown orphan은 report-only이며 자동 삭제하지 않는다.
+10. timestamp와 metric은 진단 정보일 뿐 destructive authority가 아니다.
+
+## Acceptance
+
+계약의 검증 계층과 실행 명령은 [Testing](../development/testing.md)이 소유한다. 구조적 이유는
+[ADR](../adr/README.md), 설치와 운영 절차는 [Helm chart guide](../../charts/shiftpv/README.md)가 소유한다.

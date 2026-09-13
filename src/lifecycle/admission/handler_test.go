@@ -43,13 +43,16 @@ func TestAdmitRuntimeDeleteRequiresPermitExceptForTrustedController(t *testing.T
 		UserInfo:  authenticationv1.UserInfo{Username: trusted},
 	}
 
-	response := handler.Admit(context.Background(), request)
-	if !response.Allowed {
-		t.Fatalf("trusted controller runtime deletion denied: %#v", response)
+	for _, resource := range []string{"shiftpvvolumes", "shiftpvmoves"} {
+		request.Resource.Resource = resource
+		response := handler.Admit(context.Background(), request)
+		if !response.Allowed {
+			t.Fatalf("trusted controller %s deletion denied: %#v", resource, response)
+		}
 	}
 
 	request.Resource.Resource = "shiftpvpools"
-	response = handler.Admit(context.Background(), request)
+	response := handler.Admit(context.Background(), request)
 	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "not configured") {
 		t.Fatalf("controller Pool deletion bypassed lifecycle protection: %#v", response)
 	}
@@ -61,10 +64,9 @@ func TestAdmitRuntimeDeleteRequiresPermitExceptForTrustedController(t *testing.T
 	}
 
 	request.Resource = metav1.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvcleanups"}
-	request.UserInfo.Username = "cluster-admin"
 	response = handler.Admit(context.Background(), request)
 	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "not configured") {
-		t.Fatalf("untrusted runtime deletion bypassed lifecycle protection: %#v", response)
+		t.Fatalf("removed cleanup API retained a controller bypass: %#v", response)
 	}
 }
 

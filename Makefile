@@ -1,4 +1,4 @@
-.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template linux-mount-integration
+.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template linux-mount-integration v04-model v04-kubernetes-primitives v04-filesystem-primitives
 
 CONTROLLER_VERSION_FILE ?= versions/controller
 NODE_VERSION_FILE ?= versions/node
@@ -10,7 +10,7 @@ IMAGE ?= shiftpv:dev
 COVERAGE_MIN ?= 80
 COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/lifecycle/... ./src/metrics/... ./src/mobility/... ./src/node/... ./src/pool/... ./src/volume/... ./src/webhook/... ./test/...
 
-verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template
+verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template v04-model
 
 fmt:
 	gofmt -w $$(find src test -name '*.go' -type f)
@@ -22,6 +22,15 @@ mod-verify:
 	go mod verify
 
 test: coverage
+
+v04-model:
+	go test -race -count=1 -v ./test/model
+
+v04-kubernetes-primitives:
+	./test/model/kubernetes-primitives.sh
+
+v04-filesystem-primitives:
+	./test/model/filesystem-primitives.sh
 
 coverage:
 	mkdir -p .tmp
@@ -64,11 +73,8 @@ release-workflow-test:
 	./test/release/validate-artifact-lock.sh
 
 shellcheck:
-	shellcheck test/e2e/kind/mobility/completion.sh
-	shellcheck test/e2e/kind/metrics/check.sh
-	shellcheck test/helm/dashboard/run.sh
-	shellcheck build/ci/wait-for-chart-images.sh test/release/fixtures/fake-docker.sh test/release/wait-for-chart-images.sh test/release/validate-artifact-lock.sh test/e2e/kind/node-path.sh test/e2e/kind/run.sh test/e2e/kind/directory-pool.sh test/e2e/kind/pool-capacity.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/fault-helper.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/mobility/cleanup-lifecycle.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/integration/linux-mount/run.sh
-	shellcheck test/e2e/kind/node-path.sh test/e2e/kind/orphan-cleanup.sh
+	shellcheck build/ci/wait-for-chart-images.sh test/release/fixtures/fake-docker.sh test/release/wait-for-chart-images.sh test/release/validate-artifact-lock.sh test/e2e/kind/node-path.sh test/e2e/kind/run.sh test/e2e/kind/directory-pool.sh test/e2e/kind/pool-capacity.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/cleanup-journal.sh test/e2e/kind/orphan-cleanup.sh test/e2e/kind/volume-delete-cleanup.sh test/e2e/kind/cleanup-job-retry.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/fault-helper.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/mobility/cleanup-lifecycle.sh test/e2e/kind/mobility/completion.sh test/e2e/kind/metrics/check.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/e2e/real-node/preflight.sh test/e2e/real-node/service-interruption.sh test/helm/dashboard/run.sh test/integration/linux-mount/run.sh
+	shellcheck test/model/kubernetes-primitives.sh test/model/filesystem-primitives.sh
 
 actionlint:
 	@if command -v actionlint >/dev/null 2>&1; then \
@@ -97,7 +103,6 @@ helm-template:
 		grep -q -- 'name: shiftpv-helper' "$$first"
 	@! helm template shiftpv charts/shiftpv --namespace shiftpv-system --set controller.replicas=2 >/dev/null 2>&1
 	@set -e; rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
-		--set runtime.identityContract=true \
 		--set controller.image.repository=controller --set controller.image.tag=test \
 		--set node.image.repository=node --set node.image.tag=test \
 		--set helperPod.image=controller:test --set mobility.helperImage=helper:test)"; \
@@ -107,7 +112,8 @@ helm-template:
 		printf '%s\n' "$$rendered" | grep -q -- '--helper-service-account=shiftpv-helper'; \
 		printf '%s\n' "$$rendered" | grep -q -- '--controller-service-account=shiftpv-controller'; \
 		printf '%s\n' "$$rendered" | grep -q 'name: shiftpv-helper'; \
-		printf '%s\n' "$$rendered" | grep -q 'resources: \["shiftpvcleanups/status"\]'; \
+		printf '%s\n' "$$rendered" | grep -q 'resources: \["shiftpvvolumes/status", "shiftpvmoves/status"\]'; \
+		! printf '%s\n' "$$rendered" | grep -q 'shiftpvcleanups'; \
 		printf '%s\n' "$$rendered" | grep -q '"helm.sh/hook": pre-delete'; \
 		! printf '%s\n' "$$rendered" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
 		printf '%s\n' "$$rendered" | grep -q 'command: \["/shiftpv-uninstall-guard"\]'; \
@@ -125,11 +131,21 @@ helm-template:
 		! printf '%s\n' "$$rendered" | grep -q '^kind: Secret$$'; \
 		printf '%s\n' "$$rendered" | grep -q 'mountPropagation: HostToContainer'
 	@set -e; helpers="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
-		--set runtime.identityContract=true \
 		--set controller.image.repository=controller --set controller.image.tag=test \
 		--set helperPod.image=create-helper:test --set mobility.helperImage=move-helper:test)"; \
 		printf '%s\n' "$$helpers" | grep -q -- '--helper-image=create-helper:test'; \
 		printf '%s\n' "$$helpers" | grep -q -- '--mobility-helper-image=move-helper:test'
+	@set -e; external_helper=existing-helper; helpers="$$(helm template shiftpv charts/shiftpv \
+		--namespace shiftpv-system --kube-version 1.35.8 \
+		--set serviceAccount.helper.create=false \
+		--set serviceAccount.helper.name=$$external_helper)"; \
+		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/clusterrole.yaml'; \
+		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/clusterrolebinding.yaml'; \
+		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/role.yaml'; \
+		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/rolebinding.yaml'; \
+		! printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/serviceaccount.yaml'; \
+		printf '%s\n' "$$helpers" | grep -q -- "--helper-service-account=$$external_helper"; \
+		[ "$$(printf '%s\n' "$$helpers" | grep -c "^    name: $$external_helper$$")" -eq 2 ]
 	@set -e; argocd="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 --set lifecycle.uninstallMode=argocd)"; \
 		printf '%s\n' "$$argocd" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
 		! printf '%s\n' "$$argocd" | grep -q '"helm.sh/hook": pre-delete'

@@ -4,15 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strconv"
 
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
-
-const capacityReservationSelector = "app.kubernetes.io/name=shiftpv,app.kubernetes.io/component=volume-reservation"
 
 func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	if observed.DestinationNode == "" || r.CapacityProbe == nil || r.PoolLocks == nil {
@@ -61,14 +58,6 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 	return r.persistMoveStatus(ctx, move, previous)
 }
 
-func (r *Reconciler) destinationCapacity(ctx context.Context, current volumeapi.Move, destination string) (requested, logicalReserved, physicalPending, limit int64, err error) {
-	pool, err := r.poolForNode(ctx, destination, current.Spec.VolumeID)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	return r.destinationCapacityForPool(ctx, current, pool)
-}
-
 func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current volumeapi.Move, pool volumeapi.Pool) (requested, logicalReserved, physicalPending, limit int64, err error) {
 	destination := pool.NodeName
 	quantity, err := resource.ParseQuantity(pool.CapacityLimit)
@@ -80,10 +69,6 @@ func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current vol
 		return 0, 0, 0, 0, fmt.Errorf("destination Pool capacity limit must be positive bytes")
 	}
 
-	reservations, err := r.Client.CoreV1().ConfigMaps(r.Namespace).List(ctx, metav1.ListOptions{LabelSelector: capacityReservationSelector})
-	if err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("list volume reservations: %w", err)
-	}
 	volumes, err := r.Repository.ListVolumes(ctx)
 	if err != nil {
 		return 0, 0, 0, 0, err
@@ -92,50 +77,35 @@ func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current vol
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
-	capacities := make(map[string]int64, len(reservations.Items))
-	for index := range reservations.Items {
-		reservation := &reservations.Items[index]
-		bytes, parseErr := strconv.ParseInt(reservation.Data["capacity"], 10, 64)
-		if reservation.Name != reservation.Data["volumeID"] || parseErr != nil || bytes <= 0 {
-			return 0, 0, 0, 0, fmt.Errorf("reservation %q is invalid", reservation.Name)
-		}
-		capacities[reservation.Name] = bytes
-		owner := reservation.Data["nodeName"]
-		if state, exists := volumes[reservation.Name]; exists {
-			owner = state.OwnerNode
-		}
-		if owner == destination {
-			if logicalReserved > math.MaxInt64-bytes {
-				return 0, 0, 0, 0, fmt.Errorf("destination reservation total overflows int64")
-			}
-			logicalReserved += bytes
-		}
-	}
-	requested, exists := capacities[current.Spec.VolumeID]
+	state, exists := volumes[current.Spec.VolumeID]
 	if !exists {
-		return 0, 0, 0, 0, fmt.Errorf("volume %q has no capacity reservation", current.Spec.VolumeID)
+		return 0, 0, 0, 0, fmt.Errorf("volume %q has no capacity state", current.Spec.VolumeID)
+	}
+	if state.CapacityBytes <= 0 {
+		return 0, 0, 0, 0, fmt.Errorf("volume %q has invalid capacity", current.Spec.VolumeID)
+	}
+	requested = state.CapacityBytes
+	logicalReserved, err = poolcapacity.ReservedBytes(volumes, moves, destination)
+	if err != nil {
+		return 0, 0, 0, 0, err
 	}
 	for _, move := range moves {
-		if move.Name == current.Name || !move.Status.CapacityApproved || move.Status.DestinationNode != destination {
+		if move.Name == current.Name || volumeapi.MoveCleanupSettled(move) || !move.Status.CapacityApproved || move.Status.DestinationNode != destination {
 			continue
 		}
-		bytes, reservationExists := capacities[move.Spec.VolumeID]
 		state, exists := volumes[move.Spec.VolumeID]
 		if !exists {
-			// DeleteVolume removes both live capacity records but retains a
-			// terminal Move as history. It no longer reserves destination space.
-			if !reservationExists {
-				continue
-			}
 			return 0, 0, 0, 0, fmt.Errorf("approved move %q has no volume state", move.Name)
 		}
 		if !volumeapi.MoveReservesDestination(move, state, destination) {
 			continue
 		}
-		if !reservationExists || logicalReserved > math.MaxInt64-bytes || physicalPending > math.MaxInt64-move.Status.SourceBytes {
+		if state.CapacityBytes <= 0 || move.Status.SourceBytes < 0 {
 			return 0, 0, 0, 0, fmt.Errorf("approved move %q has invalid capacity state", move.Name)
 		}
-		logicalReserved += bytes
+		if move.Status.SourceBytes > math.MaxInt64-physicalPending {
+			return 0, 0, 0, 0, fmt.Errorf("destination physical pending total overflows int64")
+		}
 		physicalPending += move.Status.SourceBytes
 	}
 	if logicalReserved > limit {

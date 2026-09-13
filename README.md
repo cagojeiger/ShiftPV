@@ -1,134 +1,119 @@
 # ShiftPV
 
-ShiftPV is a CSI driver for managed, movable local volumes inside existing Linux
-filesystems. It replaces a basic hostPath StorageClass with standard PVC lifecycle,
-Pool capacity admission, and planned node-to-node movement.
+ShiftPV는 기존 Linux filesystem 위의 node-local directory를 Kubernetes RWO PVC로 제공하고,
+계획된 cold move를 통해 살아 있는 두 node 사이에서 owner를 옮기는 CSI driver다.
+
+> **0.4 contract status:** 이 checkout에는 0.4 구현 후보가 들어 있다. 다만 실제 node의 power-fault와
+> soak를 포함한 운영 gate가 끝나고 별도 release되기 전에는 운영 보증이나 released runtime이 아니다.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    PVC[PVC] --> SC[StorageClass<br/>csi.shiftpv.io]
-    SC --> CTRL[Controller]
-    CTRL --> POOL[ShiftPVPool<br/>existing directory]
-    POOL --> VOL[volumes/&lt;volume-id&gt;]
-    VOL --> NODE[Node Plugin<br/>bind mount]
-    NODE --> POD[Pod]
+    PVC[PVC] --> CSI[CSI Controller]
+    CSI --> V[ShiftPVVolume<br/>owner + delete journal]
+    P[ShiftPVPool<br/>node + inventory + capacity] --> V
+    V --> N[Node Plugin<br/>local lock + bind mount]
+    N --> POD[Pod]
+    V --> M[ShiftPVMove<br/>copy + commit + cleanup journal]
+    M --> P
 ```
 
-Application I/O follows the node-local bind mount. The Controller and network copy
-path participate in lifecycle and movement only.
+Application I/O는 owner node의 local bind mount만 사용한다. Network path는 이동 중 정지된 volume을
+복사할 때만 사용한다.
 
-## Feature map
+0.4의 durable API surface는 세 resource뿐이다.
 
-| Area | Current contract |
+| Resource | 책임 |
 |---|---|
-| Volume | Dynamic RWO Filesystem provisioning |
-| Placement | `WaitForFirstConsumer` topology |
-| Storage | One existing absolute Pool directory per participating node |
-| Capacity | Pool reservation limit plus containing-filesystem availability |
-| Readiness | Directory access, write/sync/cleanup, and `statfs` probes |
-| Mobility | Healthy cordoned-node cold migration with authenticated rsync |
-| Authority | One owner node, one active Move, CSI publish guard |
-| Recovery | Restart-safe reconcile and explicit `ResumeOwner` |
-| Cleanup / GC | Exact-copy intent, node receipt, conservative orphan preservation |
-| Lifecycle | `Retain` PVs and guarded Helm/Argo CD uninstall |
-| Delivery | Helm repository and multi-architecture images |
+| `ShiftPVPool` | node-local path, readiness, causal scan과 complete inventory |
+| `ShiftPVVolume` | PVC identity, 단일 owner, capacity reservation, deletion journal |
+| `ShiftPVMove` | 한 번의 이동, owner commit, temporary holds, rollback/source cleanup journal |
 
-The Kubernetes API is represented by four cluster-scoped resources:
+Helper Job은 filesystem effect를 실행할 뿐 authority나 완료 사실을 소유하지 않는다.
+
+## Contract
+
+| 영역 | 0.4 보증 |
+|---|---|
+| Volume | Dynamic RWO filesystem provisioning |
+| Placement | `WaitForFirstConsumer`; exact owner node에만 publish |
+| Storage | 참여 node마다 운영자가 준비한 absolute non-root Pool directory 하나 |
+| Capacity | 모든 owner, incoming, retained copy를 cleanup 정산까지 보수적으로 계산 |
+| Observation | current Pool generation과 일치하고 action fence 이후인 valid·complete inventory만 사용 |
+| Mobility | source/destination이 복구 가능한 계획된 cold move |
+| Commit | Volume owner compare-and-swap 한 번만 authority를 변경 |
+| Recovery | commit 전에는 source로 abort, commit 후에는 destination으로 forward recovery |
+| Cleanup | durable intent와 exact receipt 뒤 fresh absence를 확인하고 finalizer/hold 해제 |
+| GC | transaction으로 설명되는 garbage만 자동 삭제; unknown orphan은 report-only |
+| Removal | Volume, Move, copy, hold가 남으면 Pool/release 제거를 fail closed |
+
+핵심 규칙은 간단하다.
 
 ```text
-ShiftPVPool    node + Pool directory + capacity + readiness
-ShiftPVVolume volume handle + owner + publish/delete fence + active Move
-ShiftPVMove   one movement transaction + phase + diagnosis + recovery
-ShiftPVCleanup exact copy target + approval + executor + receipt
+fence source publish
+  → wait for NodeUnpublish to inspect mounts and clear the API fence
+  → reserve and copy to destination
+  → verify complete copy
+  → compare-and-swap owner                 # only commit point
+  → prove destination is actually mounted
+  → purge source with durable receipt
+  → post-receipt generation-fenced source-absence proof
+  → release hold and complete
 ```
 
-## Runtime model
+Partial copy, stale/truncated inventory, identity contradiction은 owner 변경이나 삭제를 승인하지 않는다.
+Node가 일시적으로 사라지면 transaction과 finalizer를 보존하고 같은 node가 돌아온 뒤 재개한다.
+
+## Storage boundary
 
 ```text
 <registered Pool>/
-├── volumes/
-│   └── <volume-id>/       authoritative PVC data
+├── volumes/                authoritative copies
 └── .shiftpv/
-    ├── incoming/          verified destination staging
-    ├── retired/           source purge staging
-    ├── copy markers       installation/Pool/Volume/copy identity
-    └── operation markers  local intent and receipt
+    ├── incoming/           uncommitted destination copies
+    ├── retired/            cleanup staging
+    └── identity/receipts   exact copy and operation evidence
 ```
 
-Pool paths may differ by node and may be ordinary root-filesystem directories or
-directories on separate mounts. ShiftPV manages its directory layout; the operator
-owns disks, filesystems, encryption, mounts, and backup.
+ShiftPV는 이 directory 아래만 관리한다. Disk, filesystem 생성·mount·암호화·RAID·backup·복제는
+운영자 또는 외부 storage system 책임이다. 영구적으로 유실된 authoritative disk/node의 데이터를
+복구하거나 자동으로 다른 copy를 owner로 승격하지 않는다.
 
 ## Requirements
 
 | Requirement | Value |
 |---|---|
-| Chart compatibility | Kubernetes 1.35+ |
-| Automated E2E baseline | Kubernetes 1.35.8 |
+| Kubernetes contract target | 1.35+ |
 | Nodes | Linux kernel 5.6+ (`openat2`) |
-| Node access | Privileged DaemonSet with HostPath |
-| Pool | Existing writable absolute non-root directory |
-| Argo CD | 3.3+ for guarded Application deletion |
+| Access | privileged Node DaemonSet and node-bound root helper |
+| Pool | existing writable absolute non-root directory |
+| Access mode | RWO filesystem |
 
-MicroK8s normally uses
-`/var/snap/microk8s/common/var/lib/kubelet` as its kubelet state root.
+MicroK8s는 보통 kubelet root로 `/var/snap/microk8s/common/var/lib/kubelet`을 사용한다.
 
-## Install
+## Validation
 
-```bash
-helm repo add shiftpv https://cagojeiger.github.io/ShiftPV
-helm repo update shiftpv
-helm install shiftpv shiftpv/shiftpv \
-  --namespace shiftpv-system --create-namespace
-```
-
-Register one Pool for each participating node after the chart is ready:
-
-```yaml
-apiVersion: shiftpv.io/v1alpha1
-kind: ShiftPVPool
-metadata:
-  name: worker-a
-spec:
-  nodeName: worker-a
-  mountPath: /var/lib/shiftpv
-  capacity:
-    limit: 500Gi
-```
+0.4 프로토콜과 환경 전제는 다음 명령으로 독립 검증한다.
 
 ```bash
-kubectl wait --for=condition=Ready shiftpvpool/worker-a --timeout=2m
+make v04-model
+make v04-kubernetes-primitives
+make v04-filesystem-primitives
 ```
 
-Automatic mobility is enabled for selected workload namespaces:
-
-```bash
-kubectl label namespace my-workload shiftpv.io/admission=enabled
-```
-
-Deployment values, MicroK8s configuration, upgrades, and removal are documented in
-the [Helm chart guide](charts/shiftpv/README.md).
-
-## Support boundary
-
-The authoritative support matrix is maintained in the
-[current product contracts](docs/spec/README.md#current-scope).
+이 검사는 상태 모델과 primitive만 확인한다. 실제 운영 승인은 구현 unit/race, Linux mount,
+isolated Kind fault injection, 실제 node의 power-fault와 soak를 모두 통과해야 한다. 자세한 구분은
+[Testing](docs/development/testing.md)에 있다.
 
 ## Documentation
 
-| Question | Document |
+| 질문 | 문서 |
 |---|---|
-| Why is the architecture shaped this way? | [ADR](docs/adr/README.md) |
-| What behavior does the product guarantee? | [Specifications](docs/spec/README.md) |
-| How is ShiftPV installed and operated? | [Helm chart guide](charts/shiftpv/README.md) |
-| How is the source changed and tested? | [Development](docs/development/README.md) |
-
-## Status
-
-Early `dev-v1` product. CI covers unit, race, Linux mount, Helm, CSI, mobility,
-node-restart, and Argo CD lifecycle paths.
+| 무엇을 보증해야 하는가? | [0.4 contracts](docs/spec/README.md) |
+| 왜 이 구조인가? | [ADR](docs/adr/README.md) |
+| 어떻게 구현하고 검증하는가? | [Development](docs/development/README.md) |
+| 어떻게 설치하고 운영하는가? | [Helm chart guide](charts/shiftpv/README.md) |
 
 ## License
 

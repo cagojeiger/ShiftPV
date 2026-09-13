@@ -1,4 +1,3 @@
-{{- if .Values.runtime.identityContract }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -10,16 +9,9 @@ rules:
     resources: ["namespaces"]
     resourceNames: ["kube-system"]
     verbs: ["get"]
-  - apiGroups: [""]
-    resources: ["persistentvolumes"]
-    verbs: ["list"]
   - apiGroups: ["shiftpv.io"]
     resources: ["shiftpvpools", "shiftpvvolumes", "shiftpvmoves"]
     verbs: ["get", "list"]
   - apiGroups: ["shiftpv.io"]
-    resources: ["shiftpvcleanups"]
-    verbs: ["get"]
-  - apiGroups: ["shiftpv.io"]
-    resources: ["shiftpvcleanups/status"]
+    resources: ["shiftpvvolumes/status", "shiftpvmoves/status"]
     verbs: ["update"]
-{{- end }}

@@ -411,7 +411,7 @@ func (m *Manager) ensureValidationWebhook(ctx context.Context, owner *storagev1.
 						Rule: admissionv1.Rule{
 							APIGroups:   []string{"shiftpv.io"},
 							APIVersions: []string{"v1alpha1"},
-							Resources:   []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups"},
+							Resources:   []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves"},
 						},
 					},
 					{
@@ -445,7 +445,7 @@ func (m *Manager) ensureValidationWebhook(ctx context.Context, owner *storagev1.
 				}},
 				MatchConditions: []admissionv1.MatchCondition{{
 					Name:       "shiftpv-crd",
-					Expression: "request.name in ['shiftpvpools.shiftpv.io', 'shiftpvvolumes.shiftpv.io', 'shiftpvmoves.shiftpv.io', 'shiftpvcleanups.shiftpv.io']",
+					Expression: "request.name in ['shiftpvpools.shiftpv.io', 'shiftpvvolumes.shiftpv.io', 'shiftpvmoves.shiftpv.io']",
 				}},
 			},
 		},

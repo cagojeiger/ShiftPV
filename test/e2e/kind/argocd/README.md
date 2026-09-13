@@ -12,8 +12,8 @@ fail-closed hook plus authoritative lifecycle-admission contract:
    deletion protection, including rejection of direct finalizer removal.
 3. The Controller, Node Plugin, StorageClass, and mounted checksum remain intact
    after that denial.
-4. Removing the PVC/PV/Volume blockers lets the running Job complete a fresh
-   uninstall attempt, remove lifecycle validation, and finish the same
+4. Removing PVC/PV/Volume/Move journals and every capacity hold, then obtaining
+   fresh complete empty Pool inventories, lets the running Job finish the same
    Application deletion.
 
 Run from the repository root:

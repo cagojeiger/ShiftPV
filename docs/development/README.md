@@ -1,11 +1,11 @@
 # Development
 
-이 디렉터리는 ShiftPV를 변경하고 검증할 때 필요한 개발자 문서를 담는다.
+0.4 변경은 contract, implementation, fault evidence를 같은 변경 단위로 닫는다.
 
 | 문서 | 책임 |
 |---|---|
-| [source-layout.md](source-layout.md) | source tree와 package 경계 |
-| [testing.md](testing.md) | 로컬 검사, CI와 E2E 실행 기준 |
+| [source-layout.md](source-layout.md) | source tree와 package 책임 경계 |
+| [testing.md](testing.md) | 설계 preflight부터 운영 승인까지의 evidence gate |
 
-제품 동작은 [`spec/`](../spec/README.md), 설계 이유는 [`adr/`](../adr/README.md), 현재 commit의
-검증 결과는 required CI job을 따른다.
+제품 동작은 [`spec/`](../spec/README.md), 설계 이유는 [`adr/`](../adr/README.md)가 소유한다.
+검증 결과에는 실행한 commit, 명령, 환경, resource 최종 상태와 cleanup 결과를 함께 남긴다.

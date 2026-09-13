@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
 
@@ -22,15 +21,11 @@ func observationConfig(config *rest.Config) *rest.Config {
 }
 
 // NewController isolates observation's rate limiter from provisioning and mobility.
-func (e *Exporter) NewController(config *rest.Config, namespace string, interval, staleAfter time.Duration) (*Controller, error) {
+func (e *Exporter) NewController(config *rest.Config, interval, staleAfter time.Duration) (*Controller, error) {
 	observation := observationConfig(config)
-	client, err := kubernetes.NewForConfig(observation)
-	if err != nil {
-		return nil, err
-	}
 	dynamicClient, err := dynamic.NewForConfig(observation)
 	if err != nil {
 		return nil, err
 	}
-	return &Controller{Exporter: e, Client: client, Inventory: &volumeapi.Registry{Client: dynamicClient}, Cleanups: &cleanupapi.Store{Client: dynamicClient}, Namespace: namespace, Interval: interval, StaleAfter: staleAfter}, nil
+	return &Controller{Exporter: e, Inventory: &volumeapi.Registry{Client: dynamicClient}, Cleanups: &cleanupapi.Store{Client: dynamicClient}, Interval: interval, StaleAfter: staleAfter}, nil
 }

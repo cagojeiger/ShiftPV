@@ -37,7 +37,7 @@ groups:
           severity: warning
         annotations:
           summary: ShiftPV Pool accounting is invalid
-          description: The Pool reservation snapshot cannot be used for capacity decisions.
+          description: The Pool capacity accounting state cannot be used for admission decisions.
       - alert: ShiftPVPoolInventoryUnsafe
         expr: shiftpv_pool_inventory_valid{shiftpv="true"} == 0 or shiftpv_pool_inventory_truncated{shiftpv="true"} == 1
         for: 5m

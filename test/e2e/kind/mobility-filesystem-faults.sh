@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 # shellcheck source=test/e2e/kind/node-path.sh
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
+# shellcheck source=test/e2e/kind/cleanup-journal.sh
+source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORK_DIR:?WORK_DIR is required}"
 : "${WORKER_A_POOL:?WORKER_A_POOL is required}"
@@ -152,6 +154,7 @@ wait_for_success() {
 	source_copy=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
 	test -n "${source_copy}"
 	assert_node_absent "${SOURCE_NODE}" "${SOURCE_MOUNT}/.shiftpv/retired/${source_copy}"
+	assert_cleanup_journal "shiftpvmove/${MOVE_NAME}" MoveSource "${VOLUME_ID}" "${source_copy}" ShiftPVMove
 }
 
 delete_workload() {

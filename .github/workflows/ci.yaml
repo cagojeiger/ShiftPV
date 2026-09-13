@@ -100,6 +100,80 @@ jobs:
               -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard && test ! -e /shiftpv-volume-helper"
           fi
 
+  candidate-image:
+    name: candidate-${{ matrix.component }}
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/codex/v04-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - component: controller
+            version_arg: CONTROLLER_VERSION
+          - component: node
+            version_arg: NODE_VERSION
+    steps:
+      - name: Check out candidate commit
+        uses: actions/checkout@v7
+
+      - name: Resolve candidate metadata
+        id: candidate
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          short_sha="${GITHUB_SHA::8}"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/shiftpv-${COMPONENT}"
+          {
+            echo "image=${image}"
+            echo "tag=candidate-${short_sha}"
+            echo "version=0.4.0-candidate.${short_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push amd64 candidate
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: build/package/Dockerfile
+          target: ${{ matrix.component }}
+          platforms: linux/amd64
+          build-args: ${{ matrix.version_arg }}=${{ steps.candidate.outputs.version }}
+          tags: ${{ steps.candidate.outputs.image }}:${{ steps.candidate.outputs.tag }}
+          cache-from: type=gha,scope=shiftpv-candidate-${{ matrix.component }}-amd64
+          cache-to: type=gha,mode=max,scope=shiftpv-candidate-${{ matrix.component }}-amd64
+          provenance: false
+          push: true
+
+      - name: Verify published candidate boundary
+        env:
+          COMPONENT: ${{ matrix.component }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.candidate.outputs.image }}
+        run: |
+          docker run --rm "${IMAGE}@${DIGEST}" --help
+          if [[ "${COMPONENT}" == controller ]]; then
+            docker run --rm --entrypoint /bin/sh "${IMAGE}@${DIGEST}" \
+              -ec "test -x /shiftpv-controller && test -x /shiftpv-uninstall-guard && test -x /shiftpv-volume-helper && test ! -e /shiftpv-node"
+          else
+            docker run --rm --entrypoint /bin/sh "${IMAGE}@${DIGEST}" \
+              -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard && test ! -e /shiftpv-volume-helper"
+          fi
+          echo "candidate=${IMAGE}:${{ steps.candidate.outputs.tag }}@${DIGEST}" >>"${GITHUB_STEP_SUMMARY}"
+
   linux-mount:
     name: linux-mount
     runs-on: ubuntu-24.04
@@ -120,7 +194,7 @@ jobs:
   kind-e2e:
     name: kind-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
@@ -174,16 +248,16 @@ jobs:
         run: ./test/e2e/kind/run.sh
 
       - name: Export failure diagnostics
-        if: failure()
+        if: failure() || cancelled()
         run: |
           mkdir -p .tmp/ci-diagnostics
           kind export logs .tmp/ci-diagnostics/kind --name shiftpv-e2e || true
           kubectl get nodes,pods,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-diagnostics/resources.txt 2>&1 || true
-          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves,shiftpvcleanups -o yaml > .tmp/ci-diagnostics/shiftpv-resources.yaml 2>&1 || true
+          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > .tmp/ci-diagnostics/shiftpv-resources.yaml 2>&1 || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-diagnostics/events.txt 2>&1 || true
 
       - name: Upload failure diagnostics
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: kind-e2e-diagnostics
@@ -258,7 +332,6 @@ jobs:
           kind export logs .tmp/ci-mobility-diagnostics/kind --name shiftpv-mobility-e2e || true
           kubectl get nodes,pods,jobs,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-mobility-diagnostics/resources.txt 2>&1 || true
           kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > .tmp/ci-mobility-diagnostics/shiftpv-resources.yaml 2>&1 || true
-          kubectl get shiftpvcleanups -o yaml > .tmp/ci-mobility-diagnostics/cleanups.yaml 2>&1 || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-mobility-diagnostics/events.txt 2>&1 || true
 
       - name: Upload failure diagnostics
@@ -338,7 +411,7 @@ jobs:
           mkdir -p .tmp/ci-mobility-node-restart-diagnostics
           kind export logs .tmp/ci-mobility-node-restart-diagnostics/kind --name "${CLUSTER_NAME}" || true
           kubectl get nodes,pods,jobs,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-mobility-node-restart-diagnostics/resources.txt 2>&1 || true
-          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves,shiftpvcleanups -o yaml > .tmp/ci-mobility-node-restart-diagnostics/shiftpv-resources.yaml 2>&1 || true
+          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > .tmp/ci-mobility-node-restart-diagnostics/shiftpv-resources.yaml 2>&1 || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-mobility-node-restart-diagnostics/events.txt 2>&1 || true
 
       - name: Upload failure diagnostics
@@ -417,7 +490,7 @@ jobs:
           kind export logs .tmp/ci-argocd-diagnostics/kind --name shiftpv-argocd-e2e || true
           kubectl get nodes,pods,jobs,pvc,pv,storageclass,csinode -A -o wide > .tmp/ci-argocd-diagnostics/resources.txt 2>&1 || true
           kubectl -n argocd get applications -o yaml > .tmp/ci-argocd-diagnostics/applications.yaml 2>&1 || true
-          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves,shiftpvcleanups -o yaml > .tmp/ci-argocd-diagnostics/shiftpv-resources.yaml 2>&1 || true
+          kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > .tmp/ci-argocd-diagnostics/shiftpv-resources.yaml 2>&1 || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-argocd-diagnostics/events.txt 2>&1 || true
 
       - name: Upload failure diagnostics

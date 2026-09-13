@@ -62,6 +62,13 @@ func settleCleanupFixture(t *testing.T, reconciler *Reconciler, repository *memo
 	if err := reconciler.ensureCleanupContract(context.Background(), &move); err != nil {
 		t.Fatal(err)
 	}
+	cleanup, err := reconciler.Cleanups.Get(context.Background(), cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID})
+	if err != nil || cleanup.Status.Phase != cleanupapi.PhaseCompleted {
+		t.Fatalf("cleanup did not settle: cleanup=%#v err=%v", cleanup, err)
+	}
+	// memoryRepository bypasses the registry decoder, which derives this
+	// projection from the embedded journal on every real API read.
+	repository.moves[0].Status.CleanupPhase = cleanup.Status.Phase
 }
 
 func TestMoveErrorsPreservePhaseAndActiveMove(t *testing.T) {
@@ -160,6 +167,22 @@ func TestMoveCompletionWaitsForPublishAndCleanupEvidence(t *testing.T) {
 	}
 	state.PublishedNodes = []string{"destination"}
 	repository.volumes[move.Spec.VolumeID] = state
+	destination := *move.Status.DestinationCopy
+	repository.readyPoolsConfigured = true
+	repository.readyPools = []volumeapi.Pool{{
+		Name: destination.PoolName, UID: destination.PoolUID, NodeName: destination.NodeName, MountPath: "/destination-pool",
+		Status: volumeapi.PoolStatus{Inventory: &volumeapi.PoolInventory{
+			Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: false}},
+		}},
+	}}
+	if err := reconciler.reconcileMove(ctx, repository.moves[0]); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = client.BatchV1().Jobs("system").List(ctx, metav1.ListOptions{})
+	if err != nil || len(jobs.Items) != 0 || repository.moves[0].Status.Phase != move.Status.Phase {
+		t.Fatalf("cleanup began before scanner publication proof: %+v, %v", jobs, err)
+	}
+	repository.readyPools[0].Status.Inventory.Copies[0].Published = true
 	if err := reconciler.reconcileMove(ctx, repository.moves[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -391,9 +414,6 @@ func TestCompletionAfterVolumeDeletion(t *testing.T) {
 		t.Fatalf("deleted Volume did not finish metadata-only: %+v", repository.moves[0])
 	}
 	for _, action := range client.Actions() {
-		if action.Matches("list", "configmaps") && action.(ktesting.ListAction).GetListRestrictions().Labels.String() == "shiftpv.io/cleanup-request" {
-			continue
-		}
 		if action.GetVerb() != "get" && action.GetVerb() != "delete" {
 			t.Fatalf("completion recreated or inspected disk resources: %+v", action)
 		}

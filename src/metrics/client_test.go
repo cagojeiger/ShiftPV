@@ -35,7 +35,7 @@ func TestObservationClientBudgetAndInventory(t *testing.T) {
 	if original.QPS != 20 || original.Timeout != 0 || original.UserAgent != "" {
 		t.Fatal("storage config mutated")
 	}
-	c, err := New("metadata").NewController(original, "system", time.Second, time.Minute)
+	c, err := New("metadata").NewController(original, time.Second, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestObservationClientBudgetAndInventory(t *testing.T) {
 	if calls != 5 {
 		t.Fatalf("snapshot made %d API calls", calls)
 	}
-	if _, err := New().NewController(&rest.Config{Host: ":invalid"}, "system", time.Second, time.Minute); err == nil {
+	if _, err := New().NewController(&rest.Config{Host: ":invalid"}, time.Second, time.Minute); err == nil {
 		t.Fatal("invalid metrics config accepted")
 	}
 }

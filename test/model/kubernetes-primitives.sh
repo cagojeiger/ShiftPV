@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cluster_name="${CLUSTER_NAME:-shiftpv-v04-primitives-$$}"
+keep_cluster="${KEEP_CLUSTER:-0}"
+probe_dir="$(mktemp -d)"
+probe_kubeconfig="${probe_dir}/kubeconfig"
+
+cleanup() {
+  result_code=$?
+  if [[ "${keep_cluster}" != "1" ]]; then
+    kind delete cluster --name "${cluster_name}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${probe_dir}" && -d "${probe_dir}" ]]; then
+    rm -r -- "${probe_dir}"
+  fi
+  exit "${result_code}"
+}
+trap cleanup EXIT
+
+if kind get clusters | grep -Fxq "${cluster_name}"; then
+  echo "kind cluster ${cluster_name} already exists; choose another CLUSTER_NAME" >&2
+  exit 1
+fi
+
+kind create cluster --name "${cluster_name}" --kubeconfig "${probe_kubeconfig}" --wait 120s >/dev/null
+
+kubectl --kubeconfig "${probe_kubeconfig}" apply \
+  -f charts/shiftpv/crds/shiftpv.io_shiftpvpools.yaml \
+  -f charts/shiftpv/crds/shiftpv.io_shiftpvvolumes.yaml \
+  -f charts/shiftpv/crds/shiftpv.io_shiftpvmoves.yaml >/dev/null
+
+for crd in shiftpvpools.shiftpv.io shiftpvvolumes.shiftpv.io shiftpvmoves.shiftpv.io; do
+  kubectl --kubeconfig "${probe_kubeconfig}" wait \
+    --for=condition=Established "customresourcedefinition/${crd}" \
+    --timeout=30s >/dev/null
+done
+
+protected_crds="$(kubectl --kubeconfig "${probe_kubeconfig}" get customresourcedefinitions \
+  -l shiftpv.io/uninstall-protected=true \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+if [[ "${protected_crds}" != $'shiftpvmoves.shiftpv.io\nshiftpvpools.shiftpv.io\nshiftpvvolumes.shiftpv.io' ]]; then
+  echo "expected exactly the Pool, Volume, and Move CRDs to be uninstall-protected" >&2
+  printf '%s\n' "${protected_crds}" >&2
+  exit 1
+fi
+if kubectl --kubeconfig "${probe_kubeconfig}" get customresourcedefinition/shiftpvcleanups.shiftpv.io >/dev/null 2>&1; then
+  echo "standalone cleanup CRD unexpectedly exists" >&2
+  exit 1
+fi
+
+volume_id="shiftpv-0123456789abcdef0123456789abcdef"
+kubectl --kubeconfig "${probe_kubeconfig}" apply -f - >/dev/null <<YAML
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVPool
+metadata:
+  name: source-pool
+spec:
+  nodeName: source-node
+  mountPath: /var/lib/shiftpv
+  capacity:
+    limit: 10Gi
+  scanEpoch: 1
+---
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVVolume
+metadata:
+  name: ${volume_id}
+spec:
+  volumeID: ${volume_id}
+  requestName: pvc-uid-request
+  initialNode: source-node
+  capacityBytes: 1073741824
+---
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVMove
+metadata:
+  name: move-sample
+spec:
+  volumeID: ${volume_id}
+  sourceNode: source-node
+YAML
+
+pool_uid="$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvpool source-pool -o jsonpath='{.metadata.uid}')"
+volume_uid="$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvvolume "${volume_id}" -o jsonpath='{.metadata.uid}')"
+move_uid="$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvmove move-sample -o jsonpath='{.metadata.uid}')"
+pool_generation="$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvpool source-pool -o jsonpath='{.metadata.generation}')"
+observed_at="2026-01-01T00:00:00Z"
+receipt_digest="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvpool source-pool \
+  --subresource=status --type=merge -p "$(printf '{\"status\":{\"observedGeneration\":%s,\"lastProbeTime\":\"%s\",\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\",\"observedGeneration\":%s,\"lastTransitionTime\":\"%s\",\"reason\":\"ScanComplete\",\"message\":\"complete\"}],\"inventory\":{\"observedAt\":\"%s\",\"valid\":true,\"truncated\":false,\"copies\":[]}}}' "${pool_generation}" "${observed_at}" "${pool_generation}" "${observed_at}" "${observed_at}")" >/dev/null
+
+kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${volume_id}" \
+  --subresource=status --type=merge -p "$(printf '{\"status\":{\"phase\":\"Deleting\",\"ownerNode\":\"source-node\",\"currentCopy\":{\"installationID\":\"install-1\",\"poolName\":\"source-pool\",\"poolUID\":\"%s\",\"volumeID\":\"%s\",\"volumeUID\":\"%s\",\"copyID\":\"copy-source\",\"nodeName\":\"source-node\",\"role\":\"Serving\"},\"cleanup\":{\"spec\":{\"operationID\":\"delete-op\",\"target\":{\"installationID\":\"install-1\",\"poolName\":\"source-pool\",\"poolUID\":\"%s\",\"volumeID\":\"%s\",\"volumeUID\":\"%s\",\"copyID\":\"copy-source\",\"nodeName\":\"source-node\",\"role\":\"Serving\"},\"reason\":\"VolumeDelete\",\"authority\":{\"kind\":\"ShiftPVVolume\",\"name\":\"%s\",\"uid\":\"%s\"}},\"status\":{\"phase\":\"Completed\",\"executor\":{\"jobName\":\"cleanup-job\",\"jobUID\":\"job-uid\",\"podUID\":\"pod-uid\",\"nodeName\":\"source-node\"},\"receipt\":{\"operationID\":\"delete-op\",\"executorUID\":\"pod-uid\",\"observedAt\":\"%s\",\"retired\":true,\"purged\":true,\"localReceiptDigest\":\"%s\"},\"absenceProof\":{\"requestID\":\"scan-request\",\"poolName\":\"source-pool\",\"poolUID\":\"%s\",\"requiredGeneration\":1,\"observedGeneration\":1,\"valid\":true,\"complete\":true,\"absent\":true,\"confirmedAt\":\"%s\"},\"settledAt\":\"%s\"}}}}' "${pool_uid}" "${volume_id}" "${volume_uid}" "${pool_uid}" "${volume_id}" "${volume_uid}" "${volume_id}" "${volume_uid}" "${observed_at}" "${receipt_digest}" "${pool_uid}" "${observed_at}" "${observed_at}")" >/dev/null
+
+kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvmove move-sample \
+  --subresource=status --type=merge -p "$(printf '{\"status\":{\"phase\":\"Blocked\",\"reason\":\"AwaitingRecovery\",\"message\":\"sample\",\"sourceCopy\":{\"installationID\":\"install-1\",\"poolName\":\"source-pool\",\"poolUID\":\"%s\",\"volumeID\":\"%s\",\"volumeUID\":\"%s\",\"copyID\":\"copy-source\",\"nodeName\":\"source-node\",\"role\":\"Serving\"},\"cleanup\":{\"spec\":{\"operationID\":\"move-cleanup-op\",\"target\":{\"installationID\":\"install-1\",\"poolName\":\"source-pool\",\"poolUID\":\"%s\",\"volumeID\":\"%s\",\"volumeUID\":\"%s\",\"copyID\":\"copy-source\",\"nodeName\":\"source-node\",\"role\":\"Serving\"},\"reason\":\"MoveSource\",\"authority\":{\"kind\":\"ShiftPVMove\",\"name\":\"move-sample\",\"uid\":\"%s\"}},\"status\":{\"phase\":\"Pending\"}}}}' "${pool_uid}" "${volume_id}" "${volume_uid}" "${pool_uid}" "${volume_id}" "${volume_uid}" "${move_uid}")" >/dev/null
+
+if kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvpool source-pool \
+  --type=merge -p '{"spec":{"nodeName":"other-node"}}' >/dev/null 2>&1; then
+  echo "ShiftPVPool immutable nodeName update unexpectedly succeeded" >&2
+  exit 1
+fi
+if kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${volume_id}" \
+  --type=merge -p '{"spec":{"requestName":"other-request"}}' >/dev/null 2>&1; then
+  echo "ShiftPVVolume immutable requestName update unexpectedly succeeded" >&2
+  exit 1
+fi
+if kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvmove move-sample \
+  --type=merge -p '{"spec":{"sourceNode":"other-node"}}' >/dev/null 2>&1; then
+  echo "ShiftPVMove immutable sourceNode update unexpectedly succeeded" >&2
+  exit 1
+fi
+
+kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvmove move-sample \
+  --type=merge -p '{"spec":{"recovery":"ResumeOwner"}}' >/dev/null
+if kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvmove move-sample \
+  --type=json -p='[{"op":"remove","path":"/spec/recovery"}]' >/dev/null 2>&1; then
+  echo "ShiftPVMove recovery removal unexpectedly succeeded" >&2
+  exit 1
+fi
+
+kubectl --kubeconfig "${probe_kubeconfig}" apply -f - >/dev/null <<'YAML'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: protocolprobes.design.shiftpv.io
+spec:
+  group: design.shiftpv.io
+  scope: Cluster
+  names:
+    plural: protocolprobes
+    singular: protocolprobe
+    kind: ProtocolProbe
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [scanEpoch]
+              properties:
+                scanEpoch:
+                  type: integer
+                  format: int64
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                receipt:
+                  type: string
+      subresources:
+        status: {}
+YAML
+
+kubectl --kubeconfig "${probe_kubeconfig}" wait \
+  --for=condition=Established customresourcedefinition/protocolprobes.design.shiftpv.io \
+  --timeout=30s >/dev/null
+
+kubectl --kubeconfig "${probe_kubeconfig}" apply -f - >/dev/null <<'YAML'
+apiVersion: design.shiftpv.io/v1alpha1
+kind: ProtocolProbe
+metadata:
+  name: lifecycle
+  finalizers:
+    - design.shiftpv.io/protect
+spec:
+  scanEpoch: 1
+YAML
+
+initial_generation="$(kubectl --kubeconfig "${probe_kubeconfig}" get protocolprobe lifecycle -o jsonpath='{.metadata.generation}')"
+kubectl --kubeconfig "${probe_kubeconfig}" patch protocolprobe lifecycle \
+  --subresource=status --type=merge \
+  -p "{\"status\":{\"observedGeneration\":${initial_generation},\"receipt\":\"before-delete\"}}" >/dev/null
+status_generation="$(kubectl --kubeconfig "${probe_kubeconfig}" get protocolprobe lifecycle -o jsonpath='{.metadata.generation}')"
+if [[ "${status_generation}" != "${initial_generation}" ]]; then
+  echo "status update unexpectedly changed metadata.generation" >&2
+  exit 1
+fi
+
+kubectl --kubeconfig "${probe_kubeconfig}" patch protocolprobe lifecycle \
+  --type=merge -p '{"spec":{"scanEpoch":2}}' >/dev/null
+scan_generation="$(kubectl --kubeconfig "${probe_kubeconfig}" get protocolprobe lifecycle -o jsonpath='{.metadata.generation}')"
+if ((scan_generation <= initial_generation)); then
+  echo "spec.scanEpoch update did not advance metadata.generation" >&2
+  exit 1
+fi
+
+probe_uid="$(kubectl --kubeconfig "${probe_kubeconfig}" get protocolprobe lifecycle -o jsonpath='{.metadata.uid}')"
+kubectl --kubeconfig "${probe_kubeconfig}" apply -f - >/dev/null <<YAML
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: protocol-probe-child
+  namespace: default
+  ownerReferences:
+    - apiVersion: design.shiftpv.io/v1alpha1
+      kind: ProtocolProbe
+      name: lifecycle
+      uid: ${probe_uid}
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  suspend: true
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: probe
+          image: registry.k8s.io/pause:3.10.1
+YAML
+
+kubectl --kubeconfig "${probe_kubeconfig}" delete protocolprobe lifecycle --wait=false >/dev/null
+deletion_timestamp="$(kubectl --kubeconfig "${probe_kubeconfig}" get protocolprobe lifecycle -o jsonpath='{.metadata.deletionTimestamp}')"
+if [[ -z "${deletion_timestamp}" ]]; then
+  echo "finalized object disappeared instead of entering termination" >&2
+  exit 1
+fi
+
+kubectl --kubeconfig "${probe_kubeconfig}" patch protocolprobe lifecycle \
+  --subresource=status --type=merge \
+  -p "{\"status\":{\"observedGeneration\":${scan_generation},\"receipt\":\"after-delete\"}}" >/dev/null
+receipt="$(kubectl --kubeconfig "${probe_kubeconfig}" get protocolprobe lifecycle -o jsonpath='{.status.receipt}')"
+if [[ "${receipt}" != "after-delete" ]]; then
+  echo "status journal could not be updated after deletionTimestamp" >&2
+  exit 1
+fi
+
+kubectl --kubeconfig "${probe_kubeconfig}" get job protocol-probe-child -n default >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" patch protocolprobe lifecycle \
+  --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" wait --for=delete protocolprobe/lifecycle --timeout=30s >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" wait --for=delete job/protocol-probe-child -n default --timeout=30s >/dev/null
+
+echo "ShiftPV 0.4 Kubernetes protocol primitives passed"

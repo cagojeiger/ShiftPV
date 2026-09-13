@@ -1,78 +1,58 @@
 # Source Layout
 
-`src/*`는 실행 경계보다 제품 책임을 먼저 드러낸다.
+이 문서는 0.4 구현이 따라야 할 책임 경계다. Package 이름보다 의존 방향을 우선하며, 한 사실을 여러
+reconciler가 소유하지 않는다.
 
-## Tree
+## Target boundaries
 
 ```text
-ShiftPV/
-├── build/package/Dockerfile
-├── charts/shiftpv/
-│   ├── crds/
-│   └── templates/
-├── docs/{adr,spec,development}/
-├── src/
-│   ├── cmd/{controller,node,uninstall-guard,volume-helper}/
-│   ├── csi/{controller,identity,node,server}/
-│   ├── kubernetes/{cleanupapi,helperpod,volumeapi}/
-│   ├── lifecycle/{admission,cleanupcontroller,poolcontroller,uninstall}/
-│   ├── metrics/
-│   ├── mobility/{admission,controller,fsm}/
-│   ├── node/{mount,observation,ownership}/
-│   ├── pool/{capacity,readiness}/
-│   ├── volume/
-│   └── webhook/certificate/
-└── test/{docs,e2e,helm,integration,release}/
+cmd wiring
+   │
+   ├── CSI adapters ───────────────┐
+   ├── Pool / Volume / Move loops ─┼── Kubernetes repositories
+   └── metrics / admission ────────┘
+                    │
+               pure protocol
+          identity · state · capacity
+                    │
+               node-local effects
+          lock · inventory · copy · purge
 ```
 
-## Responsibilities
-
-| 경로 | 단일 책임 |
+| 책임 | 규칙 |
 |---|---|
-| `src/cmd/*` | flag, dependency wiring, process lifecycle |
-| `src/csi/*` | CSI RPC와 mount authorization |
-| `src/kubernetes/cleanupapi` | immutable Cleanup와 status transition |
-| `src/kubernetes/helperpod` | node-bound filesystem effect Job |
-| `src/kubernetes/volumeapi` | Pool, Volume, Move persistence |
-| `src/lifecycle/cleanupcontroller` | observation → disposition → cleanup settlement |
-| `src/lifecycle/poolcontroller` | Pool protection → deregistration convergence |
-| `src/lifecycle/admission`, `uninstall` | safe removal policy |
-| `src/mobility/admission` | owner pin과 Placement Hold |
-| `src/mobility/controller` | Move observation과 action orchestration |
-| `src/mobility/fsm` | 외부 I/O 없는 state decision |
-| `src/node/mount` | bind mount와 target boundary |
-| `src/node/observation` | bounded Pool inventory |
-| `src/node/ownership` | copy marker, inode, lock, transfer, reclaim, empty Pool identity release |
-| `src/pool/capacity` | statfs와 reservation admission |
-| `src/pool/readiness` | node-local Pool probe |
-| `src/metrics` | cached operational snapshot |
-| `src/volume` | API 독립 ID, path, copy identity |
-| `src/webhook/certificate` | admission TLS lifecycle |
+| `cmd` | flag, dependency wiring, process lifecycle만 소유 |
+| CSI | RPC validation과 protocol command 변환; filesystem effect 직접 실행 금지 |
+| Kubernetes repositories | Pool/Volume/Move read, status patch, resourceVersion CAS, child executor 생성 |
+| Pure protocol | 외부 I/O 없는 state decision, identity comparison, capacity holds |
+| Pool loop | readiness와 요청 generation에 대한 valid·complete inventory 게시 |
+| Volume loop | provision/delete lifecycle, current owner, deletion journal와 finalizer |
+| Move loop | cold move, 단일 owner CAS, rollback/source cleanup journal와 finalizer |
+| Node-local effects | per-volume lock 아래 publish/unpublish와 exact copy/promote/purge/receipt effect 실행 |
+| Metrics | cached observation; protocol decision에 입력하지 않음 |
+| Admission | 사용자가 소유한 workload를 사전 점검하고 unsafe mutation/delete를 fail closed |
 
-## Control flow
+## Dependency rules
 
-```mermaid
-flowchart TB
-    CSI[CSI request] --> API[Volume API]
-    MOVE[Move FSM] --> API
-    API --> INTENT[Durable intent]
-    INTENT --> JOB[Helper Job]
-    JOB --> OWN[node/ownership]
-    OWN --> FS[Registered Pool]
-    OBS[node/observation] --> API
-    API --> RECON[Cleanup reconciler]
-    API --> POOL[Pool lifecycle reconciler]
-    POOL -->|exact UID release approval| API
-    API --> READY[Pool readiness]
-    READY -->|locked empty check| OWN
-```
+1. Pure protocol package는 Kubernetes client, filesystem, clock, goroutine을 import하지 않는다.
+2. Reconciler는 먼저 immutable observation snapshot을 만들고, 한 번 결정한 뒤, exact action 하나만 실행한다.
+3. Filesystem path는 node-local effect 계층에서 validated identity로만 계산한다. API가 arbitrary path를 받지 않는다.
+4. Child Job 이름이나 성공 상태는 receipt가 아니다. Parent journal의 intent와 exact executor UID가 일치해야 한다.
+5. NodePublish/NodeUnpublish와 cleanup filesystem effect는 per-volume local lock 규약을 사용한다. Pool
+   scanner는 lock 밖에서 marker와 mount reference를 관찰하며, generation-fenced consumer만 그 결과를
+   causal proof로 사용할 수 있다.
+6. Capacity 계산은 Volume owner hold와 Move temporary hold의 합으로만 도출한다. 별도 mutable reservation source를 두지 않는다.
+7. Wall clock은 retry, timeout, metric에만 사용하고 owner 변경·삭제·hold 해제 권한에 사용하지 않는다.
 
-| 검증 | 위치 |
+## Durable ownership
+
+| 사실 | 유일한 owner |
 |---|---|
-| package behavior | 대상 package의 `*_test.go` |
-| Kubernetes integration | `test/e2e/kind` |
-| Linux mount / filesystem | `test/integration` |
-| chart / release | `test/helm`, `test/release` |
+| Pool identity와 inventory generation | `ShiftPVPool` |
+| current copy, owner node, requested bytes | `ShiftPVVolume` |
+| 이동 phase, commit input, temporary holds, cleanup receipts | `ShiftPVMove` |
+| 삭제 cleanup receipts | deleting `ShiftPVVolume` |
+| 물리 effect 실행 | parent가 소유한 node-bound Job; durable truth 없음 |
 
-상태 전이는 [Volume mobility](../spec/volume-mobility.md), 파일 정리는
-[Cleanup and GC](../spec/source-cleanup.md)가 소유한다.
+관련 동작은 [Volume mobility](../spec/volume-mobility.md)와
+[Cleanup and GC](../spec/source-cleanup.md), 검증 기준은 [Testing](testing.md)이 소유한다.

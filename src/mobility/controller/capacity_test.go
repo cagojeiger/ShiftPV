@@ -2,11 +2,10 @@ package controller
 
 import (
 	"context"
-	"strconv"
+	"math"
 	"strings"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -42,14 +41,14 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 			volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 			move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}}
 			repository := &memoryRepository{
-				volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name}},
+				volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CapacityBytes: 32 << 20}},
 				pools: []volumeapi.Pool{
 					{Name: "source", UID: "source-pool-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "128Mi"},
 					{Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: test.limit},
 				},
 				moves: []volumeapi.Move{move},
 			}
-			client := fake.NewSimpleClientset(moveReservation(volumeID, "source", 32<<20))
+			client := fake.NewSimpleClientset()
 			reconciler := &Reconciler{
 				Client: client, Repository: repository, Namespace: "system", HelperImage: "helper",
 				CapacityProbe: fakeMoveCapacityProbe{usage: test.usage, stats: poolcapacity.Filesystem{AvailableBytes: test.available}},
@@ -75,7 +74,7 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 	}
 }
 
-func TestDestinationCapacityDoesNotCountRecoveredMove(t *testing.T) {
+func TestDestinationCapacityRetainsRecoveredMoveUntilSettled(t *testing.T) {
 	currentID := "shiftpv-0123456789abcdef0123456789abcdef"
 	recoveredID := "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	current := volumeapi.Move{Name: "move-current", Spec: volumeapi.MoveSpec{VolumeID: currentID, SourceNode: "source"}}
@@ -88,8 +87,8 @@ func TestDestinationCapacityDoesNotCountRecoveredMove(t *testing.T) {
 	}
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{
-			currentID:   {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name},
-			recoveredID: {Phase: volumeapi.PhaseReady, OwnerNode: "source"},
+			currentID:   {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name, CapacityBytes: 32 << 20},
+			recoveredID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: recovered.Name, CapacityBytes: 32 << 20},
 		},
 		pools: []volumeapi.Pool{
 			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
@@ -97,16 +96,13 @@ func TestDestinationCapacityDoesNotCountRecoveredMove(t *testing.T) {
 		},
 		moves: []volumeapi.Move{current, recovered},
 	}
-	client := fake.NewSimpleClientset(
-		moveReservation(currentID, "source", 32<<20),
-		moveReservation(recoveredID, "source", 32<<20),
-	)
+	client := fake.NewSimpleClientset()
 	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system"}
-	requested, logicalReserved, physicalPending, limit, err := reconciler.destinationCapacity(context.Background(), current, "destination")
+	requested, logicalReserved, physicalPending, limit, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requested != 32<<20 || logicalReserved != 0 || physicalPending != 0 || limit != 64<<20 {
+	if requested != 32<<20 || logicalReserved != 32<<20 || physicalPending != 32<<20 || limit != 64<<20 {
 		t.Fatalf("capacity = requested=%d logical=%d physical=%d limit=%d", requested, logicalReserved, physicalPending, limit)
 	}
 }
@@ -117,12 +113,12 @@ func TestDestinationCapacityIgnoresMoveAfterVolumeAndReservationDeletion(t *test
 	deleted := volumeapi.Move{
 		Name: "move-deleted", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-deleted", SourceNode: "source"},
 		Status: volumeapi.MoveStatus{
-			Phase: "Succeeded", DestinationNode: "destination", CapacityApproved: true, SourceBytes: 32 << 20,
+			Phase: "Succeeded", CleanupPhase: "Completed", DestinationNode: "destination", CapacityApproved: true, SourceBytes: 32 << 20,
 		},
 	}
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{
-			currentID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name},
+			currentID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name, CapacityBytes: 32 << 20},
 		},
 		pools: []volumeapi.Pool{
 			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
@@ -131,10 +127,10 @@ func TestDestinationCapacityIgnoresMoveAfterVolumeAndReservationDeletion(t *test
 		moves: []volumeapi.Move{current, deleted},
 	}
 	reconciler := &Reconciler{
-		Client:     fake.NewSimpleClientset(moveReservation(currentID, "source", 32<<20)),
+		Client:     fake.NewSimpleClientset(),
 		Repository: repository, Namespace: "system",
 	}
-	requested, logicalReserved, physicalPending, _, err := reconciler.destinationCapacity(context.Background(), current, "destination")
+	requested, logicalReserved, physicalPending, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err != nil {
 		t.Fatalf("deleted volume's Move blocked destination admission: %v", err)
 	}
@@ -153,7 +149,7 @@ func TestDestinationCapacityRejectsMoveWithReservationButNoVolume(t *testing.T) 
 	}
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{
-			currentID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name},
+			currentID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name, CapacityBytes: 8 << 20},
 		},
 		pools: []volumeapi.Pool{
 			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
@@ -162,15 +158,41 @@ func TestDestinationCapacityRejectsMoveWithReservationButNoVolume(t *testing.T) 
 		moves: []volumeapi.Move{current, incomplete},
 	}
 	reconciler := &Reconciler{
-		Client: fake.NewSimpleClientset(
-			moveReservation(currentID, "source", 8<<20),
-			moveReservation(orphanID, "source", 8<<20),
-		),
+		Client:     fake.NewSimpleClientset(),
 		Repository: repository, Namespace: "system",
 	}
-	_, _, _, _, err := reconciler.destinationCapacity(context.Background(), current, "destination")
+	_, _, _, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err == nil || !strings.Contains(err.Error(), "has no volume state") {
 		t.Fatalf("incomplete move was not rejected: %v", err)
+	}
+}
+
+func TestDestinationCapacityRejectsPhysicalPendingOverflow(t *testing.T) {
+	currentID := "shiftpv-0123456789abcdef0123456789abcdef"
+	firstID := "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	secondID := "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	current := volumeapi.Move{Name: "move-current", Spec: volumeapi.MoveSpec{VolumeID: currentID, SourceNode: "source"}}
+	first := volumeapi.Move{
+		Name: "move-first", Spec: volumeapi.MoveSpec{VolumeID: firstID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{DestinationNode: "destination", CapacityApproved: true, SourceBytes: math.MaxInt64},
+	}
+	second := volumeapi.Move{
+		Name: "move-second", Spec: volumeapi.MoveSpec{VolumeID: secondID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{DestinationNode: "destination", CapacityApproved: true, SourceBytes: 1},
+	}
+	repository := &memoryRepository{
+		volumes: map[string]volumeapi.State{
+			currentID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name, CapacityBytes: 1},
+			firstID:   {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: first.Name, CapacityBytes: 1},
+			secondID:  {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: second.Name, CapacityBytes: 1},
+		},
+		pools: []volumeapi.Pool{{Name: "destination", NodeName: "destination", CapacityLimit: "1Ti"}},
+		moves: []volumeapi.Move{current, first, second},
+	}
+	reconciler := &Reconciler{Repository: repository}
+	_, _, _, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[0])
+	if err == nil || !strings.Contains(err.Error(), "overflows int64") {
+		t.Fatalf("physical pending overflow was not rejected: %v", err)
 	}
 }
 
@@ -179,7 +201,7 @@ func TestEnsureCapacityFailsClosedWhenDestinationPoolLimitIsMissing(t *testing.T
 	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}}
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{
-			volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name},
+			volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CapacityBytes: 32 << 20},
 		},
 		pools: []volumeapi.Pool{
 			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
@@ -188,7 +210,7 @@ func TestEnsureCapacityFailsClosedWhenDestinationPoolLimitIsMissing(t *testing.T
 		moves: []volumeapi.Move{move},
 	}
 	reconciler := &Reconciler{
-		Client:     fake.NewSimpleClientset(moveReservation(volumeID, "source", 32<<20)),
+		Client:     fake.NewSimpleClientset(),
 		Repository: repository, Namespace: "system",
 		CapacityProbe: fakeMoveCapacityProbe{usage: 1, stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
 		PoolLocks:     &poolcapacity.Locker{},
@@ -199,14 +221,5 @@ func TestEnsureCapacityFailsClosedWhenDestinationPoolLimitIsMissing(t *testing.T
 	}
 	if move.Status.CapacityApproved {
 		t.Fatal("missing Pool limit approved destination capacity")
-	}
-}
-
-func moveReservation(volumeID, node string, bytes int64) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: volumeID, Namespace: "system", Labels: map[string]string{
-			"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
-		}},
-		Data: map[string]string{"volumeID": volumeID, "nodeName": node, "capacity": strconv.FormatInt(bytes, 10)},
 	}
 }

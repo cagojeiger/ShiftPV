@@ -25,21 +25,20 @@ restore_pool_mount() {
 }
 trap restore_pool_mount EXIT
 
-wait_for_reservation() {
+wait_for_volume_hold() {
   local request_name=$1
   local attempt
-  RESERVATION_NAME=""
+  HELD_VOLUME_ID=""
   for ((attempt = 0; attempt < 120; attempt++)); do
-    RESERVATION_NAME=$(kubectl -n shiftpv-system get configmap \
-      -l app.kubernetes.io/component=volume-reservation \
-      -o custom-columns=NAME:.metadata.name,REQUEST:.data.requestName \
+    HELD_VOLUME_ID=$(kubectl get shiftpvvolumes \
+      -o custom-columns=NAME:.metadata.name,REQUEST:.spec.requestName \
       --no-headers 2>/dev/null | awk -v request="${request_name}" '$2 == request { print $1 }')
-    if [[ -n "${RESERVATION_NAME}" ]]; then
+    if [[ -n "${HELD_VOLUME_ID}" ]]; then
       return
     fi
     sleep 1
   done
-  echo "reservation for ${request_name} was not created" >&2
+  echo "ShiftPVVolume capacity hold for ${request_name} was not created" >&2
   exit 1
 }
 
@@ -129,15 +128,14 @@ if [[ "${PVC_PHASE}" != "Pending" ]]; then
   echo "ENOSPC PVC unexpectedly left Pending: ${PVC_PHASE}" >&2
   exit 1
 fi
-if kubectl -n shiftpv-system get configmap \
-  -l app.kubernetes.io/component=volume-reservation \
-  -o custom-columns=REQUEST:.data.requestName --no-headers | grep -Fxq "pvc-${PVC_UID}"; then
-	echo "not-ready Pool provisioning created a reservation" >&2
+if kubectl get shiftpvvolumes \
+  -o custom-columns=REQUEST:.spec.requestName --no-headers | grep -Fxq "pvc-${PVC_UID}"; then
+	echo "not-ready Pool provisioning created a ShiftPVVolume capacity hold" >&2
 	exit 1
 fi
 
 # Free the fault files without replacing the mounted filesystem. The Pool must
-# return to Ready and the same pending PVC may then create its first reservation.
+# return to Ready and the same pending PVC may then create its Volume-owned hold.
 docker exec "${FAULT_NODE}" sh -ec 'rm -f /srv/shiftpv-b/fill-*'
 MOUNT_STATE=tmpfs_rw
 wait_for_pool_reason True PoolReady
@@ -148,16 +146,19 @@ FAULT_NODE_POD=$(kubectl -n shiftpv-system get pod \
 kubectl -n shiftpv-system delete "pod/${FAULT_NODE_POD}" \
   --grace-period=0 --force --wait=true
 kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=5m
-wait_for_reservation "pvc-${PVC_UID}"
+wait_for_volume_hold "pvc-${PVC_UID}"
 kubectl wait --for=condition=Ready pod/shiftpv-filesystem-fault --timeout=5m
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-filesystem-fault --timeout=2m
 
 FAULT_PV=$(kubectl get pvc shiftpv-filesystem-fault -o jsonpath='{.spec.volumeName}')
 VOLUME_ID=$(kubectl get "pv/${FAULT_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
-if [[ "${VOLUME_ID}" != "${RESERVATION_NAME}" ]]; then
-  echo "retry changed the reserved volume identity" >&2
+if [[ "${VOLUME_ID}" != "${HELD_VOLUME_ID}" ]]; then
+  echo "retry changed the Volume-owned capacity identity" >&2
   exit 1
 fi
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${FAULT_NODE}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
 kubectl exec shiftpv-filesystem-fault -- grep -Fx 'ShiftPV filesystem fault recovery' /data/payload
 docker exec "${FAULT_NODE}" test -f "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}/payload"
 
@@ -177,14 +178,19 @@ kubectl delete pvc shiftpv-filesystem-fault --wait=false
 kubectl wait --for=delete pvc/shiftpv-filesystem-fault --timeout=2m
 wait_for_unavailable_event PersistentVolume "${FAULT_PV}"
 kubectl get "pv/${FAULT_PV}" >/dev/null
-kubectl -n shiftpv-system get "configmap/${VOLUME_ID}" >/dev/null
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.cleanup.spec.reason}')" = VolumeDelete
+if [[ "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.cleanup.status.phase}')" == Completed ]]; then
+	echo "read-only Pool released the Volume hold before cleanup could run" >&2
+	exit 1
+fi
 docker exec "${FAULT_NODE}" test -f "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}/payload"
 
 docker exec "${FAULT_NODE}" mount -o remount,rw "${FAULT_POOL_PATH}"
 MOUNT_STATE=tmpfs_rw
 wait_for_pool_reason True PoolReady
 kubectl wait --for=delete "pv/${FAULT_PV}" --timeout=5m
-kubectl -n shiftpv-system wait --for=delete "configmap/${VOLUME_ID}" --timeout=2m
+kubectl wait --for=delete "shiftpvvolume/${VOLUME_ID}" --timeout=2m
 docker exec "${FAULT_NODE}" test ! -e "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}"
 docker exec "${FAULT_NODE}" umount "${FAULT_POOL_PATH}"
 MOUNT_STATE=normal

@@ -192,7 +192,7 @@ func trustedRuntimeDelete(request *admissionv1.AdmissionRequest, trustedUsername
 		return false
 	}
 	switch request.Resource.Resource {
-	case "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups":
+	case "shiftpvvolumes", "shiftpvmoves":
 		return true
 	default:
 		return false

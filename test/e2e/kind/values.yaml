@@ -2,9 +2,6 @@ metrics:
   enabled: true
   snapshotInterval: 2s
 
-runtime:
-  identityContract: true
-
 controller:
   image:
     repository: shiftpv

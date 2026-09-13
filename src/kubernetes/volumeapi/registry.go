@@ -35,20 +35,20 @@ var (
 )
 
 const (
-	PoolConditionReady            = "Ready"
-	PoolConditionAccessible       = "Accessible"
-	PoolConditionIdentityReleased = "IdentityReleased"
-	PoolProtectionFinalizer       = "shiftpv.io/pool-protection"
-	PoolIdentityReleaseAnnotation = "shiftpv.io/release-pool-identity"
-	// PoolConditionMounted is retained so newer node plugins can remove the
-	// obsolete condition written by releases that required an exact mount point.
-	PoolConditionMounted           = "Mounted"
+	PoolConditionReady             = "Ready"
+	PoolConditionAccessible        = "Accessible"
+	PoolConditionIdentityReleased  = "IdentityReleased"
+	PoolProtectionFinalizer        = "shiftpv.io/pool-protection"
+	PoolIdentityReleaseAnnotation  = "shiftpv.io/release-pool-identity"
 	PoolConditionWritable          = "Writable"
 	PoolConditionCapacityReadable  = "CapacityReadable"
 	DefaultPoolReadinessStaleAfter = 3 * time.Minute
 )
 
 const (
+	VolumeProtectionFinalizer = "shiftpv.io/volume-protection"
+	MoveProtectionFinalizer   = "shiftpv.io/move-protection"
+
 	PhasePending  = "Pending"
 	PhaseReady    = "Ready"
 	PhaseDeleting = "Deleting"
@@ -58,6 +58,10 @@ const (
 
 type State struct {
 	UID                 string
+	Finalizers          []string
+	RequestName         string
+	CapacityBytes       int64
+	InitialNode         string
 	Phase               string
 	OwnerNode           string
 	ActiveMove          string
@@ -176,10 +180,9 @@ type MoveStatus struct {
 	EvictionRequested    bool
 	CopyJobName          string
 	PromotionJobName     string
-	CleanupJobName       string
+	CleanupPhase         string
 	CopyOperationID      string
 	PromotionOperationID string
-	CleanupName          string
 	SourceCopy           *volume.CopyIdentity
 	IncomingCopy         *volume.CopyIdentity
 	DestinationCopy      *volume.CopyIdentity
@@ -193,6 +196,7 @@ type Move struct {
 	Name            string
 	UID             string
 	ResourceVersion string
+	Finalizers      []string
 	Spec            MoveSpec
 	Status          MoveStatus
 }
@@ -204,46 +208,30 @@ func MoveReservesDestination(move Move, state State, nodeName string) bool {
 		state.ActiveMove == move.Name
 }
 
+// MoveCleanupSettled is the only terminal condition that releases a Move's
+// temporary capacity holds. A terminal phase without embedded cleanup proof is
+// deliberately treated as unresolved.
+func MoveCleanupSettled(move Move) bool {
+	if move.Status.Phase == "Succeeded" {
+		return move.Status.CleanupPhase == "Completed"
+	}
+	return move.Status.Phase == "Blocked" && move.Status.RecoveryPhase == "Recovered" &&
+		!move.Status.CapacityApproved && move.Status.CapacityReason == "RecoverySettled"
+}
+
 type Registry struct {
 	Client                  dynamic.Interface
 	PoolReadinessStaleAfter time.Duration
 	Now                     func() time.Time
 }
 
-func (r *Registry) Ensure(ctx context.Context, volumeID, ownerNode string) error {
-	if err := r.validate(); err != nil {
-		return err
-	}
-	resource := r.Client.Resource(VolumeResource)
-	object, err := resource.Get(ctx, volumeID, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		object, err = resource.Create(ctx, &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": "shiftpv.io/v1alpha1",
-			"kind":       "ShiftPVVolume",
-			"metadata":   map[string]any{"name": volumeID},
-			"spec":       map[string]any{"volumeID": volumeID},
-		}}, metav1.CreateOptions{})
-	}
-	if err != nil {
-		return fmt.Errorf("ensure ShiftPVVolume: %w", err)
-	}
-	state, err := stateFrom(object)
-	if err != nil {
-		return err
-	}
-	if state.Phase != "" {
-		if state.OwnerNode != ownerNode {
-			return fmt.Errorf("volume %q is owned by node %q, not %q", volumeID, state.OwnerNode, ownerNode)
-		}
-		return nil
-	}
-	return r.SetState(ctx, volumeID, State{Phase: PhaseReady, OwnerNode: ownerNode})
-}
-
 // BeginCreate persists the exact copy identity before node-local filesystem work.
-func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) (State, error) {
+func (r *Registry) BeginCreate(ctx context.Context, volumeID, requestName, ownerNode string, capacityBytes int64) (State, error) {
 	if err := r.validate(); err != nil {
 		return State{}, err
+	}
+	if requestName == "" || ownerNode == "" || capacityBytes <= 0 {
+		return State{}, ErrStateConflict
 	}
 	resource := r.Client.Resource(VolumeResource)
 	object, err := resource.Get(ctx, volumeID, metav1.GetOptions{})
@@ -254,7 +242,7 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 			return State{}, stateErr
 		}
 		if state.Phase != "" {
-			return r.resumeCreate(ctx, object, state, volumeID, ownerNode)
+			return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes)
 		}
 	} else if !apierrors.IsNotFound(err) {
 		return State{}, fmt.Errorf("read ShiftPVVolume creation intent: %w", err)
@@ -275,8 +263,8 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 		object, err = resource.Create(ctx, &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": "shiftpv.io/v1alpha1",
 			"kind":       "ShiftPVVolume",
-			"metadata":   map[string]any{"name": volumeID},
-			"spec":       map[string]any{"volumeID": volumeID},
+			"metadata":   map[string]any{"name": volumeID, "finalizers": []any{VolumeProtectionFinalizer}},
+			"spec":       map[string]any{"volumeID": volumeID, "requestName": requestName, "initialNode": ownerNode, "capacityBytes": capacityBytes},
 		}}, metav1.CreateOptions{})
 	}
 	if err != nil {
@@ -309,6 +297,9 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 	if state.Phase == "" {
 		next := State{
 			UID:                 string(object.GetUID()),
+			RequestName:         requestName,
+			CapacityBytes:       capacityBytes,
+			InitialNode:         ownerNode,
 			Phase:               PhasePending,
 			OwnerNode:           ownerNode,
 			CreationOperationID: operationID,
@@ -330,11 +321,12 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, ownerNode string) 
 			return State{}, err
 		}
 	}
-	return r.resumeCreate(ctx, object, state, volumeID, ownerNode)
+	return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes)
 }
 
-func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstructured, state State, volumeID, ownerNode string) (State, error) {
+func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstructured, state State, volumeID, requestName, ownerNode string, capacityBytes int64) (State, error) {
 	if object == nil || object.GetUID() == "" || state.UID != string(object.GetUID()) || state.OwnerNode != ownerNode ||
+		state.RequestName != requestName || state.InitialNode != ownerNode || state.CapacityBytes != capacityBytes ||
 		state.CurrentCopy == nil || state.CurrentCopy.Validate() != nil || state.CurrentCopy.VolumeID != volumeID ||
 		state.CurrentCopy.VolumeUID != state.UID || state.CurrentCopy.NodeName != ownerNode || state.CurrentCopy.Role != volume.RoleServing ||
 		(state.Phase != PhasePending && state.Phase != PhaseReady) {
@@ -351,6 +343,9 @@ func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstru
 	pool, err := r.PoolForNode(ctx, ownerNode)
 	if err != nil {
 		return State{}, err
+	}
+	if pool.DeletionTimestamp != nil || !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
+		return State{}, fmt.Errorf("%w: creation Pool protection is unavailable", ErrPoolNotReady)
 	}
 	if state.CurrentCopy.InstallationID != installationID || state.CurrentCopy.PoolName != pool.Name || state.CurrentCopy.PoolUID != pool.UID {
 		return State{}, fmt.Errorf("%w: volume creation Pool identity changed", ErrStateConflict)
@@ -463,8 +458,8 @@ func (r *Registry) Delete(ctx context.Context, volumeID, uid string) error {
 	return nil
 }
 
-func (r *Registry) SetState(ctx context.Context, volumeID string, state State) error {
-	return r.mutateState(ctx, volumeID, func(State) (State, error) { return state, nil })
+func (r *Registry) RemoveVolumeFinalizer(ctx context.Context, volumeID, uid string) error {
+	return r.updateObjectFinalizer(ctx, VolumeResource, volumeID, uid, VolumeProtectionFinalizer, false)
 }
 
 func (r *Registry) CompareAndSetState(ctx context.Context, volumeID, expectedPhase, expectedActiveMove, expectedOwner string, next State) error {
@@ -483,26 +478,6 @@ func (r *Registry) CompareAndSetState(ctx context.Context, volumeID, expectedPha
 			}
 		}
 		return next, nil
-	})
-}
-
-func (r *Registry) SetPublished(ctx context.Context, volumeID, nodeName string, published bool) error {
-	return r.mutateState(ctx, volumeID, func(state State) (State, error) {
-		nodes := make(map[string]struct{}, len(state.PublishedNodes)+1)
-		for _, node := range state.PublishedNodes {
-			nodes[node] = struct{}{}
-		}
-		if published {
-			nodes[nodeName] = struct{}{}
-		} else {
-			delete(nodes, nodeName)
-		}
-		state.PublishedNodes = state.PublishedNodes[:0]
-		for node := range nodes {
-			state.PublishedNodes = append(state.PublishedNodes, node)
-		}
-		sort.Strings(state.PublishedNodes)
-		return state, nil
 	})
 }
 
@@ -622,7 +597,7 @@ func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
 	for _, pool := range pools {
 		poolReady, _ := pool.ReadyAt(now, staleAfter)
 		inventoryReady, _ := poolInventoryReadyAt(pool, now, staleAfter)
-		if poolReady && inventoryReady {
+		if poolReady && inventoryReady && slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
 			ready = append(ready, pool)
 		}
 	}
@@ -763,6 +738,9 @@ func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool,
 	if ready, reason := poolInventoryReadyAt(pool, now, staleAfter); !ready {
 		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, pool.Name, nodeName, reason)
 	}
+	if !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: PoolProtectionMissing", ErrPoolNotReady, pool.Name, nodeName)
+	}
 	return pool, nil
 }
 
@@ -801,6 +779,21 @@ func PoolHasConflictingServingVolume(pool Pool, volumeID string, allowed *volume
 				continue
 			}
 			return true
+		}
+	}
+	return false
+}
+
+// PoolHasPublishedCopy reports scanner proof that the exact serving copy is
+// both present and mounted from the Pool that owns that copy.
+func PoolHasPublishedCopy(pool Pool, target *volume.CopyIdentity) bool {
+	if target == nil || target.Validate() != nil || target.Role != volume.RoleServing ||
+		target.PoolName != pool.Name || target.PoolUID != pool.UID || target.NodeName != pool.NodeName || pool.Status.Inventory == nil {
+		return false
+	}
+	for _, observed := range pool.Status.Inventory.Copies {
+		if observed.Identity != nil && *observed.Identity == *target {
+			return observed.Present && observed.Published && observed.Problem == ""
 		}
 	}
 	return false
@@ -884,46 +877,49 @@ func (r *Registry) ApprovePoolIdentityRelease(ctx context.Context, name, uid str
 }
 
 func (r *Registry) updatePoolFinalizer(ctx context.Context, name, uid string, present bool) error {
+	return r.updateObjectFinalizer(ctx, PoolResource, name, uid, PoolProtectionFinalizer, present)
+}
+
+func (r *Registry) updateObjectFinalizer(ctx context.Context, resource schema.GroupVersionResource, name, uid, finalizer string, present bool) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
 	if name == "" || uid == "" {
-		return fmt.Errorf("ShiftPVPool name and UID are required")
+		return fmt.Errorf("object name and UID are required")
 	}
-	resource := r.Client.Resource(PoolResource)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		object, err := resource.Get(ctx, name, metav1.GetOptions{})
+		object, err := r.Client.Resource(resource).Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) && !present {
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("read ShiftPVPool finalizer: %w", err)
+			return fmt.Errorf("read finalizer: %w", err)
 		}
 		if string(object.GetUID()) != uid {
-			return fmt.Errorf("%w: ShiftPVPool %q UID changed from %q to %q", ErrStateConflict, name, uid, object.GetUID())
+			return fmt.Errorf("%w: object %q UID changed from %q to %q", ErrStateConflict, name, uid, object.GetUID())
 		}
 		finalizers := object.GetFinalizers()
-		hasFinalizer := slices.Contains(finalizers, PoolProtectionFinalizer)
+		hasFinalizer := slices.Contains(finalizers, finalizer)
 		if present == hasFinalizer {
 			return nil
 		}
 		if present {
 			if object.GetDeletionTimestamp() != nil {
-				return fmt.Errorf("%w: ShiftPVPool %q is already deleting without protection", ErrStateConflict, name)
+				return fmt.Errorf("%w: object %q is already deleting without protection", ErrStateConflict, name)
 			}
-			finalizers = append(finalizers, PoolProtectionFinalizer)
+			finalizers = append(finalizers, finalizer)
 		} else {
 			filtered := finalizers[:0]
-			for _, finalizer := range finalizers {
-				if finalizer != PoolProtectionFinalizer {
-					filtered = append(filtered, finalizer)
+			for _, current := range finalizers {
+				if current != finalizer {
+					filtered = append(filtered, current)
 				}
 			}
 			finalizers = filtered
 		}
 		object.SetFinalizers(finalizers)
-		if _, err := resource.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("update ShiftPVPool finalizer: %w", err)
+		if _, err := r.Client.Resource(resource).Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update finalizer: %w", err)
 		}
 		return nil
 	})
@@ -1006,7 +1002,7 @@ func (r *Registry) CreateMove(ctx context.Context, generateName string, spec Mov
 	object, err := r.Client.Resource(MoveResource).Create(ctx, &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1",
 		"kind":       "ShiftPVMove",
-		"metadata":   map[string]any{"generateName": generateName},
+		"metadata":   map[string]any{"generateName": generateName, "finalizers": []any{MoveProtectionFinalizer}},
 		"spec":       map[string]any{"volumeID": spec.VolumeID, "sourceNode": spec.SourceNode},
 	}}, metav1.CreateOptions{})
 	if err != nil {
@@ -1030,6 +1026,10 @@ func (r *Registry) DeleteMove(ctx context.Context, name, uid string) error {
 		return fmt.Errorf("delete ShiftPVMove: %w", err)
 	}
 	return nil
+}
+
+func (r *Registry) RemoveMoveFinalizer(ctx context.Context, name, uid string) error {
+	return r.updateObjectFinalizer(ctx, MoveResource, name, uid, MoveProtectionFinalizer, false)
 }
 
 func (r *Registry) GetMove(ctx context.Context, name string) (Move, error) {
@@ -1148,6 +1148,9 @@ func (r *Registry) validate() error {
 }
 
 func stateFrom(object *unstructured.Unstructured) (State, error) {
+	requestName, _, _ := unstructured.NestedString(object.Object, "spec", "requestName")
+	initialNode, _, _ := unstructured.NestedString(object.Object, "spec", "initialNode")
+	capacityBytes, _, _ := unstructured.NestedInt64(object.Object, "spec", "capacityBytes")
 	phase, _, _ := unstructured.NestedString(object.Object, "status", "phase")
 	ownerNode, _, _ := unstructured.NestedString(object.Object, "status", "ownerNode")
 	activeMove, _, _ := unstructured.NestedString(object.Object, "status", "activeMove")
@@ -1171,17 +1174,25 @@ func stateFrom(object *unstructured.Unstructured) (State, error) {
 		currentCopy = &copy
 	}
 	return State{
-		UID: string(object.GetUID()), Phase: phase, OwnerNode: ownerNode, ActiveMove: activeMove,
+		UID: string(object.GetUID()), Finalizers: append([]string(nil), object.GetFinalizers()...),
+		RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: initialNode,
+		Phase: phase, OwnerNode: ownerNode, ActiveMove: activeMove,
 		PublishedNodes: publishedNodes, CreationOperationID: creationOperationID, DeletionOperationID: deletionOperationID, CurrentCopy: currentCopy,
 	}, nil
 }
 
 func setState(object *unstructured.Unstructured, state State) {
-	object.Object["status"] = map[string]any{
+	previous, _ := object.Object["status"].(map[string]any)
+	cleanup := previous["cleanup"]
+	next := map[string]any{
 		"phase": state.Phase, "ownerNode": state.OwnerNode, "activeMove": state.ActiveMove,
 		"publishedNodes": stringSliceToAny(state.PublishedNodes),
 	}
-	status := object.Object["status"].(map[string]any)
+	object.Object["status"] = next
+	status := next
+	if cleanup != nil {
+		status["cleanup"] = cleanup
+	}
 	if state.CreationOperationID != "" {
 		status["creationOperationID"] = state.CreationOperationID
 	}
@@ -1203,7 +1214,11 @@ func moveFrom(object *unstructured.Unstructured) (Move, error) {
 	if err != nil {
 		return Move{}, err
 	}
-	return Move{Name: object.GetName(), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(), Spec: MoveSpec{VolumeID: volumeID, SourceNode: sourceNode, Recovery: recovery}, Status: status}, nil
+	return Move{
+		Name: object.GetName(), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(),
+		Finalizers: append([]string(nil), object.GetFinalizers()...),
+		Spec:       MoveSpec{VolumeID: volumeID, SourceNode: sourceNode, Recovery: recovery}, Status: status,
+	}, nil
 }
 
 func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
@@ -1218,6 +1233,7 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 	evictionRequested, _, _ := unstructured.NestedBool(object.Object, "status", "evictionRequested")
 	sourceBytes, _, _ := unstructured.NestedInt64(object.Object, "status", "sourceBytes")
 	capacityApproved, _, _ := unstructured.NestedBool(object.Object, "status", "capacityApproved")
+	cleanupPhase, _, _ := unstructured.NestedString(object.Object, "status", "cleanup", "status", "phase")
 	readCopy := func(name string) (*volume.CopyIdentity, error) {
 		data, found, nestedErr := unstructured.NestedMap(object.Object, "status", name)
 		if nestedErr != nil || !found {
@@ -1252,8 +1268,8 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		ReplacementUID:  read("replacementUID"),
 		DestinationNode: read("destinationNode"), DestinationPoolUID: read("destinationPoolUID"), SourceBytes: sourceBytes, CapacityApproved: capacityApproved,
 		CapacityReason: read("capacityReason"), CandidateNodes: candidates, EvictionRequested: evictionRequested,
-		CopyJobName: read("copyJobName"), PromotionJobName: read("promotionJobName"), CleanupJobName: read("cleanupJobName"),
-		CopyOperationID: read("copyOperationID"), PromotionOperationID: read("promotionOperationID"), CleanupName: read("cleanupName"),
+		CopyJobName: read("copyJobName"), PromotionJobName: read("promotionJobName"), CleanupPhase: cleanupPhase,
+		CopyOperationID: read("copyOperationID"), PromotionOperationID: read("promotionOperationID"),
 		SourceCopy: sourceCopy, IncomingCopy: incomingCopy, DestinationCopy: destinationCopy,
 		RecoveryPhase: read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
 		RecoveryReason: read("recoveryReason"), RecoveryMessage: read("recoveryMessage"),
@@ -1261,7 +1277,9 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 }
 
 func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
-	object.Object["status"] = map[string]any{
+	previous, _ := object.Object["status"].(map[string]any)
+	cleanup := previous["cleanup"]
+	next := map[string]any{
 		"phase": status.Phase, "reason": status.Reason, "message": status.Message,
 		"lastTransitionTime": status.LastTransitionTime, "lastProgressTime": status.LastProgressTime,
 		"persistentVolumeName": status.PersistentVolumeName, "persistentVolumeClaimNamespace": status.ClaimNamespace,
@@ -1271,12 +1289,16 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 		"capacityApproved": status.CapacityApproved, "capacityReason": status.CapacityReason,
 		"candidateNodes":    stringSliceToAny(status.CandidateNodes),
 		"evictionRequested": status.EvictionRequested, "copyJobName": status.CopyJobName,
-		"promotionJobName": status.PromotionJobName, "cleanupJobName": status.CleanupJobName,
-		"copyOperationID": status.CopyOperationID, "promotionOperationID": status.PromotionOperationID, "cleanupName": status.CleanupName,
+		"promotionJobName": status.PromotionJobName,
+		"copyOperationID":  status.CopyOperationID, "promotionOperationID": status.PromotionOperationID,
 		"recoveryPhase": status.RecoveryPhase, "recoveryOwner": status.RecoveryOwner,
 		"recoveryReason": status.RecoveryReason, "recoveryMessage": status.RecoveryMessage,
 	}
-	encoded := object.Object["status"].(map[string]any)
+	object.Object["status"] = next
+	encoded := next
+	if cleanup != nil {
+		encoded["cleanup"] = cleanup
+	}
 	for name, identity := range map[string]*volume.CopyIdentity{"sourceCopy": status.SourceCopy, "incomingCopy": status.IncomingCopy, "destinationCopy": status.DestinationCopy} {
 		if identity == nil {
 			continue

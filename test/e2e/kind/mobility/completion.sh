@@ -6,6 +6,8 @@ set -euo pipefail
 : "${KUBECONFIG:?isolated kubeconfig required}"
 test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}"
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+# shellcheck source=test/e2e/kind/cleanup-journal.sh
+source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
 NAMESPACE=shiftpv-completion-test
 POLICY=shiftpv-completion-test
 EXISTING_NAMESPACE=$(kubectl get namespace "${NAMESPACE}" --ignore-not-found -o name)
@@ -80,27 +82,12 @@ test "$(kubectl -n "${NAMESPACE}" exec deployment/wffc -- sha256sum /data/payloa
 SOURCE_POOL=$(kubectl get shiftpvpools -o jsonpath="{.items[?(@.spec.nodeName=='${SOURCE}')].spec.mountPath}")
 test -n "${SOURCE_POOL}"
 docker exec "${SOURCE}" test ! -e "${SOURCE_POOL}/volumes/${VOLUME}"
-CLEANUP=$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.status.cleanupName}')
 SOURCE_COPY=$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.status.sourceCopy.copyID}')
-test -n "${CLEANUP}"
 test -n "${SOURCE_COPY}"
 docker exec "${SOURCE}" test ! -e "${SOURCE_POOL}/.shiftpv/retired/${SOURCE_COPY}"
-CLEANUP_JOB=$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.status.cleanupJobName}')
+CLEANUP_JOB=$(cleanup_job_name "shiftpvmove/${MOVE}")
 test -n "${CLEANUP_JOB}"
-MOVE_UID=$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.metadata.uid}')
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.status.phase}')" = Completed
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.spec.approved}')" = true
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.spec.reason}')" = MoveSource
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.spec.authority.name}')" = "${MOVE}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.spec.authority.uid}')" = "${MOVE_UID}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.spec.target.copyID}')" = "${SOURCE_COPY}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.spec.target.volumeID}')" = "${VOLUME}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.status.executor.jobName}')" = "${CLEANUP_JOB}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.status.receipt.operationID}')" = "cleanup-${MOVE_UID}"
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.status.receipt.retired}')" = true
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.status.receipt.purged}')" = true
-test -n "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.status.receipt.localReceiptDigest}')"
-test -n "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.status.settledAt}')"
+assert_cleanup_journal "shiftpvmove/${MOVE}" MoveSource "${VOLUME}" "${SOURCE_COPY}" ShiftPVMove
 kubectl -n shiftpv-system delete "job/${CLEANUP_JOB}" --wait=true --timeout=120s
 
 # Normal CSI deletion races with the still-rejected terminal journal.
@@ -119,5 +106,5 @@ if grep -Fxq "job.batch/${CLEANUP_JOB}" <<<"${JOBS}"; then
 	echo 'completion recreated source cleanup work' >&2
 	exit 1
 fi
-test "$(kubectl get "shiftpvcleanup/${CLEANUP}" -o jsonpath='{.status.phase}')" = Completed
+assert_cleanup_journal "shiftpvmove/${MOVE}" MoveSource "${VOLUME}" "${SOURCE_COPY}" ShiftPVMove
 echo "completion journal recovery E2E passed: move=${MOVE} volume=${VOLUME} checksum=${CHECKSUM}; CSI deletion, Job removal and controller restart"

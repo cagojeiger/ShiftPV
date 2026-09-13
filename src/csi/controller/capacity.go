@@ -7,16 +7,12 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
-
-const reservationSelector = poolcapacity.ReservationSelector
 
 type PoolCapacityRegistry interface {
 	ReadyPoolForNode(context.Context, string) (volumeapi.Pool, error)
@@ -28,13 +24,16 @@ type PoolCapacityProbe interface {
 	StatFS(context.Context, string) (poolcapacity.Filesystem, error)
 }
 
-func (s *Service) reserveWithinPool(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, data map[string]string) error {
-	existing, err := s.Client.CoreV1().ConfigMaps(s.Namespace).Get(ctx, id, metav1.GetOptions{})
+func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, nodeName string, requestedBytes int64) (volumeapi.State, error) {
+	existing, err := s.Volumes.Get(ctx, id)
 	if err == nil {
-		return validateReservation(existing, requestName, data)
+		if err := validateCreateIntent(existing, requestName, nodeName, requestedBytes); err != nil {
+			return volumeapi.State{}, err
+		}
+		return s.Volumes.BeginCreate(ctx, id, requestName, nodeName, requestedBytes)
 	}
 	if !apierrors.IsNotFound(err) {
-		return kubernetesAPIError("read volume reservation", err)
+		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
 	}
 
 	unlock := s.poolLifecycles.lock(nodeName)
@@ -44,59 +43,58 @@ func (s *Service) reserveWithinPool(ctx context.Context, id, requestName, nodeNa
 	}
 	defer unlock()
 
-	existing, err = s.Client.CoreV1().ConfigMaps(s.Namespace).Get(ctx, id, metav1.GetOptions{})
+	existing, err = s.Volumes.Get(ctx, id)
 	if err == nil {
-		return validateReservation(existing, requestName, data)
+		if err := validateCreateIntent(existing, requestName, nodeName, requestedBytes); err != nil {
+			return volumeapi.State{}, err
+		}
+		return s.Volumes.BeginCreate(ctx, id, requestName, nodeName, requestedBytes)
 	}
 	if !apierrors.IsNotFound(err) {
-		return kubernetesAPIError("read volume reservation", err)
+		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
 	}
 
 	pool, err := s.CapacityPools.ReadyPoolForNode(ctx, nodeName)
 	if err != nil {
 		if errors.Is(err, volumeapi.ErrPoolConfiguration) || errors.Is(err, volumeapi.ErrPoolNotFound) || errors.Is(err, volumeapi.ErrPoolNotReady) {
-			return status.Errorf(codes.FailedPrecondition, "read selected Pool: %v", err)
+			return volumeapi.State{}, status.Errorf(codes.FailedPrecondition, "read selected Pool: %v", err)
 		}
-		return kubernetesAPIError("read selected Pool", err)
+		return volumeapi.State{}, kubernetesAPIError("read selected Pool", err)
 	}
 	if volumeapi.PoolHasServingVolume(pool, id) {
-		return status.Errorf(codes.FailedPrecondition, "Pool %q already contains a serving copy for volume %q; wait for orphan cleanup", pool.Name, id)
+		return volumeapi.State{}, status.Errorf(codes.FailedPrecondition, "Pool %q already contains a serving copy for volume %q; wait for orphan cleanup", pool.Name, id)
 	}
 	limitBytes, err := poolLimitBytes(pool)
 	if err != nil {
-		return status.Errorf(codes.FailedPrecondition, "Pool %q capacity limit is invalid: %v", pool.Name, err)
+		return volumeapi.State{}, status.Errorf(codes.FailedPrecondition, "Pool %q capacity limit is invalid: %v", pool.Name, err)
 	}
 	reservedBytes, err := s.poolReservedBytes(ctx, nodeName)
 	if err != nil {
-		return err
+		return volumeapi.State{}, err
 	}
 	logicalFree := int64(0)
 	if reservedBytes < limitBytes {
 		logicalFree = limitBytes - reservedBytes
 	}
 	if requestedBytes > logicalFree {
-		return status.Errorf(codes.ResourceExhausted,
+		return volumeapi.State{}, status.Errorf(codes.ResourceExhausted,
 			"Pool %q reservation limit exceeded: requested=%d reserved=%d limit=%d",
 			pool.Name, requestedBytes, reservedBytes, limitBytes)
 	}
 
 	stats, err := s.CapacityProbe.StatFS(ctx, nodeName)
 	if err != nil {
-		return capacityProbeError("inspect Pool filesystem capacity", err)
+		return volumeapi.State{}, capacityProbeError("inspect Pool filesystem capacity", err)
 	}
 	if requestedBytes > stats.AvailableBytes {
-		return status.Errorf(codes.ResourceExhausted,
+		return volumeapi.State{}, status.Errorf(codes.ResourceExhausted,
 			"Pool %q filesystem space is insufficient: requested=%d available=%d",
 			pool.Name, requestedBytes, stats.AvailableBytes)
 	}
-	return s.createReservation(ctx, id, requestName, data)
+	return s.Volumes.BeginCreate(ctx, id, requestName, nodeName, requestedBytes)
 }
 
 func (s *Service) poolReservedBytes(ctx context.Context, nodeName string) (int64, error) {
-	reservations, err := s.Client.CoreV1().ConfigMaps(s.Namespace).List(ctx, metav1.ListOptions{LabelSelector: reservationSelector})
-	if err != nil {
-		return 0, kubernetesAPIError("list volume reservations", err)
-	}
 	volumes, err := s.CapacityPools.ListVolumes(ctx)
 	if err != nil {
 		return 0, kubernetesAPIError("list volume owners", err)
@@ -106,7 +104,7 @@ func (s *Service) poolReservedBytes(ctx context.Context, nodeName string) (int64
 		return 0, kubernetesAPIError("list capacity-approved moves", err)
 	}
 
-	total, err := poolcapacity.ReservedBytes(reservations.Items, volumes, moves, nodeName)
+	total, err := poolcapacity.ReservedBytes(volumes, moves, nodeName)
 	if err != nil {
 		return 0, status.Error(codes.FailedPrecondition, err.Error())
 	}
@@ -131,11 +129,15 @@ func poolLimitBytes(pool volumeapi.Pool) (int64, error) {
 	return value, nil
 }
 
-func validateReservation(existing *corev1.ConfigMap, requestName string, data map[string]string) error {
-	for key, value := range data {
-		if existing.Data[key] != value {
-			return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible %s", requestName, key)
-		}
+func validateCreateIntent(existing volumeapi.State, requestName, nodeName string, capacityBytes int64) error {
+	if existing.RequestName != requestName {
+		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible requestName", requestName)
+	}
+	if existing.InitialNode != nodeName {
+		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible initialNode", requestName)
+	}
+	if existing.CapacityBytes != capacityBytes {
+		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible capacityBytes", requestName)
 	}
 	return nil
 }

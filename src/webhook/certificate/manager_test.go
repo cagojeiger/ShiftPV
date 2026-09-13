@@ -72,7 +72,7 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 		t.Fatalf("runtime CR objectSelector = %#v, want nil", runtime.ObjectSelector)
 	}
 	if len(runtime.Rules) != 2 || !reflect.DeepEqual(runtime.Rules[0].Operations, []admissionv1.OperationType{admissionv1.Delete}) ||
-		!reflect.DeepEqual(runtime.Rules[0].Rule.Resources, []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves", "shiftpvcleanups"}) ||
+		!reflect.DeepEqual(runtime.Rules[0].Rule.Resources, []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves"}) ||
 		!reflect.DeepEqual(runtime.Rules[1].Operations, []admissionv1.OperationType{admissionv1.Update}) ||
 		!reflect.DeepEqual(runtime.Rules[1].Rule.Resources, []string{"shiftpvpools"}) {
 		t.Fatalf("runtime CR rules = %#v", runtime.Rules)
@@ -81,7 +81,8 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 	if crds.ObjectSelector != nil || len(crds.Rules) != 1 || !reflect.DeepEqual(crds.Rules[0].Rule.Resources, []string{"customresourcedefinitions"}) {
 		t.Fatalf("CRD protection = %#v", crds)
 	}
-	if len(crds.MatchConditions) != 1 || !strings.Contains(crds.MatchConditions[0].Expression, "shiftpvpools.shiftpv.io") {
+	wantCRDCondition := "request.name in ['shiftpvpools.shiftpv.io', 'shiftpvvolumes.shiftpv.io', 'shiftpvmoves.shiftpv.io']"
+	if len(crds.MatchConditions) != 1 || crds.MatchConditions[0].Expression != wantCRDCondition {
 		t.Fatalf("CRD protection match conditions = %#v", crds.MatchConditions)
 	}
 

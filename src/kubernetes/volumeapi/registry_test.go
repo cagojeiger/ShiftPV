@@ -25,9 +25,7 @@ func TestStateCASPreservesConcurrentNodePublication(t *testing.T) {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{VolumeResource: "ShiftPVVolumeList"})
 	r := &Registry{Client: client}
 	id := "shiftpv-44444444444444444444444444444444"
-	if err := r.Ensure(ctx, id, "source"); err != nil {
-		t.Fatal(err)
-	}
+	seedReadyVolume(t, client, id, "source")
 	object, err := client.Resource(VolumeResource).Get(ctx, id, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -37,9 +35,7 @@ func TestStateCASPreservesConcurrentNodePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale, _ := r.Get(ctx, id)
-	if err := r.SetPublished(ctx, id, "source", true); err != nil {
-		t.Fatal(err)
-	}
+	setPublishedFixture(t, client, id, "source", true)
 	stale.Phase, stale.ActiveMove = PhaseMoving, "move"
 	if err := r.CompareAndSetState(ctx, id, PhaseReady, "", "source", stale); err != nil {
 		t.Fatal(err)
@@ -52,9 +48,7 @@ func TestStateCASPreservesConcurrentNodePublication(t *testing.T) {
 	if err := r.CompareAndSetState(ctx, id, PhaseMoving, "move", "source", stale); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("foreign publication permitted commit: %v", err)
 	}
-	if err := r.SetPublished(ctx, id, "source", false); err != nil {
-		t.Fatal(err)
-	}
+	setPublishedFixture(t, client, id, "source", false)
 	if err := r.CompareAndSetState(ctx, id, PhaseMoving, "move", "source", stale); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +106,37 @@ func TestRecoveryFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStatusEncodersPreserveEmbeddedCleanupJournal(t *testing.T) {
+	journal := map[string]any{
+		"spec":   map[string]any{"operationID": "cleanup-operation"},
+		"status": map[string]any{"phase": "ConfirmingAbsence"},
+	}
+	volumeObject := &unstructured.Unstructured{Object: map[string]any{"status": map[string]any{"cleanup": journal}}}
+	setState(volumeObject, State{Phase: PhaseDeleting, OwnerNode: "worker-a"})
+	gotVolume, found, err := unstructured.NestedMap(volumeObject.Object, "status", "cleanup")
+	if err != nil || !found || !reflect.DeepEqual(gotVolume, journal) {
+		t.Fatalf("Volume cleanup journal changed: got=%#v found=%t err=%v", gotVolume, found, err)
+	}
+
+	moveObject := &unstructured.Unstructured{Object: map[string]any{"status": map[string]any{
+		"cleanup": journal, "cleanupName": "legacy-cleanup", "cleanupJobName": "legacy-job",
+	}}}
+	setMoveStatus(moveObject, MoveStatus{Phase: "Completing"})
+	gotMove, found, err := unstructured.NestedMap(moveObject.Object, "status", "cleanup")
+	if err != nil || !found || !reflect.DeepEqual(gotMove, journal) {
+		t.Fatalf("Move cleanup journal changed: got=%#v found=%t err=%v", gotMove, found, err)
+	}
+	decoded, err := moveStatusFrom(moveObject)
+	if err != nil || decoded.CleanupPhase != "ConfirmingAbsence" {
+		t.Fatalf("Move cleanup phase was not decoded: status=%#v err=%v", decoded, err)
+	}
+	for _, field := range []string{"cleanupName", "cleanupJobName"} {
+		if _, found, err := unstructured.NestedString(moveObject.Object, "status", field); err != nil || found {
+			t.Fatalf("legacy %s survived Move status encoding: found=%t err=%v", field, found, err)
+		}
+	}
+}
+
 func TestClassifyCopyAuthorityUsesExactCurrentCopy(t *testing.T) {
 	target := volume.CopyIdentity{
 		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
@@ -165,25 +190,13 @@ func TestRegistryLifecycleAndPoolNodes(t *testing.T) {
 	registry := &Registry{Client: client, Now: func() time.Time { return now }}
 	ctx := context.Background()
 
-	if err := registry.Ensure(ctx, "shiftpv-11111111111111111111111111111111", "node-a"); err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
+	seedReadyVolume(t, client, "shiftpv-11111111111111111111111111111111", "node-a")
 	state, err := registry.Get(ctx, "shiftpv-11111111111111111111111111111111")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if state.Phase != PhaseReady || state.OwnerNode != "node-a" {
 		t.Fatalf("state = %#v", state)
-	}
-	if err := registry.SetPublished(ctx, "shiftpv-11111111111111111111111111111111", "node-a", true); err != nil {
-		t.Fatalf("SetPublished(true): %v", err)
-	}
-	state, _ = registry.Get(ctx, "shiftpv-11111111111111111111111111111111")
-	if !reflect.DeepEqual(state.PublishedNodes, []string{"node-a"}) {
-		t.Fatalf("published nodes = %#v", state.PublishedNodes)
-	}
-	if err := registry.SetPublished(ctx, "shiftpv-11111111111111111111111111111111", "node-a", false); err != nil {
-		t.Fatalf("SetPublished(false): %v", err)
 	}
 	nodes, err := registry.PoolNodes(ctx)
 	if err != nil {
@@ -251,7 +264,7 @@ func TestBeginCreatePersistsIdentityBeforeReady(t *testing.T) {
 	})
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
 	volumeID := "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	state, err := registry.BeginCreate(ctx, volumeID, "node-a")
+	state, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +274,7 @@ func TestBeginCreatePersistsIdentityBeforeReady(t *testing.T) {
 	if state.CurrentCopy.InstallationID != "installation-uid" || state.CurrentCopy.PoolUID != "pool-uid" || state.CurrentCopy.VolumeUID != "volume-uid" || state.CurrentCopy.Role != volume.RoleServing {
 		t.Fatalf("copy identity=%#v", state.CurrentCopy)
 	}
-	second, err := registry.BeginCreate(ctx, volumeID, "node-a")
+	second, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64)
 	if err != nil || !reflect.DeepEqual(second, state) {
 		t.Fatalf("idempotent begin=%#v err=%v", second, err)
 	}
@@ -311,6 +324,37 @@ func TestPoolServingCopyConflict(t *testing.T) {
 	}
 }
 
+func TestPoolHasPublishedCopyRequiresExactScannerProof(t *testing.T) {
+	copy := volume.CopyIdentity{
+		InstallationID: "installation-uid", PoolName: "pool-a", PoolUID: "pool-uid",
+		VolumeID: "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", VolumeUID: "volume-uid",
+		CopyID: "copy-a", NodeName: "node-a", Role: volume.RoleServing,
+	}
+	pool := Pool{Name: copy.PoolName, UID: copy.PoolUID, NodeName: copy.NodeName, Status: PoolStatus{Inventory: &PoolInventory{
+		Valid: true, Copies: []CopyObservation{{Identity: &copy, Present: true, Published: true}},
+	}}}
+	if !PoolHasPublishedCopy(pool, &copy) {
+		t.Fatal("exact published serving copy was not accepted")
+	}
+	for name, mutate := range map[string]func(*Pool){
+		"wrong pool name": func(pool *Pool) { pool.Name = "other-pool" },
+		"wrong pool uid":  func(pool *Pool) { pool.UID = "other-uid" },
+		"wrong node":      func(pool *Pool) { pool.NodeName = "other-node" },
+		"not present":     func(pool *Pool) { pool.Status.Inventory.Copies[0].Present = false },
+		"not published":   func(pool *Pool) { pool.Status.Inventory.Copies[0].Published = false },
+		"problem":         func(pool *Pool) { pool.Status.Inventory.Copies[0].Problem = "MountMissing" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := pool
+			changed.Status.Inventory = &PoolInventory{Valid: true, Copies: append([]CopyObservation(nil), pool.Status.Inventory.Copies...)}
+			mutate(&changed)
+			if PoolHasPublishedCopy(changed, &copy) {
+				t.Fatalf("accepted %s as publication proof", name)
+			}
+		})
+	}
+}
+
 func TestBeginCreateRejectsExistingServingCopyBeforeIntent(t *testing.T) {
 	ctx := context.Background()
 	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
@@ -347,7 +391,7 @@ func TestBeginCreateRejectsExistingServingCopyBeforeIntent(t *testing.T) {
 	}, clusterIdentity, registeredPool)
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 1, 0, time.UTC) }}
 
-	if _, err := registry.BeginCreate(ctx, volumeID, "node-a"); !errors.Is(err, ErrPoolCopyConflict) {
+	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); !errors.Is(err, ErrPoolCopyConflict) {
 		t.Fatalf("existing serving copy error = %v", err)
 	}
 	if _, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -362,7 +406,7 @@ func TestBeginCreateRejectsExistingServingCopyBeforeIntent(t *testing.T) {
 	if _, err := client.Resource(VolumeResource).Create(ctx, placeholder, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.BeginCreate(ctx, volumeID, "node-a"); !errors.Is(err, ErrPoolCopyConflict) {
+	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); !errors.Is(err, ErrPoolCopyConflict) {
 		t.Fatalf("uninitialized intent bypassed serving copy conflict: %v", err)
 	}
 	current, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{})
@@ -404,7 +448,7 @@ func TestBeginCreateRejectsReplacementVolumeBeforeStatusWrite(t *testing.T) {
 		return false, nil, nil
 	})
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
-	if _, err := registry.BeginCreate(ctx, volumeID, "node-a"); !errors.Is(err, ErrStateConflict) {
+	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("replacement Volume creation error = %v", err)
 	}
 	current, err := registry.Get(ctx, volumeID)
@@ -432,7 +476,7 @@ func TestBeginCreateResumesExactPendingIdentityWithInvalidInventory(t *testing.T
 	})
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
 	volumeID := "shiftpv-cccccccccccccccccccccccccccccccc"
-	pending, err := registry.BeginCreate(ctx, volumeID, "node-a")
+	pending, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,12 +495,47 @@ func TestBeginCreateResumesExactPendingIdentityWithInvalidInventory(t *testing.T
 		t.Fatalf("invalid inventory remained eligible: %v", err)
 	}
 
-	resumed, err := registry.BeginCreate(ctx, volumeID, "node-a")
+	resumed, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64)
 	if err != nil || !reflect.DeepEqual(resumed, pending) {
 		t.Fatalf("exact pending creation did not resume: state=%#v err=%v", resumed, err)
 	}
-	if _, err := registry.BeginCreate(ctx, "shiftpv-dddddddddddddddddddddddddddddddd", "node-a"); !errors.Is(err, ErrPoolNotReady) {
+	if _, err := registry.BeginCreate(ctx, "shiftpv-dddddddddddddddddddddddddddddddd", "pvc-new", "node-a", 64); !errors.Is(err, ErrPoolNotReady) {
 		t.Fatalf("new creation bypassed invalid inventory: %v", err)
+	}
+}
+
+func TestBeginCreateDoesNotResumeAfterPoolProtectionIsLost(t *testing.T) {
+	ctx := context.Background()
+	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Namespace",
+		"metadata": map[string]any{"name": installationNamespace, "uid": "installation-uid"},
+	}}
+	registeredPool := pool("pool-a", "node-a")
+	registeredPool.SetUID("pool-uid")
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", namespaceResource: "NamespaceList",
+	}, clusterIdentity, registeredPool)
+	client.PrependReactor("create", "shiftpvvolumes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		object := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
+		object.SetUID("volume-uid")
+		return false, nil, nil
+	})
+	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
+	volumeID := "shiftpv-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); err != nil {
+		t.Fatal(err)
+	}
+	currentPool, err := client.Resource(PoolResource).Get(ctx, registeredPool.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPool.SetFinalizers(nil)
+	if _, err := client.Resource(PoolResource).Update(ctx, currentPool, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); !errors.Is(err, ErrPoolNotReady) {
+		t.Fatalf("pending creation resumed without Pool protection: %v", err)
 	}
 }
 
@@ -488,6 +567,33 @@ func TestBeginDeleteFencesPublicationAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestBeginPublishRecordsIntentIdempotently(t *testing.T) {
+	ctx := context.Background()
+	volumeID := "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	copy := volume.CopyIdentity{
+		InstallationID: "installation-uid", PoolName: "pool-a", PoolUID: "pool-uid",
+		VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: "node-a", Role: volume.RoleServing,
+	}
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
+		"metadata": map[string]any{"name": volumeID, "uid": copy.VolumeUID},
+		"spec":     map[string]any{"volumeID": volumeID},
+	}}
+	setState(object, State{UID: copy.VolumeUID, Phase: PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy})
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{VolumeResource: "ShiftPVVolumeList"}, object)
+	registry := &Registry{Client: client}
+
+	for range 2 {
+		if err := registry.BeginPublish(ctx, volumeID, copy.NodeName, copy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := registry.Get(ctx, volumeID)
+	if err != nil || !reflect.DeepEqual(state.PublishedNodes, []string{copy.NodeName}) {
+		t.Fatalf("publish intent=%#v err=%v", state.PublishedNodes, err)
+	}
+}
+
 func TestBeginDeleteRejectsPublishedOrChangedIdentity(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-dddddddddddddddddddddddddddddddd"
@@ -506,7 +612,7 @@ func TestBeginDeleteRejectsPublishedOrChangedIdentity(t *testing.T) {
 	if _, err := registry.BeginDelete(ctx, volumeID, copy.VolumeUID, copy); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("published copy was fenced for deletion: %v", err)
 	}
-	if err := registry.SetPublished(ctx, volumeID, copy.NodeName, false); err != nil {
+	if err := registry.ReconcilePublished(ctx, volumeID, copy.NodeName, copy, false); err != nil {
 		t.Fatal(err)
 	}
 	replacement := copy
@@ -592,9 +698,11 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 	deletionTime := metav1.NewTime(now.Add(-time.Second))
 	deleting.SetDeletionTimestamp(&deletionTime)
 	deleting.SetFinalizers([]string{PoolProtectionFinalizer})
+	unprotected := pool("unprotected", "node-unprotected")
+	unprotected.SetFinalizers(nil)
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		PoolResource: "ShiftPVPoolList",
-	}, ready, stale, outdated, conditionOutdated, pending, missingInventory, invalidInventory, staleInventory, truncated, deleting)
+	}, ready, stale, outdated, conditionOutdated, pending, missingInventory, invalidInventory, staleInventory, truncated, deleting, unprotected)
 	registry := &Registry{Client: client, Now: func() time.Time { return now }}
 
 	pools, err := registry.ReadyPools(context.Background())
@@ -605,7 +713,7 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 		t.Fatalf("ready pools = %#v", pools)
 	}
 	nodes, err := registry.PoolNodes(context.Background())
-	if err != nil || len(nodes) != 10 || !slices.Contains(nodes, "node-deleting") {
+	if err != nil || len(nodes) != 11 || !slices.Contains(nodes, "node-deleting") {
 		t.Fatalf("registered topology nodes = %#v err=%v", nodes, err)
 	}
 	if _, err := registry.ReadyPoolForNode(context.Background(), "node-stale"); !errors.Is(err, ErrPoolNotReady) {
@@ -616,6 +724,9 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 	}
 	if _, err := registry.ReadyPoolForNode(context.Background(), "node-deleting"); !errors.Is(err, ErrPoolNotReady) || !strings.Contains(err.Error(), "PoolDeregistering") {
 		t.Fatalf("deleting pool error = %v", err)
+	}
+	if _, err := registry.ReadyPoolForNode(context.Background(), "node-unprotected"); !errors.Is(err, ErrPoolNotReady) || !strings.Contains(err.Error(), "PoolProtectionMissing") {
+		t.Fatalf("unprotected pool error = %v", err)
 	}
 	for node, reason := range map[string]string{
 		"node-missing-inventory": "InventoryMissing",
@@ -631,6 +742,7 @@ func TestRegistryReadyPoolsRejectsMissingStaleAndOutdatedStatus(t *testing.T) {
 func TestRegistryMaintainsExactPoolProtectionFinalizer(t *testing.T) {
 	object := pool("pool-a", "node-a")
 	object.SetUID("pool-a-uid")
+	object.SetFinalizers(nil)
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		PoolResource: "ShiftPVPoolList",
 	}, object)
@@ -674,6 +786,70 @@ func TestRegistryMaintainsExactPoolProtectionFinalizer(t *testing.T) {
 	current, err = client.Resource(PoolResource).Get(ctx, "pool-a", metav1.GetOptions{})
 	if err != nil || len(current.GetFinalizers()) != 0 {
 		t.Fatalf("finalizers=%v err=%v", current.GetFinalizers(), err)
+	}
+}
+
+func TestRegistryRemovesVolumeAndMoveProtectionFinalizers(t *testing.T) {
+	ctx := context.Background()
+	volumeID := "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	volumeObject := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
+		"metadata": map[string]any{"name": volumeID, "uid": "volume-uid", "finalizers": []any{VolumeProtectionFinalizer, "example.io/keep"}},
+		"spec":     map[string]any{"volumeID": volumeID},
+	}}
+	moveObject := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
+		"metadata": map[string]any{"name": "move-a", "uid": "move-uid", "finalizers": []any{MoveProtectionFinalizer, "example.io/keep"}},
+		"spec":     map[string]any{"volumeID": volumeID, "sourceNode": "node-a"},
+	}}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		VolumeResource: "ShiftPVVolumeList", MoveResource: "ShiftPVMoveList",
+	}, volumeObject, moveObject)
+	registry := &Registry{Client: client}
+
+	if err := registry.RemoveVolumeFinalizer(ctx, volumeID, "volume-uid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RemoveMoveFinalizer(ctx, "move-a", "move-uid"); err != nil {
+		t.Fatal(err)
+	}
+	for resource, name := range map[schema.GroupVersionResource]string{VolumeResource: volumeID, MoveResource: "move-a"} {
+		object, err := client.Resource(resource).Get(ctx, name, metav1.GetOptions{})
+		if err != nil || !reflect.DeepEqual(object.GetFinalizers(), []string{"example.io/keep"}) {
+			t.Fatalf("%s finalizers=%v err=%v", name, object.GetFinalizers(), err)
+		}
+	}
+	if err := registry.RemoveMoveFinalizer(ctx, "move-a", "move-uid"); err != nil {
+		t.Fatalf("idempotent finalizer removal: %v", err)
+	}
+	if err := client.Resource(MoveResource).Delete(ctx, "move-a", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RemoveMoveFinalizer(ctx, "move-a", "move-uid"); err != nil {
+		t.Fatalf("missing Move finalizer removal: %v", err)
+	}
+}
+
+func TestMoveCapacityHoldPredicates(t *testing.T) {
+	state := State{OwnerNode: "source", ActiveMove: "move-a"}
+	move := Move{
+		Name:   "move-a",
+		Status: MoveStatus{DestinationNode: "destination", CapacityApproved: true},
+	}
+	if !MoveReservesDestination(move, state, "destination") || MoveReservesDestination(move, state, "source") {
+		t.Fatalf("unexpected destination hold: move=%#v state=%#v", move, state)
+	}
+	move.Status = MoveStatus{Phase: "Succeeded", CleanupPhase: "Completed"}
+	if !MoveCleanupSettled(move) {
+		t.Fatal("Succeeded Move with completed cleanup was not settled")
+	}
+	move.Status = MoveStatus{Phase: "Blocked", RecoveryPhase: "Recovered", CapacityReason: "RecoverySettled"}
+	if !MoveCleanupSettled(move) {
+		t.Fatal("recovered Move with released capacity was not settled")
+	}
+	move.Status.CapacityApproved = true
+	if MoveCleanupSettled(move) {
+		t.Fatal("recovered Move with a capacity hold was settled")
 	}
 }
 
@@ -848,8 +1024,8 @@ func TestRegistryPoolForNodeRejectsMissingAndDuplicateRegistration(t *testing.T)
 	}
 }
 
-func TestRegistryRejectsMissingConfigurationAndOwnerConflict(t *testing.T) {
-	if err := (&Registry{}).Ensure(context.Background(), "volume", "node"); err == nil {
+func TestRegistryRejectsMissingConfigurationAndEmptyPools(t *testing.T) {
+	if _, err := (&Registry{}).Get(context.Background(), "volume"); err == nil {
 		t.Fatal("expected missing client error")
 	}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
@@ -859,13 +1035,6 @@ func TestRegistryRejectsMissingConfigurationAndOwnerConflict(t *testing.T) {
 	})
 	registry := &Registry{Client: client}
 	ctx := context.Background()
-	volumeID := "shiftpv-22222222222222222222222222222222"
-	if err := registry.Ensure(ctx, volumeID, "node-a"); err != nil {
-		t.Fatalf("first Ensure: %v", err)
-	}
-	if err := registry.Ensure(ctx, volumeID, "node-b"); err == nil {
-		t.Fatal("expected owner conflict")
-	}
 	if _, err := registry.PoolNodes(ctx); err == nil {
 		t.Fatal("expected empty pool error")
 	}
@@ -883,9 +1052,7 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", MoveResource: "ShiftPVMoveList",
 	}, pool("pool-a", "node-a"), moveObject)
 	registry := &Registry{Client: client}
-	if err := registry.Ensure(ctx, volumeID, "node-a"); err != nil {
-		t.Fatal(err)
-	}
+	seedReadyVolume(t, client, volumeID, "node-a")
 	createdVolume, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -977,6 +1144,9 @@ func TestRegistryCreateMove(t *testing.T) {
 	if move.Name != "move-volume-abcde" || move.Spec.VolumeID != "volume" || move.Spec.SourceNode != "source" {
 		t.Fatalf("move = %#v", move)
 	}
+	if !slices.Contains(move.Finalizers, MoveProtectionFinalizer) {
+		t.Fatalf("move finalizers = %v", move.Finalizers)
+	}
 }
 
 func TestRegistryDeleteMoveUsesUIDPreconditionAndIsIdempotent(t *testing.T) {
@@ -1024,7 +1194,10 @@ func pool(name, nodeName string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1",
 		"kind":       "ShiftPVPool",
-		"metadata":   map[string]any{"name": name, "generation": int64(1)},
+		"metadata": map[string]any{
+			"name": name, "generation": int64(1),
+			"finalizers": []any{PoolProtectionFinalizer},
+		},
 		"spec": map[string]any{
 			"nodeName": nodeName, "mountPath": "/mnt/shiftpv",
 			"capacity": map[string]any{"limit": "10Gi"},
@@ -1040,4 +1213,44 @@ func pool(name, nodeName string) *unstructured.Unstructured {
 			}},
 		},
 	}}
+}
+
+func seedReadyVolume(t *testing.T, client *dynamicfake.FakeDynamicClient, volumeID, ownerNode string) {
+	t.Helper()
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1",
+		"kind":       "ShiftPVVolume",
+		"metadata": map[string]any{
+			"name": volumeID, "finalizers": []any{VolumeProtectionFinalizer},
+		},
+		"spec": map[string]any{
+			"volumeID": volumeID, "requestName": volumeID,
+			"initialNode": ownerNode, "capacityBytes": int64(1),
+		},
+	}}
+	setState(object, State{Phase: PhaseReady, OwnerNode: ownerNode})
+	if _, err := client.Resource(VolumeResource).Create(context.Background(), object, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed ready ShiftPVVolume: %v", err)
+	}
+}
+
+func setPublishedFixture(t *testing.T, client *dynamicfake.FakeDynamicClient, volumeID, nodeName string, published bool) {
+	t.Helper()
+	resource := client.Resource(VolumeResource)
+	object, err := resource.Get(context.Background(), volumeID, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get ShiftPVVolume fixture: %v", err)
+	}
+	state, err := stateFrom(object)
+	if err != nil {
+		t.Fatalf("decode ShiftPVVolume fixture: %v", err)
+	}
+	state.PublishedNodes = slices.DeleteFunc(state.PublishedNodes, func(node string) bool { return node == nodeName })
+	if published {
+		state.PublishedNodes = append(state.PublishedNodes, nodeName)
+	}
+	setState(object, state)
+	if _, err := resource.UpdateStatus(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update ShiftPVVolume fixture: %v", err)
+	}
 }

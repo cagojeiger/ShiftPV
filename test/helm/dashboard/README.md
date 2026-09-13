@@ -2,8 +2,8 @@
 
 | Cluster selector | Synthetic state |
 |---|---|
-| `preview-healthy` | Two fresh Pools, 64Mi unregistered reservation |
-| `preview-degraded` | One failed scrape/probe and invalid accounting, one blocked Volume/Move |
+| `preview-healthy` | Two fresh Pools with consistent Volume/Move holds |
+| `preview-degraded` | One failed scan and invalid hold accounting, one `NeedsReview` Volume/Move |
 | `preview-stale` | Last observation 10 minutes ago |
 | `preview-never` | One node has never completed a successful observation |
 | `preview-missing` | No metrics |

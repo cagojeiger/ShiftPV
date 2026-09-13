@@ -1,280 +1,176 @@
 # Volume Mobility Contract
 
-ShiftPV는 healthy owner node가 cordon되면 RWO Filesystem volume을 다른 등록 Pool로 cold migration한다.
-PVC, PV, CSI volume handle은 유지하며 source I/O를 멈춘 뒤 copy한다.
+Status: target contract, not a runtime guarantee until implementation gates pass.
 
-## Responsibility
+ShiftPV moves one RWO Filesystem PVC from its current node-local owner to another
+registered Pool. PVC, PV, and CSI volume handle identity remain stable. The
+operation is eventually consistent when interrupted nodes or disks later return;
+permanent authoritative disk or node loss is outside this contract.
 
-```mermaid
-flowchart LR
-    W[Workload controller] --> H[Placement Hold]
-    H --> S[kube-scheduler]
-    S --> M[Move FSM]
-    M --> C[Exact copy + promote]
-    C --> O[Owner commit]
-    O --> G[Cleanup contract]
-```
+## Authority
 
-| 관심사 | 소유자 |
+| Rule | Contract |
 |---|---|
-| replacement Pod와 replica | Deployment / StatefulSet controller |
-| node 제약, resource fit | kube-scheduler |
-| disruption 허용 | Eviction API와 PDB |
-| Hold, copy, owner commit | ShiftPV Move FSM |
-| source 삭제 | `ShiftPVCleanup` lifecycle |
-| 정상 I/O | owner node의 CSI bind mount |
+| Commit | Exact owner CAS is the only commit boundary. |
+| Before commit | Source remains authoritative; abort or recovery returns to source. |
+| After commit | Destination is authoritative; recovery only moves forward. |
+| Partial copies | Incoming or incomplete copies never promote and never become owner. |
+| Publish proof | Destination actual-publish proof is required before source cleanup. |
+| Cleanup owner | The Move journal and finalizer own source and rollback cleanup decisions. |
+| Executors | Helper Jobs perform effects only; they own no truth. |
+| Identity contradiction | Move enters `Blocked`; cleanup subjournals may enter `NeedsReview`. |
 
-## Trigger and input
+`activeMove` is the per-volume lock. The Move keeps it until source cleanup has
+an API purge receipt and a fresh absence proof. Before commit, capacity is held
+for the source owner and the destination incoming copy. After commit, the Volume
+holds destination capacity and the Move continues holding the retained source
+until both API purge receipt and fresh absence proof exist.
 
-| 필수 입력 | 조건 |
-|---|---|
-| Volume | Bound RWO Filesystem, `Ready`, 빈 `activeMove` |
-| Source | current owner Node와 Pool이 Ready이고 Node가 cordon |
-| Consumer | controller-owned Pod 하나, ShiftPV PVC 하나 |
-| Namespace | `shiftpv.io/admission=enabled` |
-| Destination | schedulable Ready Pool 하나 이상, bounded inventory가 완전함 |
-
-Cordon(`Node.spec.unschedulable=true`)이 이동 신호다. Pending/Unschedulable Pod status, unavailable source,
-bare Pod, custom scheduler, 여러 consumer, 한 Pod의 여러 ShiftPV PVC는 자동 이동 입력이 아니다.
-
-## Preflight and placement
-
-| 검사 | 통과 조건 |
-|---|---|
-| Binding | PVC UID, PV claimRef UID, CSI handle 일치 |
-| Workload | live owner UID와 template 일치 |
-| Constraints | selector, required affinity, PV affinity에 맞는 candidate 존재 |
-| Taints | source와 candidate가 현재 taint를 tolerate |
-| PDB | 최신 generation이며 eviction allowance가 양수 |
-| Scheduling model | Placement Hold와 reservation Pod로 표현 가능 |
-
-Inter-Pod affinity, topology spread, resource claim, inline/ephemeral CSI는 자동 입력에서 제외한다.
-Lock 전 보류는 원 Pod와 Ready owner를 유지한다. kube-scheduler는 Move UID가 소유한 reservation Pod를
-배치하고, Controller는 선택된 node를 journal에 저장한다.
+## Flow
 
 ```text
-workload owner → replacement Pod + Placement Hold
-ShiftPV        → reservation Pod → scheduler-selected destination
-owner commit   → reservation 제거 → destination pin → Hold 해제
+source owner
+  -> lock volume and evict consumer
+  -> wait for source unpublish
+  -> create replacement placement
+  -> reserve destination capacity
+  -> copy to destination incoming
+  -> promote destination serving copy
+  -> owner CAS commit
+  -> release destination placement
+  -> prove destination is actually published
+  -> source cleanup
+  -> fresh absence proof
+  -> release Move/finalizer/source capacity
 ```
 
-## Authority model
+## Preflight And Placement
 
-| Resource | 단일 책임 |
-|---|---|
-| `ShiftPVPool` | node와 기존 Pool directory, readiness, bounded copy inventory |
-| `ShiftPVVolume` | current owner, current copy, phase, publication, active Move |
-| `ShiftPVMove` | source-to-destination transaction journal |
-| `ShiftPVCleanup` | exact copy 삭제 intent, executor, receipt, settlement |
+0.4 keeps preflight small. A Move may start only for a Ready RWO Filesystem
+Volume with one authoritative owner, no active Move, no contradictory PV/PVC
+identity, and at least one destination Pool whose inventory is fresh and
+complete. Scheduler fit and disruption policy are inputs to the Move journal;
+they are not source cleanup authority.
+
+## Reconcile Loop
+
+Each reconcile cycle observes current metadata and node evidence, chooses one
+action, persists the journal result, and observes again. API timeouts and lost
+responses are resolved by read-back of deterministic names, UID ownership, CAS
+results, and purge receipts. Repeated reconciliation is valid only when every
+failure exit either retries automatically, waits for a recoverable node, or
+preserves data in `Blocked` or a cleanup subjournal `NeedsReview`.
+
+## Copy Contract
+
+Copy uses an exact, identity-bound source and destination path. The source opens
+read-only after source publication has quiesced. The destination writes to an
+incoming copy and promotes only after verification.
+
+Required copy command semantics:
 
 ```text
-commit 전  authoritative copy = source Serving copy
-commit 후  authoritative copy = destination Serving copy
+rsync -aHAXS --numeric-ids --one-file-system --no-devices --delete --fsync
 ```
 
-`activeMove`는 Volume lock이다. 최초 lock부터 source cleanup `Completed` 확인 뒤 최종 성공 처리까지
-유지한다. Copy identity는 installation, Pool, Volume, copy, node, role의 incarnation 전체를 포함한다.
+The copy must be followed by checksum verification before promotion. `--fsync`
+reduces the crash window, but real power-loss durability still needs dedicated
+fault validation on the target filesystem and host configuration.
 
-## Reconcile loop
+Nested filesystem traversal and device-node recreation are explicitly excluded
+from the Volume data contract by the copy options. The supported data set is
+verified with the same exclusions before promotion.
 
-```mermaid
-flowchart LR
-    O[Observe] --> D[Pure FSM decision]
-    D --> A[One action]
-    A --> J[Persist journal]
-    J --> E[Watch event or 30s safety tick]
-    E --> O
-```
+## State Table
 
-| 결과 | 수렴 규칙 |
-|---|---|
-| API timeout / throttling | 같은 phase에서 재관찰 |
-| action 응답 유실 | 결정적 이름, UID, CAS 결과를 read-back |
-| 조건 미충족 | 현재 owner와 phase를 유지하며 대기 |
-| terminal safety failure | `Blocked`; 자동 owner 변경 없음 |
-| Controller 재시작 | CR journal과 Helper 리소스에서 재개 |
-
-## Move FSM
-
-```mermaid
-stateDiagram-v2
-    [*] --> Pending
-    Pending --> Locking
-    Locking --> Evicting
-    Evicting --> WaitingForUnpublish
-    WaitingForUnpublish --> WaitingForReplacement
-    WaitingForReplacement --> WaitingForDestination
-    WaitingForDestination --> WaitingForCapacity
-    WaitingForCapacity --> Copying
-    Copying --> Promoting
-    Promoting --> Committing
-    Committing --> ReleasingDestination
-    ReleasingDestination --> WaitingForDestinationPublish
-    WaitingForDestinationPublish --> CleaningSource
-    CleaningSource --> Completing
-    Completing --> Succeeded
-    Pending --> Blocked
-    Locking --> Blocked
-    Evicting --> Blocked
-    WaitingForUnpublish --> Blocked
-    WaitingForReplacement --> Blocked
-    WaitingForDestination --> Blocked
-    WaitingForCapacity --> Blocked
-    Copying --> Blocked
-    Promoting --> Blocked
-    Committing --> Blocked
-    ReleasingDestination --> Blocked
-    WaitingForDestinationPublish --> Blocked
-    CleaningSource --> Blocked
-    Blocked --> Blocked
-    Succeeded --> Succeeded
-```
-
-### Transitions
-
-| Phase | 완료 관찰 | Action |
+| State | Entry condition | Allowed next step |
 |---|---|---|
-| `Pending` | preflight 통과 | `LockVolume` |
-| `Locking` | source owner + `Moving` + active Move | `EvictConsumer` |
-| `Evicting` | 원 consumer 부재 | `Wait` |
-| `WaitingForUnpublish` | source publication 부재 | `Wait` |
-| `WaitingForReplacement` | held replacement 존재 | `EnsurePlacement` |
-| `WaitingForDestination` | reservation이 Ready Pool에 배치 | `EnsureCapacity` |
-| `WaitingForCapacity` | capacity 승인과 copy identities 영속화 | `EnsureCopy` |
-| `Copying` | exact copy Job과 checksum 완료 | `EnsurePromotion` |
-| `Promoting` | incoming을 destination Serving으로 atomic rename | `CommitOwner` |
-| `Committing` | destination owner/Ready/currentCopy read-back | `DeletePlacement` |
-| `ReleasingDestination` | reservation 부재 | `ReleasePlacement` |
-| `WaitingForDestinationPublish` | destination publication 확인 | `EnsureCleanup` |
-| `CleaningSource` | source cleanup `Completed` | `ConfirmCleanup` |
-| `Completing` | destination authority 유지 또는 Volume NotFound | `MarkSucceeded` |
-| `Succeeded` | terminal | `Wait` |
-| `Blocked` | terminal; recovery journal은 별도 진행 | `Wait` |
+| `Pending` | Volume is Ready, RWO Filesystem, one active owner, no active Move | Validate preconditions |
+| `Locking` | Preconditions pass | Acquire `activeMove` by CAS |
+| `Evicting` | Move lock held, source still owner | Evict the current consumer or wait if eviction is already requested |
+| `WaitingForUnpublish` | Consumer is gone | Wait until source publication is absent |
+| `WaitingForReplacement` | Source is unpublished | Wait for a replacement claim/placement object |
+| `WaitingForDestination` | Replacement exists and its hold is intact | Ensure destination placement and node readiness |
+| `WaitingForCapacity` | Destination placement is scheduled and usable | Reserve destination capacity |
+| `Copying` | Destination capacity hold is approved | Copy into destination incoming path |
+| `Promoting` | Checksum and identities match | Promote incoming to destination serving copy |
+| `Committing` | Destination serving copy exists | CAS owner/currentCopy to destination |
+| `ReleasingDestination` | Owner CAS read-back proves destination owner | Delete/release the temporary destination placement |
+| `WaitingForDestinationPublish` | Destination placement is released | Wait for actual destination publish proof |
+| `CleaningSource` | Destination publish proof exists | Retire and purge exact source copy |
+| `Completing` | Cleanup API receipt and post-receipt absence proof are complete | Release `activeMove` and retained source capacity |
+| `Succeeded` | Cleanup settled, capacity released, `activeMove` cleared | Terminal |
+| `Blocked` | Identity, inventory, receipt, or authority contradiction | Preserve data; no destructive action |
 
-### Actions
+## Publication And Inventory Fence
 
-| Action | 효과 |
+Cleanup absence proof comes from a valid, complete Pool scan whose
+`status.observedGeneration` matches the current Pool `metadata.generation` and is
+at or after the cleanup journal's post-receipt `requiredGeneration` fence.
+Superseded observations cannot prove absence.
+
+Publication proof uses two signals. `status.publishedNodes` is the API-side
+intent and CAS fence maintained by the node service after inspecting real mount
+references. The actual destination publication proof is the destination Pool's
+fresh valid complete inventory entry for the exact destination serving copy with
+`published=true`. The scanner observes mount references; it is not the same
+critical section as the CSI publish/unpublish filesystem lock, so freshness and
+generation fences remain part of the authority.
+
+Fresh proof requires all of the following:
+
+| Proof | Required evidence |
 |---|---|
-| `Wait` | 다음 관찰 대기 |
-| `LockVolume` | source owner와 active Move CAS |
-| `EvictConsumer` | Pod UID-bound Eviction API |
-| `EnsurePlacement` | scheduler reservation 생성 |
-| `EnsureCapacity` | logical/physical copy admission |
-| `DeletePlacement` | exact reservation UID 삭제 |
-| `ReleasePlacement` | destination pin과 Placement Hold 해제 |
-| `EnsureCopy` | identities 영속화와 copy helper 요청 |
-| `EnsurePromotion` | incoming promotion helper 요청 |
-| `CommitOwner` | destination owner/currentCopy CAS |
-| `EnsureCleanup` | approved exact source Cleanup 생성 |
-| `ConfirmCleanup` | Cleanup `Completed` 확인 |
-| `MarkSucceeded` | transfer resource 정리와 active Move 해제 |
-| `MarkBlocked` | owner를 유지한 실패 journal 기록 |
+| Source quiesced | `NodeUnpublish` inspected the real mount under the local lock and cleared the matching API publication fence |
+| Destination published | `publishedNodes` contains destination and fresh Pool inventory marks the exact destination serving copy as published |
+| Source cleanup-ready | Source copy is not current owner, not in-flight, and has no live source publication |
+| Cleanup settled | API purge receipt plus fresh complete absence proof |
 
-### Execution boundary
+If a scan is incomplete, stale, truncated, or generation-ambiguous, the Move or
+cleanup subjournal waits; it does not infer absence.
 
-Helper는 action의 파일 효과만 실행하며 다음 phase를 선택하지 않는다.
+## Recovery Matrix
 
-## Copy, commit and cleanup
-
-```text
-source       <source Pool>/volumes/<volumeID>/
-incoming     <destination Pool>/.shiftpv/incoming/<incomingCopyID>/
-destination <destination Pool>/volumes/<volumeID>/
-retired      <source Pool>/.shiftpv/retired/<sourceCopyID>/
-```
-
-```mermaid
-sequenceDiagram
-    participant S as Source helper
-    participant D as Destination helper
-    participant V as ShiftPVVolume
-    participant P as Destination Pod
-    participant G as Cleanup loop
-
-    S->>S: verify source API + local copy identity
-    S->>D: authenticated read-only rsync
-    D->>D: checksum dry-run
-    D->>D: incoming → final atomic rename
-    D->>V: owner + currentCopy CAS
-    V->>P: release Placement Hold
-    P->>V: destination publish
-    V->>G: approved exact source cleanup
-    G->>S: source → retired → purge
-    G->>V: durable receipt + Completed
-```
-
-Transfer Secret, ConfigMap, source Pod, Service, copy Job과 promotion Job은 deterministic name과 exact
-Move UID owner reference를 사용한다. 기존 이름의 다른 Move incarnation은 재사용하거나 삭제하지 않는다.
-Source daemon은 현재 CSIDriver, Pool, Volume, Move, local Serving marker를 확인한 뒤 read-only rsync를 연다.
-Destination helper는 API authority를 작업 전후 확인하고 volume lock 아래 copy/promotion을 실행한다.
-Helper가 directory 생성 또는 atomic rename 뒤 placement marker 기록 전에 중단되면 Controller는 활성 Move의
-정확한 incoming/serving 경로만 같은 action으로 재진입시킨다. Move·Volume·Pool·copy·operation identity와
-fresh bounded inventory가 모두 일치해야 하며, 완료된 Job은 정상 inventory가 다시 관찰된 뒤에만 다음
-authority phase로 진행한다.
-
-Move capacity admission은 requested bytes의 논리 reservation과 source apparent bytes 대비 destination
-filesystem available bytes를 함께 검사한다. 이는 copy admission이며 개별 PVC write quota나 filesystem
-block 예약이 아니다. 승인 뒤 외부 writer가 공간을 소진해 copy가 실패하면 source authority와 data를
-보존한 `Blocked/CopyFailed`로 끝난다. 공간 복구만으로 terminal Move를 재개하지 않으며 운영자가
-`ResumeOwner` recovery를 요청한 뒤 새 이동 조건을 다시 평가한다.
-
-Source 삭제의 상태·실패·orphan 판정은 [`source-cleanup.md`](source-cleanup.md)가 소유한다.
-
-## Blocked recovery
-
-`ResumeOwner`는 기록된 current owner만 다시 연다.
-
-```bash
-kubectl patch shiftpvmove <move-name> --type=merge \
-  -p '{"spec":{"recovery":"ResumeOwner"}}'
-```
-
-```mermaid
-stateDiagram-v2
-    [*] --> Quiescing
-    Quiescing --> Verifying
-    Verifying --> Retiring
-    Retiring --> Resuming
-    Resuming --> Completing
-    Completing --> Recovered
-```
-
-| Recovery phase | 현재 동작 |
+| Failure point | Recovery rule |
 |---|---|
-| `Quiescing` | exact Move UID의 helper Job/Pod 종료 확인 |
-| `Verifying` | current owner Serving copy를 read-only로 검증 |
-| `Retiring` | non-owner copy를 변경하지 않고 inventory/GC 검토 대상으로 보존 |
-| `Resuming` | 같은 owner를 `Ready`로 CAS |
-| `Completing` | owner publish와 recovery resource 정리 |
-| `Recovered` | `activeMove` 해제, 같은 owner 유지 |
+| Source down before commit | Wait. When source returns, source owner is still authoritative. |
+| Destination down before commit | Wait or abort to source. Incoming copy is not authoritative. |
+| Copy partial or checksum mismatch | Preserve source; mark the Move `Blocked` or retry before promotion only. |
+| API response lost before commit | Read back owner/currentCopy; source remains owner unless CAS is proven. |
+| API response lost during owner CAS | Read back exact owner/currentCopy. CAS success means postcommit path. |
+| Destination down after commit | Wait. Destination owner remains authoritative and resumes forward. |
+| Source down after commit | Wait for source return; cleanup resumes after authority and publication checks. |
+| Cleanup unlink happened before receipt | Re-run the exact idempotent effect, reconstruct its local result, then require API receipt and a later fresh absence proof. |
+| Identity contradiction | Move `Blocked` or cleanup subjournal `NeedsReview`; no automatic delete, rollback, or owner switch. |
+| Unknown orphan | Report only; never auto-delete. |
+| Permanent authoritative disk/node loss | Out of scope; operator recovery required. |
 
-Source rollback은 수행하지 않는다. recovery가 current owner를 확정하면 non-owner copy는 Move 권한에서
-분리되고 bounded inventory가 unapproved `OrphanReclaim` cleanup으로 `NeedsReview`에 수렴시킨다.
-운영자 승인 뒤에도 current/in-flight identity, mount, Pool incarnation을 다시 확인한 exact copy만 삭제한다.
+## Blocked Recovery
 
-## Safety invariants
+Blocked recovery never guesses a new owner. Before owner CAS, recovery verifies
+the source owner and either resumes from source or aborts the Move. After owner
+CAS, recovery verifies the destination owner and only converges forward through
+destination publish, source cleanup, receipt settlement, and capacity release.
+If either side returns with contradictory identity, the Move remains
+`Blocked`, or the relevant cleanup subjournal remains `NeedsReview`.
 
-| 순서 | 불변식 |
-|---:|---|
-| 1 | Source unpublish 뒤 source daemon과 copy 시작 |
-| 2 | Source와 incoming exact identity 확인 |
-| 3 | checksum 완료 뒤 same-filesystem promotion |
-| 4 | destination Serving identity 영속화 뒤 owner CAS |
-| 5 | owner read-back 뒤 workload release |
-| 6 | destination publish 뒤 source cleanup 승인 |
-| 7 | purged receipt settlement 뒤 `activeMove` 해제 |
-| 8 | 불명확한 identity는 data 보존과 `NeedsReview` |
+Recovery has its own subphase journal on the blocked Move:
+`Quiescing -> Verifying -> Retiring -> Resuming -> Completing -> Recovered`.
+Precommit recovery does not create a separate `Aborted` Move phase. Its terminal
+representation is the original Move remaining `Blocked` with
+`status.recoveryPhase=Recovered`, while the Volume is back to source `Ready` and
+`activeMove` is cleared.
 
-## Limits
+## Safety Invariants
 
-| 속성 | 현재 경계 |
+| Invariant | Meaning |
 |---|---|
-| Controller | replica 1, `Recreate` strategy |
-| Data model | single-owner planned cold migration |
-| Waiting | 조건 기반; phase deadline 없음 |
-| Source failure | unavailable-node failover 없음 |
-| Replication, backup | 외부 시스템 |
-| Scheduling | 지원 가능한 단일-consumer workload |
+| One owner | Only one committed owner copy exists in metadata at a time. |
+| One commit | Only owner CAS changes authoritative ownership. |
+| Forward after commit | Postcommit recovery never rolls back to source. |
+| Delete after publish | Source cleanup cannot start before destination actual-publish proof. |
+| Fresh absence | Completion and capacity release require fresh absence proof after purge receipt. |
+| Bounded destructiveness | Unknown paths, stale observations, and contradictory identity preserve data. |
 
-운영자는 이동 완료를 확인한 뒤 drain을 진행한다. 검증 방법은
-[`development/testing.md`](../development/testing.md)에 있다.
+The corresponding cleanup rules are defined in
+[`source-cleanup.md`](source-cleanup.md).

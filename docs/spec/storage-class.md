@@ -1,16 +1,8 @@
 # StorageClass Contract
 
-ShiftPV는 등록된 node Pool의 directory를 PVC로 동적 provisioning한다.
+> **Status:** ShiftPV 0.4 구현·검증 목표다. 모든 acceptance gate가 끝나야 runtime 보증이 된다.
 
-```mermaid
-flowchart LR
-    POD[첫 consumer] --> WFFC[WaitForFirstConsumer]
-    WFFC --> NODE[선택된 node]
-    NODE --> POOL[Ready ShiftPVPool]
-    POOL --> PVC[Bound PVC/PV]
-```
-
-## Published class
+ShiftPV StorageClass는 등록된 node-local Pool의 directory를 RWO Filesystem PV로 동적 provisioning한다.
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -26,70 +18,60 @@ volumeBindingMode: WaitForFirstConsumer
 | 필드 | 계약 |
 |---|---|
 | Provisioner | `csi.shiftpv.io` |
-| Access | `ReadWriteOnce` |
-| Volume mode | `Filesystem` |
+| Access / mode | `ReadWriteOnce` / `Filesystem` |
 | Binding | `WaitForFirstConsumer` |
 | Reclaim | `Retain` |
-| Expansion | 현재 제품 범위 밖 |
-| Parameters | external-provisioner metadata만 허용 |
+| Expansion | 범위 밖 |
 
-알 수 없는 parameter는 `InvalidArgument`로 닫는다.
+## Placement and admission
 
-## Capacity admission
+첫 consumer가 정한 topology 안에서 Ready Pool을 선택한다. 할당은 다음을 모두 확인해야 한다.
 
-```mermaid
-flowchart TD
-    R[PVC requested bytes] --> L{Pool limit - reservations 안에 있는가?}
-    L -- yes --> F{statfs available bytes 안에 있는가?}
-    L -- no --> X[ResourceExhausted]
-    F -- yes --> C[reservation + volume directory 생성]
-    F -- no --> X
-```
+- Pool installation/name/UID/node identity가 현재 등록과 일치한다.
+- `spec.scanEpoch`로 요청한 `metadata.generation`에 대해 `status.observedGeneration`이 정확히 일치한다.
+- inventory가 valid하고 complete하며 exact copy·mount identity에 모순이 없다.
+- 논리 한도에서 모든 durable capacity hold를 뺀 양과 현재 filesystem 여유가 requested bytes를 충족한다.
 
-| 용량 신호 | 의미 |
+stale, invalid 또는 incomplete observation은 allocation을 승인할 수 없다. `statfs`는 같은 filesystem의
+현재 여유를 확인하는 admission 신호일 뿐 공간을 예약하거나 hard quota를 제공하지 않는다.
+
+## Capacity ownership
+
+Capacity는 directory 존재 추정이나 wall-clock TTL이 아니라 세 durable API의 명시적 hold로 계산한다.
+
+| 상태 | capacity owner |
 |---|---|
-| `ShiftPVPool.spec.capacity.limit` | ShiftPV가 Pool에 예약할 최대 PVC capacity |
-| Active reservations | 현재 owner의 requested bytes + 승인된 incoming Move의 requested bytes |
-| `statfs` availability | Pool이 속한 filesystem의 현재 available bytes |
-| PVC capacity | reservation과 PV capacity의 기준값 |
+| 정상 Volume | `ShiftPVVolume`이 current owner Pool의 requested bytes 보유 |
+| Move pre-commit | Volume의 source hold + `ShiftPVMove`의 destination hold |
+| Move post-commit | Volume의 destination hold + Move의 retained-source hold |
+| Move abort cleanup | Volume의 source hold + Move의 destination hold 유지 |
+| Volume deletion | Volume hold를 cleanup closure까지 유지 |
 
-신규 할당은 논리 잔여량과 물리 잔여량을 모두 충족한다. ShiftPV 밖의 writer도 `statfs`에
-반영된다. 개별 volume 사용량은 filesystem 책임이며 Pool limit는 write quota가 아니라 admission
-경계다. `statfs`는 검사 시점의 snapshot이며 공간을 예약하지 않는다. 검사 뒤 외부 writer가 공간을
-소진해 directory 생성이 `ENOSPC`로 실패하면 reservation과 생성 intent를 보존하고 같은 CSI 요청을
-재시도한다.
+한 physical copy라도 남을 수 있는 동안 해당 hold를 보수적으로 유지한다. Move commit 시 destination hold의
+소유권은 Move에서 Volume로 넘어가고, source hold는 Volume에서 같은 Move의 retained-source hold로 이어진다.
+소유권 이전에는 release gap이 없어야 하며, source와 destination 두 physical copy가 존재하는 구간은 두
+Pool에 동시에 계수하는 conservative double accounting을 적용한다.
 
-Pool copy inventory가 256 observations를 넘어 `truncated=true`이면 새 PVC와 이동 destination
-admission을 닫는다. 기존 volume publish와 exact cleanup은 유지하며, inventory가 다시 완전해지면
-신규 배치를 재개한다.
+Move의 destination/source hold와 삭제 중 Volume hold는 exact purge API receipt와 그 이후 generation의 fresh,
+valid, complete absence proof가 모두 있을 때만 해제한다. stale scan, node heartbeat 소실, deadline 경과,
+Job 종료 또는 object absence 하나만으로는 capacity를 반환하지 않는다. Move identity 모순은 `Blocked`,
+cleanup identity 모순은 cleanup subjournal `NeedsReview`로 수렴하며 관련 hold를 보존한다.
 
-Incoming 예약은 `capacityApproved=true`, destination 일치, Volume의 `activeMove` 일치,
-owner commit 전인 Move에 적용한다. Commit 뒤에는 destination owner 예약으로 한 번만 계산한다.
-Volume과 reservation이 삭제된 완료 Move는 용량을 점유하지 않는다.
-
-## Default-class selection
-
-| Helm value | 새 PVC 동작 |
-|---|---|
-| `storageClass.defaultClass=false` | `storageClassName: shiftpv`를 명시한 workload가 선택 |
-| `storageClass.defaultClass=true` | `storageClassName`이 없는 PVC가 ShiftPV 선택 |
-
-cluster의 기본 StorageClass는 하나로 운영한다. 기존 PV는 원래 provisioner를 유지하며 별도
-migration 절차를 따른다.
-
-## Lifecycle
+## Retain lifecycle
 
 ```text
 PVC 삭제
-   ↓
-PV Released (Retain)
-   ↓
-운영자 복구 또는 명시적 PV/data 폐기
+  -> PV Released
+  -> Volume, owner data와 current capacity hold 유지
+  -> 운영자가 해당 PV를 명시적으로 폐기
+  -> NodeUnpublish mount recheck + empty publication fence
+  -> exact purge API receipt + fresh absence proof
+  -> Volume 종결과 capacity release
 ```
 
-Helm은 StorageClass를 소유한다. PVC, PV, CR, reservation과 host data는 독립 lifecycle을 갖는다.
-Pool 삭제는 protection finalizer로 `PoolDeregistering`에 진입한다. 신규 배치는 닫히고, 삭제 요청 이후의
-빈 inventory, node-local Pool identity 해제, exact lifecycle 참조 해소가 확인되면 등록 해제가 완료된다.
-빈 경로는 새 Pool UID로 다시 등록할 수 있다.
-Uninstall guard는 storage dependency 해소를 확인한 뒤 release 제거를 허용한다. 배포와 제거 절차는
-[Helm chart guide](../../charts/shiftpv/README.md#uninstall-and-recovery)에 있다.
+`Retain`은 workload 삭제와 data 폐기를 분리한다. PV나 API object를 직접 제거해 filesystem data와 capacity
+ownership을 분리하면 안 된다. 폐기 중에도 fresh observation이나 cleanup 증거가 불충분하면 data와 hold를
+보존한다.
+
+cluster 기본 StorageClass 선택은 운영 정책이며 기존 PV의 provisioner를 바꾸지 않는다. node/disk의 영구
+손실 처리, HA/replication, RWX, snapshot, expansion과 hard quota는 이 계약 범위 밖이다.

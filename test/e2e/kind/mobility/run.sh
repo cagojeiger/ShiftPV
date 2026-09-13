@@ -8,6 +8,8 @@ CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-mobility-e2e}
 NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 PHASE_TIMEOUT_SECONDS=${PHASE_TIMEOUT_SECONDS:-180}
+# shellcheck source=test/e2e/kind/cleanup-journal.sh
+source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
 # shellcheck source=test/e2e/kind/mobility/recovery.sh
 source "${ROOT_DIR}/test/e2e/kind/mobility/recovery.sh"
 # shellcheck source=test/e2e/kind/mobility/preflight.sh
@@ -305,6 +307,7 @@ assert_node_absent "${SOURCE_NODE}" "${SOURCE_POOL}/volumes/${VOLUME_ID}"
 SOURCE_COPY_ID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
 test -n "${SOURCE_COPY_ID}"
 assert_node_absent "${SOURCE_NODE}" "${SOURCE_POOL}/.shiftpv/retired/${SOURCE_COPY_ID}"
+assert_cleanup_journal "shiftpvmove/${MOVE_NAME}" MoveSource "${VOLUME_ID}" "${SOURCE_COPY_ID}" ShiftPVMove
 test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
 
 recover_after_commit_failure

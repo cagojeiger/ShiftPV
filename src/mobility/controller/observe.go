@@ -340,7 +340,11 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		move.Status.Phase == string(fsm.PhasePromoting) && result.FSM.PromotionComplete) {
 		result.FSM.DestinationUnavailable = true
 	}
-	result.FSM.PublishedOnDestination = result.DestinationNode != "" && contains(state.PublishedNodes, result.DestinationNode)
+	destinationPool, destinationReady := readyPoolNodes[result.DestinationNode]
+	result.FSM.PublishedOnDestination = result.DestinationNode != "" &&
+		contains(state.PublishedNodes, result.DestinationNode) &&
+		destinationReady &&
+		volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy)
 	if move.Status.Phase == string(fsm.PhaseWaitingForDestinationPublish) || move.Status.Phase == string(fsm.PhaseCleaningSource) {
 		result.FSM.CleanupComplete, result.FSM.CleanupFailed, err = r.cleanupState(ctx, move)
 		if err != nil {

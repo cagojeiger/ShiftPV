@@ -14,8 +14,6 @@ spec:
     helm:
       releaseName: shiftpv
       valuesObject:
-        runtime:
-          identityContract: true
         controller:
           image:
             repository: __IMAGE_REPOSITORY__
