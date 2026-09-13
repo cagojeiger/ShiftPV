@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+usage() {
+	cat <<'EOF'
+Read-only safety gate for ShiftPV real-node qualification.
+
+Required environment:
+  KUBECTL_CONTEXT
+  SOURCE_NODE
+  DESTINATION_NODE
+  FAULT_NODE
+  FAULT_SSH_TARGET
+  EXPECTED_CONTROLLER_IMAGE   immutable image reference containing @sha256:
+  EXPECTED_NODE_IMAGE         immutable image reference containing @sha256:
+
+Optional environment:
+  SYSTEM_NAMESPACE=shiftpv-system
+  CONTROLLER_DEPLOYMENT=shiftpv-controller
+  NODE_DAEMONSET=shiftpv-node
+  STORAGE_CLASS=shiftpv
+  EXPECTED_NODE_COUNT=2
+  MAX_INVENTORY_AGE_SECONDS=120
+  SSH_CONNECT_TIMEOUT=5
+
+The script does not cordon, drain, restart, reboot, power off, create, patch, or
+delete anything. It exits non-zero when the proposed fault node is not isolated
+from non-DaemonSet workloads or any storage identity/capacity prerequisite is
+ambiguous.
+EOF
+}
+
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+	usage
+	exit 0
+fi
+
+SYSTEM_NAMESPACE=${SYSTEM_NAMESPACE:-shiftpv-system}
+CONTROLLER_DEPLOYMENT=${CONTROLLER_DEPLOYMENT:-shiftpv-controller}
+NODE_DAEMONSET=${NODE_DAEMONSET:-shiftpv-node}
+STORAGE_CLASS=${STORAGE_CLASS:-shiftpv}
+EXPECTED_NODE_COUNT=${EXPECTED_NODE_COUNT:-2}
+MAX_INVENTORY_AGE_SECONDS=${MAX_INVENTORY_AGE_SECONDS:-120}
+SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-5}
+
+blocked=0
+block() {
+	printf 'BLOCK %s\n' "$*" >&2
+	blocked=$((blocked + 1))
+}
+
+pass() {
+	printf 'PASS  %s\n' "$*"
+}
+
+for command in kubectl jq ssh; do
+	if ! command -v "${command}" >/dev/null 2>&1; then
+		block "required command is unavailable: ${command}"
+	fi
+done
+
+for variable in \
+	KUBECTL_CONTEXT SOURCE_NODE DESTINATION_NODE FAULT_NODE FAULT_SSH_TARGET \
+	EXPECTED_CONTROLLER_IMAGE EXPECTED_NODE_IMAGE; do
+	if [[ -z ${!variable:-} ]]; then
+		block "required environment is empty: ${variable}"
+	fi
+done
+
+if ((blocked > 0)); then
+	printf 'PREFLIGHT_BLOCKED count=%d\n' "${blocked}" >&2
+	exit 1
+fi
+
+if [[ "${SOURCE_NODE}" == "${DESTINATION_NODE}" ]]; then
+	block 'SOURCE_NODE and DESTINATION_NODE must differ'
+fi
+if [[ "${FAULT_NODE}" != "${SOURCE_NODE}" && "${FAULT_NODE}" != "${DESTINATION_NODE}" ]]; then
+	block 'FAULT_NODE must be SOURCE_NODE or DESTINATION_NODE'
+fi
+case ${EXPECTED_CONTROLLER_IMAGE} in
+*@sha256:*) pass 'controller image expectation is immutable' ;;
+*) block 'EXPECTED_CONTROLLER_IMAGE must contain @sha256:' ;;
+esac
+case ${EXPECTED_NODE_IMAGE} in
+*@sha256:*) pass 'node image expectation is immutable' ;;
+*) block 'EXPECTED_NODE_IMAGE must contain @sha256:' ;;
+esac
+
+k() {
+	kubectl --context "${KUBECTL_CONTEXT}" --request-timeout=30s "$@"
+}
+
+if ! cluster_json=$(k get nodes -o json 2>/dev/null); then
+	block "cannot read nodes through context ${KUBECTL_CONTEXT}"
+	printf 'PREFLIGHT_BLOCKED count=%d\n' "${blocked}" >&2
+	exit 1
+fi
+pass "context is reachable: ${KUBECTL_CONTEXT}"
+
+node_count=$(jq '.items | length' <<<"${cluster_json}")
+if [[ "${node_count}" == "${EXPECTED_NODE_COUNT}" ]]; then
+	pass "node count is exactly ${EXPECTED_NODE_COUNT}"
+else
+	block "node count is ${node_count}; expected ${EXPECTED_NODE_COUNT}"
+fi
+
+for node in "${SOURCE_NODE}" "${DESTINATION_NODE}"; do
+	matches=$(jq --arg node "${node}" '[.items[] | select(.metadata.name == $node)] | length' <<<"${cluster_json}")
+	if [[ "${matches}" != 1 ]]; then
+		block "node identity is not exact: ${node} matches=${matches}"
+		continue
+	fi
+	ready=$(jq -r --arg node "${node}" '.items[] | select(.metadata.name == $node) | [.status.conditions[] | select(.type == "Ready")][0].status // ""' <<<"${cluster_json}")
+	unschedulable=$(jq -r --arg node "${node}" '.items[] | select(.metadata.name == $node) | (.spec.unschedulable // false)' <<<"${cluster_json}")
+	pressure=$(jq -r --arg node "${node}" '[.items[] | select(.metadata.name == $node) | .status.conditions[] | select((.type == "DiskPressure" or .type == "MemoryPressure" or .type == "PIDPressure") and .status == "True")] | length' <<<"${cluster_json}")
+	if [[ "${ready}" == True && "${unschedulable}" == false && "${pressure}" == 0 ]]; then
+		pass "node is Ready, schedulable, and pressure-free: ${node}"
+	else
+		block "node is not healthy: ${node} ready=${ready} unschedulable=${unschedulable} pressure=${pressure}"
+	fi
+done
+
+fault_role=$(jq -r --arg node "${FAULT_NODE}" '.items[] | select(.metadata.name == $node) | ((.metadata.labels["node.kubernetes.io/microk8s-controlplane"] // "") + (.metadata.labels["node-role.kubernetes.io/control-plane"] // "") + (.metadata.labels["node-role.kubernetes.io/master"] // ""))' <<<"${cluster_json}")
+if [[ -z "${fault_role}" ]]; then
+	pass "fault node is not labelled as a control-plane node: ${FAULT_NODE}"
+else
+	block "fault node carries a control-plane role: ${FAULT_NODE}"
+fi
+
+controller_json=$(k -n "${SYSTEM_NAMESPACE}" get "deployment/${CONTROLLER_DEPLOYMENT}" -o json 2>/dev/null || true)
+controller_image=$(jq -r '.spec.template.spec.containers[]? | select(.name == "shiftpv-controller") | .image' <<<"${controller_json}" 2>/dev/null || true)
+controller_available=$(jq -r '.status.availableReplicas // 0' <<<"${controller_json}" 2>/dev/null || true)
+controller_replicas=$(jq -r '.spec.replicas // 0' <<<"${controller_json}" 2>/dev/null || true)
+if [[ "${controller_image}" == "${EXPECTED_CONTROLLER_IMAGE}" && "${controller_available}" == "${controller_replicas}" && "${controller_replicas}" -gt 0 ]]; then
+	pass "controller is available with the exact candidate image"
+else
+	block "controller candidate mismatch or unavailable: image=${controller_image:-missing} available=${controller_available:-0}/${controller_replicas:-0}"
+fi
+
+node_json=$(k -n "${SYSTEM_NAMESPACE}" get "daemonset/${NODE_DAEMONSET}" -o json 2>/dev/null || true)
+node_image=$(jq -r '.spec.template.spec.containers[]? | select(.name == "shiftpv-node") | .image' <<<"${node_json}" 2>/dev/null || true)
+node_ready=$(jq -r '.status.numberReady // 0' <<<"${node_json}" 2>/dev/null || true)
+node_desired=$(jq -r '.status.desiredNumberScheduled // 0' <<<"${node_json}" 2>/dev/null || true)
+if [[ "${node_image}" == "${EXPECTED_NODE_IMAGE}" && "${node_ready}" == "${node_desired}" && "${node_desired}" == "${EXPECTED_NODE_COUNT}" ]]; then
+	pass "node DaemonSet is ready with the exact candidate image"
+else
+	block "node candidate mismatch or unavailable: image=${node_image:-missing} ready=${node_ready:-0}/${node_desired:-0}"
+fi
+
+for argument in helper-image mobility-helper-image; do
+	if jq -e --arg expected "--${argument}=${EXPECTED_CONTROLLER_IMAGE}" '.spec.template.spec.containers[]? | select(.name == "shiftpv-controller") | .args | index($expected) != null' <<<"${controller_json}" >/dev/null 2>&1; then
+		pass "${argument} uses the exact controller candidate image"
+	else
+		block "${argument} does not use the exact controller candidate image"
+	fi
+done
+
+crd_names=$(k get crd -o json 2>/dev/null | jq -r '[.items[].metadata.name | select(endswith(".shiftpv.io"))] | sort | join(",")')
+expected_crds='shiftpvmoves.shiftpv.io,shiftpvpools.shiftpv.io,shiftpvvolumes.shiftpv.io'
+if [[ "${crd_names}" == "${expected_crds}" ]]; then
+	pass 'durable ShiftPV API surface contains exactly Pool, Volume, and Move'
+else
+	block "unexpected ShiftPV CRD surface: ${crd_names:-none}"
+fi
+
+storage_class_json=$(k get "storageclass/${STORAGE_CLASS}" -o json 2>/dev/null || true)
+provisioner=$(jq -r '.provisioner // ""' <<<"${storage_class_json}" 2>/dev/null || true)
+default_class=$(jq -r '.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false"' <<<"${storage_class_json}" 2>/dev/null || true)
+if [[ "${provisioner}" == csi.shiftpv.io && "${default_class}" != true ]]; then
+	pass "storage class is non-default and owned by ShiftPV: ${STORAGE_CLASS}"
+else
+	block "storage class is unsafe: provisioner=${provisioner:-missing} default=${default_class:-missing}"
+fi
+
+volume_count=$(k get shiftpvvolumes -o json 2>/dev/null | jq '.items | length' 2>/dev/null || printf 'unknown')
+move_count=$(k get shiftpvmoves -o json 2>/dev/null | jq '.items | length' 2>/dev/null || printf 'unknown')
+if [[ "${volume_count}" == 0 && "${move_count}" == 0 ]]; then
+	pass 'no pre-existing ShiftPV Volume or Move can be confused with the qualification workload'
+else
+	block "ShiftPV state is not empty: volumes=${volume_count} moves=${move_count}"
+fi
+
+pool_json=$(k get shiftpvpools -o json 2>/dev/null || true)
+now_epoch=$(date -u +%s)
+for node in "${SOURCE_NODE}" "${DESTINATION_NODE}"; do
+	pool_count=$(jq --arg node "${node}" '[.items[] | select(.spec.nodeName == $node)] | length' <<<"${pool_json}" 2>/dev/null || printf 'unknown')
+	if [[ "${pool_count}" != 1 ]]; then
+		block "pool identity is not exact for node ${node}: matches=${pool_count}"
+		continue
+	fi
+	pool_name=$(jq -r --arg node "${node}" '.items[] | select(.spec.nodeName == $node) | .metadata.name' <<<"${pool_json}")
+	pool_ready=$(jq -r --arg node "${node}" '.items[] | select(.spec.nodeName == $node) | [.status.conditions[]? | select(.type == "Ready")][0].status // ""' <<<"${pool_json}")
+	inventory_valid=$(jq -r --arg node "${node}" '.items[] | select(.spec.nodeName == $node) | (.status.inventory.valid // false)' <<<"${pool_json}")
+	inventory_truncated=$(jq -r --arg node "${node}" '.items[] | select(.spec.nodeName == $node) | (.status.inventory.truncated // false)' <<<"${pool_json}")
+	inventory_age=$(jq -r --arg node "${node}" --argjson now "${now_epoch}" '.items[] | select(.spec.nodeName == $node) | if .status.inventory.observedAt then ($now - (.status.inventory.observedAt | fromdateiso8601)) else 999999 end' <<<"${pool_json}" 2>/dev/null || printf '999999')
+	if [[ "${pool_ready}" == True && "${inventory_valid}" == true && "${inventory_truncated}" == false && "${inventory_age}" -ge 0 && "${inventory_age}" -le "${MAX_INVENTORY_AGE_SECONDS}" ]]; then
+		pass "pool is Ready with fresh, valid inventory: ${pool_name} age=${inventory_age}s"
+	else
+		block "pool is unsafe: ${pool_name} ready=${pool_ready} valid=${inventory_valid} truncated=${inventory_truncated} inventoryAge=${inventory_age}s"
+	fi
+done
+
+if remote_hostname=$(ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${FAULT_SSH_TARGET}" 'hostname; sudo -n true' 2>/dev/null | head -1); then
+	if [[ "${remote_hostname}" == "${FAULT_NODE}" ]]; then
+		pass "SSH and passwordless sudo reach the exact fault node: ${FAULT_SSH_TARGET}"
+	else
+		block "SSH target identity mismatch: expected=${FAULT_NODE} actual=${remote_hostname:-missing}"
+	fi
+else
+	block "SSH or passwordless sudo is unavailable: ${FAULT_SSH_TARGET}"
+fi
+
+unsafe_pods=$(k get pods -A --field-selector "spec.nodeName=${FAULT_NODE}" -o json 2>/dev/null | jq -r '
+	.items[]
+	| select(.status.phase != "Succeeded" and .status.phase != "Failed")
+	| select((.metadata.ownerReferences[0].kind // "") != "DaemonSet")
+	| "\(.metadata.namespace)/\(.metadata.name) owner=\(.metadata.ownerReferences[0].kind // "none")/\(.metadata.ownerReferences[0].name // "none")"' || true)
+if [[ -z "${unsafe_pods}" ]]; then
+	pass "fault node has no non-DaemonSet workload: ${FAULT_NODE}"
+else
+	block "fault node still hosts non-DaemonSet workloads: ${FAULT_NODE}"
+	while IFS= read -r pod; do
+		[[ -z "${pod}" ]] || printf '      %s\n' "${pod}" >&2
+	done <<<"${unsafe_pods}"
+fi
+
+if ((blocked > 0)); then
+	printf 'PREFLIGHT_BLOCKED count=%d context=%s source=%s destination=%s fault=%s\n' \
+		"${blocked}" "${KUBECTL_CONTEXT}" "${SOURCE_NODE}" "${DESTINATION_NODE}" "${FAULT_NODE}" >&2
+	exit 1
+fi
+
+printf 'PREFLIGHT_OK context=%s source=%s destination=%s fault=%s\n' \
+	"${KUBECTL_CONTEXT}" "${SOURCE_NODE}" "${DESTINATION_NODE}" "${FAULT_NODE}"
