@@ -98,7 +98,7 @@ func TestDestinationCapacityRetainsRecoveredMoveUntilSettled(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset()
 	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system"}
-	requested, logicalReserved, physicalPending, limit, err := reconciler.destinationCapacity(context.Background(), current, "destination")
+	requested, logicalReserved, physicalPending, limit, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestDestinationCapacityIgnoresMoveAfterVolumeAndReservationDeletion(t *test
 		Client:     fake.NewSimpleClientset(),
 		Repository: repository, Namespace: "system",
 	}
-	requested, logicalReserved, physicalPending, _, err := reconciler.destinationCapacity(context.Background(), current, "destination")
+	requested, logicalReserved, physicalPending, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err != nil {
 		t.Fatalf("deleted volume's Move blocked destination admission: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestDestinationCapacityRejectsMoveWithReservationButNoVolume(t *testing.T) 
 		Client:     fake.NewSimpleClientset(),
 		Repository: repository, Namespace: "system",
 	}
-	_, _, _, _, err := reconciler.destinationCapacity(context.Background(), current, "destination")
+	_, _, _, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err == nil || !strings.Contains(err.Error(), "has no volume state") {
 		t.Fatalf("incomplete move was not rejected: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestDestinationCapacityRejectsPhysicalPendingOverflow(t *testing.T) {
 		moves: []volumeapi.Move{current, first, second},
 	}
 	reconciler := &Reconciler{Repository: repository}
-	_, _, _, _, err := reconciler.destinationCapacity(context.Background(), current, "destination")
+	_, _, _, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[0])
 	if err == nil || !strings.Contains(err.Error(), "overflows int64") {
 		t.Fatalf("physical pending overflow was not rejected: %v", err)
 	}

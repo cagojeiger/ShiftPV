@@ -74,7 +74,6 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	status := pool.Status
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)
-	meta.RemoveStatusCondition(&status.Conditions, volumeapi.PoolConditionMounted)
 	for _, condition := range conditions(result, pool.Generation, now) {
 		meta.SetStatusCondition(&status.Conditions, condition)
 	}

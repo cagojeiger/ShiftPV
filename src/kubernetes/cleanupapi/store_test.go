@@ -31,7 +31,7 @@ func TestEnsureEmbedsJournalOnExactParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Name != Name(spec.Target) || created.UID != spec.Authority.UID || created.Status.Phase != PhasePending {
+	if created.Name != cleanupName(spec.Target) || created.UID != spec.Authority.UID || created.Status.Phase != PhasePending {
 		t.Fatalf("created=%#v", created)
 	}
 	object, err := client.Resource(VolumeResource).Get(context.Background(), testVolumeID, metav1.GetOptions{})

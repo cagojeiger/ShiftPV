@@ -103,7 +103,6 @@ helm-template:
 		grep -q -- 'name: shiftpv-helper' "$$first"
 	@! helm template shiftpv charts/shiftpv --namespace shiftpv-system --set controller.replicas=2 >/dev/null 2>&1
 	@set -e; rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
-		--set runtime.identityContract=true \
 		--set controller.image.repository=controller --set controller.image.tag=test \
 		--set node.image.repository=node --set node.image.tag=test \
 		--set helperPod.image=controller:test --set mobility.helperImage=helper:test)"; \
@@ -132,11 +131,21 @@ helm-template:
 		! printf '%s\n' "$$rendered" | grep -q '^kind: Secret$$'; \
 		printf '%s\n' "$$rendered" | grep -q 'mountPropagation: HostToContainer'
 	@set -e; helpers="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
-		--set runtime.identityContract=true \
 		--set controller.image.repository=controller --set controller.image.tag=test \
 		--set helperPod.image=create-helper:test --set mobility.helperImage=move-helper:test)"; \
 		printf '%s\n' "$$helpers" | grep -q -- '--helper-image=create-helper:test'; \
 		printf '%s\n' "$$helpers" | grep -q -- '--mobility-helper-image=move-helper:test'
+	@set -e; external_helper=existing-helper; helpers="$$(helm template shiftpv charts/shiftpv \
+		--namespace shiftpv-system --kube-version 1.35.8 \
+		--set serviceAccount.helper.create=false \
+		--set serviceAccount.helper.name=$$external_helper)"; \
+		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/clusterrole.yaml'; \
+		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/clusterrolebinding.yaml'; \
+		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/role.yaml'; \
+		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/rolebinding.yaml'; \
+		! printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/serviceaccount.yaml'; \
+		printf '%s\n' "$$helpers" | grep -q -- "--helper-service-account=$$external_helper"; \
+		[ "$$(printf '%s\n' "$$helpers" | grep -c "^    name: $$external_helper$$")" -eq 2 ]
 	@set -e; argocd="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 --set lifecycle.uninstallMode=argocd)"; \
 		printf '%s\n' "$$argocd" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
 		! printf '%s\n' "$$argocd" | grep -q '"helm.sh/hook": pre-delete'

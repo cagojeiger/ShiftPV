@@ -107,14 +107,8 @@ ACCESSIBLE_STATUS=$(kubectl get "shiftpvpool/${POOL_A_NAME}" \
 	-o jsonpath='{.status.conditions[?(@.type=="Accessible")].status}')
 ACCESSIBLE_REASON=$(kubectl get "shiftpvpool/${POOL_A_NAME}" \
 	-o jsonpath='{.status.conditions[?(@.type=="Accessible")].reason}')
-MOUNTED_STATUS=$(kubectl get "shiftpvpool/${POOL_A_NAME}" \
-	-o jsonpath='{.status.conditions[?(@.type=="Mounted")].status}')
 if [[ "${ACCESSIBLE_STATUS}" != "True" || "${ACCESSIBLE_REASON}" != "DirectoryAccessible" ]]; then
 	echo "ordinary directory was not reported accessible: status=${ACCESSIBLE_STATUS} reason=${ACCESSIBLE_REASON}" >&2
-	exit 1
-fi
-if [[ -n "${MOUNTED_STATUS}" ]]; then
-	echo "obsolete Mounted condition remains on the Pool: ${MOUNTED_STATUS}" >&2
 	exit 1
 fi
 

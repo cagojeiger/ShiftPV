@@ -35,14 +35,11 @@ var (
 )
 
 const (
-	PoolConditionReady            = "Ready"
-	PoolConditionAccessible       = "Accessible"
-	PoolConditionIdentityReleased = "IdentityReleased"
-	PoolProtectionFinalizer       = "shiftpv.io/pool-protection"
-	PoolIdentityReleaseAnnotation = "shiftpv.io/release-pool-identity"
-	// PoolConditionMounted is retained so newer node plugins can remove the
-	// obsolete condition written by releases that required an exact mount point.
-	PoolConditionMounted           = "Mounted"
+	PoolConditionReady             = "Ready"
+	PoolConditionAccessible        = "Accessible"
+	PoolConditionIdentityReleased  = "IdentityReleased"
+	PoolProtectionFinalizer        = "shiftpv.io/pool-protection"
+	PoolIdentityReleaseAnnotation  = "shiftpv.io/release-pool-identity"
 	PoolConditionWritable          = "Writable"
 	PoolConditionCapacityReadable  = "CapacityReadable"
 	DefaultPoolReadinessStaleAfter = 3 * time.Minute
@@ -465,10 +462,6 @@ func (r *Registry) RemoveVolumeFinalizer(ctx context.Context, volumeID, uid stri
 	return r.updateObjectFinalizer(ctx, VolumeResource, volumeID, uid, VolumeProtectionFinalizer, false)
 }
 
-func (r *Registry) SetState(ctx context.Context, volumeID string, state State) error {
-	return r.mutateState(ctx, volumeID, func(State) (State, error) { return state, nil })
-}
-
 func (r *Registry) CompareAndSetState(ctx context.Context, volumeID, expectedPhase, expectedActiveMove, expectedOwner string, next State) error {
 	return r.mutateState(ctx, volumeID, func(current State) (State, error) {
 		if next.UID == "" || current.UID != next.UID || current.Phase != expectedPhase || current.ActiveMove != expectedActiveMove || current.OwnerNode != expectedOwner {
@@ -485,26 +478,6 @@ func (r *Registry) CompareAndSetState(ctx context.Context, volumeID, expectedPha
 			}
 		}
 		return next, nil
-	})
-}
-
-func (r *Registry) SetPublished(ctx context.Context, volumeID, nodeName string, published bool) error {
-	return r.mutateState(ctx, volumeID, func(state State) (State, error) {
-		nodes := make(map[string]struct{}, len(state.PublishedNodes)+1)
-		for _, node := range state.PublishedNodes {
-			nodes[node] = struct{}{}
-		}
-		if published {
-			nodes[nodeName] = struct{}{}
-		} else {
-			delete(nodes, nodeName)
-		}
-		state.PublishedNodes = state.PublishedNodes[:0]
-		for node := range nodes {
-			state.PublishedNodes = append(state.PublishedNodes, node)
-		}
-		sort.Strings(state.PublishedNodes)
-		return state, nil
 	})
 }
 

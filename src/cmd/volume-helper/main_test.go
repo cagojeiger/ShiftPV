@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -55,9 +56,7 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 		OperationID: "delete-" + copy.VolumeUID, Target: copy, Reason: "VolumeDelete",
 		Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: volumeID, UID: copy.VolumeUID},
 	}}
-	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy}); err != nil {
-		t.Fatal(err)
-	}
+	setVolumeStateFixture(t, dynamicClient, volumeID, volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy})
 	if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
 		t.Fatal("Ready volume was accepted without a deletion fence")
 	}
@@ -72,9 +71,7 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.PublishedNodes = []string{copy.NodeName}
-	if err := registry.SetState(context.Background(), volumeID, state); err != nil {
-		t.Fatal(err)
-	}
+	setVolumeStateFixture(t, dynamicClient, volumeID, state)
 	if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
 		t.Fatal("published volume crossed deletion authority")
 	}
@@ -194,9 +191,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 				UID: source.VolumeUID, Phase: statePhase, OwnerNode: test.current.NodeName,
 				ActiveMove: moveName, CurrentCopy: &test.current, PublishedNodes: []string{test.current.NodeName},
 			}
-			if err := registry.SetState(context.Background(), volumeID, state); err != nil {
-				t.Fatal(err)
-			}
+			setVolumeStateFixture(t, client, volumeID, state)
 			if test.reason == "MoveSource" {
 				now := metav1.Now()
 				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
@@ -220,16 +215,12 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 			}
 			if test.reason == "MoveSource" {
 				state.PublishedNodes = nil
-				if err := registry.SetState(context.Background(), volumeID, state); err != nil {
-					t.Fatal(err)
-				}
+				setVolumeStateFixture(t, client, volumeID, state)
 				if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
 					t.Fatal("postcommit source cleanup was accepted before destination publish intent")
 				}
 				state.PublishedNodes = []string{test.current.NodeName}
-				if err := registry.SetState(context.Background(), volumeID, state); err != nil {
-					t.Fatal(err)
-				}
+				setVolumeStateFixture(t, client, volumeID, state)
 				now := metav1.Now()
 				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
 					ObservedGeneration: 1,
@@ -263,9 +254,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 			}
 			cleanup.Spec.OperationID = test.operationID
 			state.PublishedNodes = append(state.PublishedNodes, test.target.NodeName)
-			if err := registry.SetState(context.Background(), volumeID, state); err != nil {
-				t.Fatal(err)
-			}
+			setVolumeStateFixture(t, client, volumeID, state)
 			if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
 				t.Fatal("published cleanup target was accepted")
 			}
@@ -296,9 +285,7 @@ func TestMoveAuthorityRequiresExactMoveJobPoolAndSourceCopy(t *testing.T) {
 	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, moveStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{UID: source.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: moveName, CurrentCopy: &source}); err != nil {
-		t.Fatal(err)
-	}
+	setVolumeStateFixture(t, dynamicClient, volumeID, volumeapi.State{UID: source.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: moveName, CurrentCopy: &source})
 	controller := true
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "system", UID: types.UID(jobUID), Labels: map[string]string{"shiftpv.io/move-uid": moveUID}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: moveName, UID: types.UID(moveUID), Controller: &controller}}}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "copy-pod", Namespace: "system", OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: jobName, UID: types.UID(jobUID), Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: incoming.NodeName}}
@@ -342,9 +329,7 @@ func TestSourceAuthorityRequiresCurrentMoveOwnedPodAndUnpublishedCopy(t *testing
 	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, status); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.SetState(context.Background(), volumeID, volumeapi.State{UID: identity.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: identity.NodeName, ActiveMove: moveName, CurrentCopy: &identity}); err != nil {
-		t.Fatal(err)
-	}
+	setVolumeStateFixture(t, dynamicClient, volumeID, volumeapi.State{UID: identity.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: identity.NodeName, ActiveMove: moveName, CurrentCopy: &identity})
 	controller := true
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: "source-pod", Namespace: "system", UID: "pod-uid", Labels: map[string]string{"shiftpv.io/move-uid": moveUID},
@@ -362,10 +347,52 @@ func TestSourceAuthorityRequiresCurrentMoveOwnedPodAndUnpublishedCopy(t *testing
 		t.Fatal(err)
 	}
 	state.PublishedNodes = []string{identity.NodeName}
-	if err := registry.SetState(context.Background(), volumeID, state); err != nil {
-		t.Fatal(err)
-	}
+	setVolumeStateFixture(t, dynamicClient, volumeID, state)
 	if err := authority(context.Background()); err == nil {
 		t.Fatal("published source was accepted for transfer")
 	}
+}
+
+func setVolumeStateFixture(t *testing.T, client dynamic.Interface, volumeID string, state volumeapi.State) {
+	t.Helper()
+	resource := client.Resource(volumeapi.VolumeResource)
+	object, err := resource.Get(context.Background(), volumeID, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get ShiftPVVolume fixture: %v", err)
+	}
+	previous, _ := object.Object["status"].(map[string]any)
+	status := map[string]any{
+		"phase": state.Phase, "ownerNode": state.OwnerNode, "activeMove": state.ActiveMove,
+		"publishedNodes": stringSliceToAnyFixture(state.PublishedNodes),
+	}
+	if cleanup := previous["cleanup"]; cleanup != nil {
+		status["cleanup"] = cleanup
+	}
+	for name, value := range map[string]string{
+		"creationOperationID": state.CreationOperationID,
+		"deletionOperationID": state.DeletionOperationID,
+	} {
+		if value != "" {
+			status[name] = value
+		}
+	}
+	if state.CurrentCopy != nil {
+		encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(state.CurrentCopy)
+		if err != nil {
+			t.Fatalf("encode current copy fixture: %v", err)
+		}
+		status["currentCopy"] = encoded
+	}
+	object.Object["status"] = status
+	if _, err := resource.UpdateStatus(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update ShiftPVVolume fixture: %v", err)
+	}
+}
+
+func stringSliceToAnyFixture(values []string) []any {
+	result := make([]any, len(values))
+	for index := range values {
+		result[index] = values[index]
+	}
+	return result
 }

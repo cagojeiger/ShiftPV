@@ -414,9 +414,6 @@ func TestCompletionAfterVolumeDeletion(t *testing.T) {
 		t.Fatalf("deleted Volume did not finish metadata-only: %+v", repository.moves[0])
 	}
 	for _, action := range client.Actions() {
-		if action.Matches("list", "configmaps") && action.(ktesting.ListAction).GetListRestrictions().Labels.String() == "shiftpv.io/cleanup-request" {
-			continue
-		}
 		if action.GetVerb() != "get" && action.GetVerb() != "delete" {
 			t.Fatalf("completion recreated or inspected disk resources: %+v", action)
 		}

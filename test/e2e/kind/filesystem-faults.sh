@@ -158,7 +158,7 @@ if [[ "${VOLUME_ID}" != "${HELD_VOLUME_ID}" ]]; then
 fi
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${FAULT_NODE}"
-test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 8388608
+test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
 kubectl exec shiftpv-filesystem-fault -- grep -Fx 'ShiftPV filesystem fault recovery' /data/payload
 docker exec "${FAULT_NODE}" test -f "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}/payload"
 

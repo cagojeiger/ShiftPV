@@ -58,14 +58,6 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 	return r.persistMoveStatus(ctx, move, previous)
 }
 
-func (r *Reconciler) destinationCapacity(ctx context.Context, current volumeapi.Move, destination string) (requested, logicalReserved, physicalPending, limit int64, err error) {
-	pool, err := r.poolForNode(ctx, destination, current.Spec.VolumeID)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	return r.destinationCapacityForPool(ctx, current, pool)
-}
-
 func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current volumeapi.Move, pool volumeapi.Pool) (requested, logicalReserved, physicalPending, limit int64, err error) {
 	destination := pool.NodeName
 	quantity, err := resource.ParseQuantity(pool.CapacityLimit)

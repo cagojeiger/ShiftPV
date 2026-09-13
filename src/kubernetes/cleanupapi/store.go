@@ -103,15 +103,13 @@ type Status struct {
 }
 
 // Cleanup is a synthesized view of a journal embedded at status.cleanup on an
-// exact ShiftPVVolume or ShiftPVMove. UID, resourceVersion, and generation are
-// those of the parent; Name is only a deterministic executor name component.
+// exact ShiftPVVolume or ShiftPVMove. UID is the parent's identity; Name is only
+// a deterministic executor name component.
 type Cleanup struct {
-	Name            string
-	UID             string
-	ResourceVersion string
-	Generation      int64
-	Spec            Spec
-	Status          Status
+	Name   string
+	UID    string
+	Spec   Spec
+	Status Status
 }
 
 type journal struct {
@@ -124,7 +122,7 @@ type Store struct {
 	Now    func() time.Time
 }
 
-func Name(target CopyIdentity) string {
+func cleanupName(target CopyIdentity) string {
 	encoded, _ := json.Marshal(target)
 	sum := sha256.Sum256(encoded)
 	return "shiftpv-cleanup-" + hex.EncodeToString(sum[:16])
@@ -281,7 +279,7 @@ func (s *Store) UpdateStatus(ctx context.Context, expected Cleanup, next Status)
 	if err := s.validate(); err != nil {
 		return err
 	}
-	if expected.UID == "" || expected.Name != Name(expected.Spec.Target) || expected.UID != expected.Spec.Authority.UID || expected.Spec.Validate() != nil {
+	if expected.UID == "" || expected.Name != cleanupName(expected.Spec.Target) || expected.UID != expected.Spec.Authority.UID || expected.Spec.Validate() != nil {
 		return ErrConflict
 	}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -691,7 +689,7 @@ func journalFromParent(object *unstructured.Unstructured) (Cleanup, bool, error)
 		return Cleanup{}, true, fmt.Errorf("%w: embedded cleanup authority does not match its parent", ErrConflict)
 	}
 	return Cleanup{
-		Name: Name(stored.Spec.Target), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(), Generation: object.GetGeneration(),
+		Name: cleanupName(stored.Spec.Target), UID: string(object.GetUID()),
 		Spec: stored.Spec, Status: stored.Status,
 	}, true, nil
 }

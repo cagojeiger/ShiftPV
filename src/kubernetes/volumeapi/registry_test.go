@@ -35,9 +35,7 @@ func TestStateCASPreservesConcurrentNodePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale, _ := r.Get(ctx, id)
-	if err := r.SetPublished(ctx, id, "source", true); err != nil {
-		t.Fatal(err)
-	}
+	setPublishedFixture(t, client, id, "source", true)
 	stale.Phase, stale.ActiveMove = PhaseMoving, "move"
 	if err := r.CompareAndSetState(ctx, id, PhaseReady, "", "source", stale); err != nil {
 		t.Fatal(err)
@@ -50,9 +48,7 @@ func TestStateCASPreservesConcurrentNodePublication(t *testing.T) {
 	if err := r.CompareAndSetState(ctx, id, PhaseMoving, "move", "source", stale); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("foreign publication permitted commit: %v", err)
 	}
-	if err := r.SetPublished(ctx, id, "source", false); err != nil {
-		t.Fatal(err)
-	}
+	setPublishedFixture(t, client, id, "source", false)
 	if err := r.CompareAndSetState(ctx, id, PhaseMoving, "move", "source", stale); err != nil {
 		t.Fatal(err)
 	}
@@ -201,16 +197,6 @@ func TestRegistryLifecycleAndPoolNodes(t *testing.T) {
 	}
 	if state.Phase != PhaseReady || state.OwnerNode != "node-a" {
 		t.Fatalf("state = %#v", state)
-	}
-	if err := registry.SetPublished(ctx, "shiftpv-11111111111111111111111111111111", "node-a", true); err != nil {
-		t.Fatalf("SetPublished(true): %v", err)
-	}
-	state, _ = registry.Get(ctx, "shiftpv-11111111111111111111111111111111")
-	if !reflect.DeepEqual(state.PublishedNodes, []string{"node-a"}) {
-		t.Fatalf("published nodes = %#v", state.PublishedNodes)
-	}
-	if err := registry.SetPublished(ctx, "shiftpv-11111111111111111111111111111111", "node-a", false); err != nil {
-		t.Fatalf("SetPublished(false): %v", err)
 	}
 	nodes, err := registry.PoolNodes(ctx)
 	if err != nil {
@@ -626,7 +612,7 @@ func TestBeginDeleteRejectsPublishedOrChangedIdentity(t *testing.T) {
 	if _, err := registry.BeginDelete(ctx, volumeID, copy.VolumeUID, copy); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("published copy was fenced for deletion: %v", err)
 	}
-	if err := registry.SetPublished(ctx, volumeID, copy.NodeName, false); err != nil {
+	if err := registry.ReconcilePublished(ctx, volumeID, copy.NodeName, copy, false); err != nil {
 		t.Fatal(err)
 	}
 	replacement := copy
@@ -1245,5 +1231,26 @@ func seedReadyVolume(t *testing.T, client *dynamicfake.FakeDynamicClient, volume
 	setState(object, State{Phase: PhaseReady, OwnerNode: ownerNode})
 	if _, err := client.Resource(VolumeResource).Create(context.Background(), object, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seed ready ShiftPVVolume: %v", err)
+	}
+}
+
+func setPublishedFixture(t *testing.T, client *dynamicfake.FakeDynamicClient, volumeID, nodeName string, published bool) {
+	t.Helper()
+	resource := client.Resource(VolumeResource)
+	object, err := resource.Get(context.Background(), volumeID, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get ShiftPVVolume fixture: %v", err)
+	}
+	state, err := stateFrom(object)
+	if err != nil {
+		t.Fatalf("decode ShiftPVVolume fixture: %v", err)
+	}
+	state.PublishedNodes = slices.DeleteFunc(state.PublishedNodes, func(node string) bool { return node == nodeName })
+	if published {
+		state.PublishedNodes = append(state.PublishedNodes, nodeName)
+	}
+	setState(object, state)
+	if _, err := resource.UpdateStatus(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update ShiftPVVolume fixture: %v", err)
 	}
 }

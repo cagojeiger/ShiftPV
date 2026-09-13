@@ -44,9 +44,7 @@ spec:
             - --namespace=$(POD_NAMESPACE)
             - --helper-image={{ include "shiftpv.helperPodImage" . }}
             - --helper-timeout={{ .Values.helperPod.timeout }}
-            {{- if .Values.runtime.identityContract }}
             - --helper-service-account={{ include "shiftpv.helperServiceAccount" . }}
-            {{- end }}
             - --helper-cpu-request={{ .Values.helperPod.resources.requests.cpu }}
             - --helper-memory-request={{ .Values.helperPod.resources.requests.memory }}
             - --helper-cpu-limit={{ .Values.helperPod.resources.limits.cpu }}
@@ -61,9 +59,7 @@ spec:
             - --webhook-tls-secret-name={{ include "shiftpv.webhookSecretName" . }}
             - --webhook-configuration-name={{ include "shiftpv.webhookConfigurationName" . }}
             - --validation-webhook-configuration-name={{ include "shiftpv.validationWebhookConfigurationName" . }}
-            {{- if .Values.runtime.identityContract }}
             - --controller-service-account={{ include "shiftpv.controllerServiceAccount" . }}
-            {{- end }}
             - --storage-class-name={{ .Values.storageClass.name }}
             - --uninstall-permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}

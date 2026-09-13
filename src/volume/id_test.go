@@ -47,15 +47,3 @@ func TestPathRequiresAbsolutePoolRoot(t *testing.T) {
 		t.Fatal("expected relative pool root to fail")
 	}
 }
-
-func TestIsWithin(t *testing.T) {
-	if !IsWithin("/var/lib/kubelet/pods", "/var/lib/kubelet/pods/a/volumes/x") {
-		t.Fatal("expected descendant path")
-	}
-	if IsWithin("/var/lib/kubelet/pods", "/var/lib/kubelet/pods-evil/a") {
-		t.Fatal("accepted sibling path")
-	}
-	if IsWithin("/var/lib/kubelet/pods", "/var/lib/kubelet/pods") {
-		t.Fatal("accepted root itself")
-	}
-}

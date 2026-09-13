@@ -43,16 +43,10 @@ func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T
 	old := metav1.NewTime(testTime.Add(-time.Hour))
 	repository := &fakeRepository{pool: volumeapi.Pool{
 		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 3,
-		Status: volumeapi.PoolStatus{Conditions: []metav1.Condition{
-			{
-				Type: volumeapi.PoolConditionAccessible, Status: metav1.ConditionTrue,
-				ObservedGeneration: 2, LastTransitionTime: old, Reason: "DirectoryAccessible", Message: "old",
-			},
-			{
-				Type: volumeapi.PoolConditionMounted, Status: metav1.ConditionTrue,
-				ObservedGeneration: 2, LastTransitionTime: old, Reason: "Mounted", Message: "legacy",
-			},
-		}},
+		Status: volumeapi.PoolStatus{Conditions: []metav1.Condition{{
+			Type: volumeapi.PoolConditionAccessible, Status: metav1.ConditionTrue,
+			ObservedGeneration: 2, LastTransitionTime: old, Reason: "DirectoryAccessible", Message: "old",
+		}}},
 	}}
 	ok := Check{OK: true, Known: true, Reason: "DirectoryAccessible", Message: "old"}
 	reconciler := &Reconciler{
@@ -74,9 +68,6 @@ func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T
 	accessible := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionAccessible)
 	if accessible == nil || !accessible.LastTransitionTime.Equal(&old) || accessible.ObservedGeneration != 3 {
 		t.Fatalf("accessible = %#v", accessible)
-	}
-	if mounted := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionMounted); mounted != nil {
-		t.Fatalf("legacy mounted condition was not removed: %#v", mounted)
 	}
 }
 
