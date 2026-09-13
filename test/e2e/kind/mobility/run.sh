@@ -16,6 +16,8 @@ source "${ROOT_DIR}/test/e2e/kind/mobility/recovery.sh"
 source "${ROOT_DIR}/test/e2e/kind/mobility/preflight.sh"
 # shellcheck source=test/e2e/kind/mobility/cleanup-lifecycle.sh
 source "${ROOT_DIR}/test/e2e/kind/mobility/cleanup-lifecycle.sh"
+# shellcheck source=test/e2e/kind/mobility/terminal-journal-gc.sh
+source "${ROOT_DIR}/test/e2e/kind/mobility/terminal-journal-gc.sh"
 
 for command in docker kind kubectl helm sed; do
 	command -v "${command}" >/dev/null || {
@@ -309,6 +311,7 @@ test -n "${SOURCE_COPY_ID}"
 assert_node_absent "${SOURCE_NODE}" "${SOURCE_POOL}/.shiftpv/retired/${SOURCE_COPY_ID}"
 assert_cleanup_journal "shiftpvmove/${MOVE_NAME}" MoveSource "${VOLUME_ID}" "${SOURCE_COPY_ID}" ShiftPVMove
 test "${WEBHOOK_CERT_BEFORE}" = "$(kubectl -n shiftpv-system get "secret/${WEBHOOK_SECRET}" -o jsonpath='{.data.tls\.crt}')"
+verify_terminal_move_journal_gc "${MOVE_NAME}" "${VOLUME_ID}" "${NEW_POD}" "${DESTINATION_NODE}" "${DESTINATION_POOL}" "${CHECKSUM_AFTER}"
 
 recover_after_commit_failure
 assert_retained_volumes_unchanged

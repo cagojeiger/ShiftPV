@@ -31,6 +31,10 @@ controller:
 mobility:
   enabled: true
   interval: 30s
+  # Settled terminal Move journals are metadata-only audit records. They are
+  # deleted after this retention; copy data and unresolved journals are never
+  # deleted by this policy.
+  journalRetention: 168h
   webhookPort: 9443
   # Empty inherits controller.image, including an optional digest pin.
   helperImage: ""

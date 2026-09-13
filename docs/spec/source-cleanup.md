@@ -57,6 +57,27 @@ If the exact copy reappears after settlement, it is a report-only anomaly for
 operator review; cleanup does not reopen or auto-delete from the completed
 operation.
 
+## Terminal Move Journal Retention
+
+Terminal Move GC deletes only the Kubernetes `ShiftPVMove` metadata object. It
+never deletes a filesystem path or reuses a completed cleanup intent. The
+default minimum retention is seven days and the Helm value
+`mobility.journalRetention` accepts whole hours with a minimum of one hour.
+
+A journal is eligible only when every gate below is true:
+
+- the Move is `Succeeded` with cleanup `Completed`, or `Blocked` with recovery
+  `Recovered`, capacity approval released, and reason `RecoverySettled`;
+- the controller protection finalizer has already been removed in an earlier
+  reconcile and no other finalizer remains;
+- `lastTransitionTime` is valid, is not in the future, and the retention has
+  elapsed;
+- the current Volume is absent or does not reference this Move as `activeMove`;
+- deletion uses the exact Move name and UID precondition.
+
+Missing or contradictory evidence retains the journal. Journal GC is therefore
+bounded metadata retention after cleanup closure, not a second data GC path.
+
 ## Volume Delete Cleanup
 
 Volume deletion is a parent-owned transaction. `DeleteVolume` first records an
