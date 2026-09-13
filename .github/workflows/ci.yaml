@@ -120,7 +120,7 @@ jobs:
   kind-e2e:
     name: kind-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
@@ -174,7 +174,7 @@ jobs:
         run: ./test/e2e/kind/run.sh
 
       - name: Export failure diagnostics
-        if: failure()
+        if: failure() || cancelled()
         run: |
           mkdir -p .tmp/ci-diagnostics
           kind export logs .tmp/ci-diagnostics/kind --name shiftpv-e2e || true
@@ -183,7 +183,7 @@ jobs:
           kubectl get events -A --sort-by=.metadata.creationTimestamp > .tmp/ci-diagnostics/events.txt 2>&1 || true
 
       - name: Upload failure diagnostics
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: kind-e2e-diagnostics

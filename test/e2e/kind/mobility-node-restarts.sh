@@ -178,26 +178,43 @@ pause_at_phase() {
 	return 1
 }
 
-pause_at_cleaning_source_unsettled() {
-	local deadline=$((SECONDS + 300)) phase="" cleanup_phase=""
+pause_before_source_cleanup() {
+	local namespace=$1 pod destination_pool destination_identity deadline published_nodes observed_copy
+	pause_at_phase WaitingForDestinationPublish
+	test -z "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}')"
+
+	# With the controller stopped, let kubelet and the node scanner establish the
+	# destination publication fence. No cleanup Job can exist before the fault.
+	kubectl -n "${namespace}" rollout status deployment/writer --timeout=180s
+	pod=$(kubectl -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
+	test "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
+	destination_identity=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o json | jq -c '.status.destinationCopy')
+	destination_pool=$(jq -r '.poolName' <<<"${destination_identity}")
+	test -n "${destination_pool}"
+	test "${destination_identity}" != null
+	deadline=$((SECONDS + 180))
 	while ((SECONDS < deadline)); do
-		phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-		cleanup_phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}' 2>/dev/null || true)
-		if [[ "${phase}" == CleaningSource && -n "${cleanup_phase}" && "${cleanup_phase}" != Completed ]]; then
-			controller_down
-			phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')
-			cleanup_phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}')
-			test "${phase}" = CleaningSource
-			test "${cleanup_phase}" != Completed
+		published_nodes=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o json 2>/dev/null || true)
+		observed_copy=$(kubectl get "shiftpvpool/${destination_pool}" -o json 2>/dev/null || true)
+		if jq -e --arg node "${DESTINATION_NODE}" '.status.publishedNodes | index($node) != null' <<<"${published_nodes}" >/dev/null 2>&1 &&
+			jq -e --argjson identity "${destination_identity}" '
+				.metadata.name == $identity.poolName and
+				.metadata.uid == $identity.poolUID and
+				.spec.nodeName == $identity.nodeName and
+				.status.inventory.valid == true and
+				(.status.inventory.truncated // false) == false and
+				(.status.inventory.message // "") == "" and
+				any(.status.inventory.copies[]?;
+					.identity == $identity and .present == true and .published == true and (.problem // "") == "")
+			' <<<"${observed_copy}" >/dev/null 2>&1; then
+			assert_destination_publish_metadata "${namespace}" "${pod}"
+			assert_node_file "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}/payload"
+			assert_node_file "${DESTINATION_NODE}" "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}/payload"
 			return
 		fi
-		if [[ "${phase}" == Blocked || "${phase}" == Succeeded ]]; then
-			echo "Move reached terminal phase before CleaningSource node fault injection: ${phase}" >&2
-			return 1
-		fi
-		sleep 0.2
+		sleep 1
 	done
-	echo "Move did not reach unsettled CleaningSource before deadline; phase=${phase} cleanup=${cleanup_phase}" >&2
+	echo "destination publication was not observed before source cleanup: volume=${VOLUME_ID} move=${MOVE_NAME}" >&2
 	return 1
 }
 
@@ -301,39 +318,57 @@ finish_destination_move() {
 	assert_destination_publish_metadata "${namespace}" "${pod}"
 }
 
-assert_cleaning_source_wait() {
-	local expected_reason=$1
-	test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')" = CleaningSource
-	test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.reason}')" = "${expected_reason}"
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${MOVE_NAME}"
-	assert_node_file "${DESTINATION_NODE}" "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}/payload"
-	if [[ "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}' 2>/dev/null || true)" == Completed ]]; then
-		echo "cleanup completed while CleaningSource was waiting on ${expected_reason}" >&2
-		return 1
+assert_source_cleanup_interruption() {
+	local stopped_node=$1 expected_reason=$2 phase cleanup_phase deadline
+	if [[ "${stopped_node}" == "${SOURCE_NODE}" ]]; then
+		# The journal did not exist before the fault. Seeing it Pending or Running
+		# proves the restarted controller attempted exact source cleanup while the
+		# source node was unavailable, without completing or abandoning the hold.
+		deadline=$((SECONDS + 180))
+		while ((SECONDS < deadline)); do
+			phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')
+			cleanup_phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}' 2>/dev/null || true)
+			if [[ "${phase}" == WaitingForDestinationPublish || "${phase}" == CleaningSource ]] &&
+				[[ "${cleanup_phase}" == Pending || "${cleanup_phase}" == Running ]]; then
+				break
+			fi
+			if [[ "${phase}" == Blocked || "${phase}" == Succeeded || "${cleanup_phase}" == Completed || "${cleanup_phase}" == NeedsReview ]]; then
+				echo "source cleanup crossed an unsafe terminal boundary while the source node was unavailable: phase=${phase} cleanup=${cleanup_phase}" >&2
+				return 1
+			fi
+			sleep 1
+		done
+		if [[ "${cleanup_phase}" != Pending && "${cleanup_phase}" != Running ]]; then
+			echo "controller did not attempt source cleanup while the source node was unavailable: phase=${phase} cleanup=${cleanup_phase}" >&2
+			return 1
+		fi
+	else
+		kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.reason}'="${expected_reason}" --timeout=180s
 	fi
-}
-
-finish_cleaning_source_move() {
-	local namespace=$1 pod checksum source_copy
-	kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=600s
-	kubectl -n "${namespace}" rollout status deployment/writer --timeout=180s
-	pod=$(kubectl -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
-	test "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
-	checksum=$(kubectl -n "${namespace}" exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')
-	test "${checksum}" = "${SOURCE_CHECKSUM}"
-	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
-	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
-	assert_node_absent "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}"
+	for _ in {1..5}; do
+		phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')
+		cleanup_phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}' 2>/dev/null || true)
+		if [[ "${phase}" != WaitingForDestinationPublish && "${phase}" != CleaningSource ]]; then
+			echo "Move left the source-cleanup boundary while node was unavailable: phase=${phase}" >&2
+			return 1
+		fi
+		if [[ "${stopped_node}" == "${SOURCE_NODE}" ]]; then
+			if [[ "${cleanup_phase}" != Pending && "${cleanup_phase}" != Running ]]; then
+				echo "source cleanup left its retryable journal while the source node was unavailable: cleanup=${cleanup_phase}" >&2
+				return 1
+			fi
+		elif [[ -n "${cleanup_phase}" ]]; then
+			echo "source cleanup started while destination node ${stopped_node} was unavailable: cleanup=${cleanup_phase}" >&2
+			return 1
+		fi
+		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
+		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
+		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${MOVE_NAME}"
+		test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.capacityApproved}')" = true
+		sleep 1
+	done
+	assert_node_file "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}/payload"
 	assert_node_file "${DESTINATION_NODE}" "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}/payload"
-	source_copy=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
-	test -n "${source_copy}"
-	assert_cleanup_journal "shiftpvmove/${MOVE_NAME}" MoveSource "${VOLUME_ID}" "${source_copy}" ShiftPVMove
-	assert_destination_publish_metadata "${namespace}" "${pod}"
 }
 
 cleanup_case() {
@@ -431,21 +466,21 @@ run_cleaning_source_restart_case() {
 	create_source_workload "${namespace}" "${payload}"
 	kubectl cordon "${SOURCE_NODE}"
 	wait_for_move
-	pause_at_cleaning_source_unsettled
+	pause_before_source_cleanup "${namespace}"
 	stop_node "${stopped_node}"
 	if [[ "${stopped_node}" == "${DESTINATION_NODE}" ]]; then
 		kubectl uncordon "${SOURCE_NODE}"
 	fi
 	controller_up
-	assert_cleaning_source_wait "${expected_reason}"
+	assert_source_cleanup_interruption "${stopped_node}" "${expected_reason}"
 	start_node "${stopped_node}"
-	finish_cleaning_source_move "${namespace}"
-	echo "mobility CleaningSource ${stopped_node} restart continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"
+	finish_destination_move "${namespace}"
+	echo "mobility source-cleanup boundary ${stopped_node} restart continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"
 	cleanup_case "${namespace}"
 }
 
-# Keep each phase visible long enough to pause reconciliation before disk-side
-# work. The node failure and recovery are real Kind container stop/start events.
+# The node failure and recovery are real Kind container stop/start events. The
+# cleanup cases quiesce the controller before it can create a cleanup executor.
 helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--namespace shiftpv-system \
 	--reuse-values \

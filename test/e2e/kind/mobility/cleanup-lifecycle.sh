@@ -31,7 +31,9 @@ verify_cleanup_lifecycle() {
 	test "$(kubectl -n shiftpv-mobility-test exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${checksum}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.claimRef.uid}')" = "${PVC_UID}"
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${move}"
+	test "$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.capacityApproved}')" = true
+	test "$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.capacityReason}')" != RecoverySettled
 	if denial=$(kubectl -n shiftpv-system delete deployment/shiftpv-controller --dry-run=server 2>&1); then
 		echo 'NeedsReview cleanup permitted controller deletion' >&2
 		return 1

@@ -147,6 +147,15 @@ if [[ "${CLEANUP_JOB_RETRY_ONLY:-0}" == "1" ]]; then
 	exit 0
 fi
 
+if [[ "${MOBILITY_NODE_RESTARTS_ONLY:-0}" == "1" ]]; then
+	run_mobility_node_restarts
+	if [[ "${MOBILITY_NODE_RESTART_CASE:-all}" == all ]]; then
+		run_cleanup_job_retry
+	fi
+	echo "ShiftPV focused mobility node-container restart E2E passed"
+	exit 0
+fi
+
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/metrics/prometheus.yaml"
 kubectl -n shiftpv-system rollout status deployment/metrics-test --timeout=3m
 
@@ -170,13 +179,6 @@ fi
 if [[ "${MOBILITY_FILESYSTEM_FAULTS_ONLY:-0}" == "1" ]]; then
 	run_mobility_filesystem_faults
 	echo "ShiftPV focused mobility filesystem fault E2E passed"
-	exit 0
-fi
-
-if [[ "${MOBILITY_NODE_RESTARTS_ONLY:-0}" == "1" ]]; then
-	run_mobility_node_restarts
-	run_cleanup_job_retry
-	echo "ShiftPV focused mobility node-container restart E2E passed"
 	exit 0
 fi
 

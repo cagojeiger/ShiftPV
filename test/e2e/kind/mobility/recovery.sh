@@ -17,13 +17,18 @@ request_recovery() {
 	grep -q 'recovery cannot be removed' "${WORK_DIR}/removed-recovery.txt"
 }
 
-restart_during_recovery() {
+restart_recovery_controller() {
 	local move=$1 pod
 	kubectl wait "shiftpvmove/${move}" --for=jsonpath='{.status.recoveryPhase}'=Verifying --timeout=300s
 	pod=$(kubectl -n shiftpv-system get pod -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')
 	# Observe process termination; do not create overlapping controllers.
 	kubectl -n shiftpv-system delete "pod/${pod}" --wait=true --timeout=120s
 	kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=180s
+}
+
+restart_during_recovery() {
+	local move=$1
+	restart_recovery_controller "${move}"
 	kubectl wait "shiftpvmove/${move}" --for=jsonpath='{.status.recoveryPhase}'=Recovered --timeout=300s
 	kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.message}' | grep -Fq 'no operator action is required'
 	local recovery_event="" deadline=$((SECONDS + 60))
@@ -95,17 +100,22 @@ recover_after_commit_failure() {
 	docker exec "${DESTINATION_NODE}" test -f "${fault_path}"
 	docker exec "${DESTINATION_NODE}" rm -- "${fault_path}"
 	request_recovery "${return_move}"
-	restart_during_recovery "${return_move}"
+	restart_recovery_controller "${return_move}"
+	kubectl wait "shiftpvmove/${return_move}" --for=jsonpath='{.status.recoveryPhase}'=Retiring --timeout=300s
+	kubectl wait "shiftpvmove/${return_move}" --for=jsonpath='{.status.recoveryReason}'=CleanupNeedsReview --timeout=300s
+	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.phase}')" = Blocked
 	test "$(kubectl -n shiftpv-mobility-test exec "${current_pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${latest_checksum}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	# ResumeOwner restores API authority only. A non-owner copy with an
-	# unsettled cleanup contract remains byte-for-byte preserved for review.
+	# The committed owner remains available, but NeedsReview is not cleanup
+	# settlement. Preserve the non-owner copy, Move lock, and source capacity hold.
 	docker exec "${DESTINATION_NODE}" test -f "${destination_mount}/volumes/${VOLUME_ID}/payload"
 	test "$(docker exec "${DESTINATION_NODE}" sha256sum "${destination_mount}/volumes/${VOLUME_ID}/payload" | awk '{print $1}')" = "${CHECKSUM_BEFORE}"
-	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${return_move}"
+	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.capacityApproved}')" = true
+	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.capacityReason}')" != RecoverySettled
 	kubectl uncordon "${DESTINATION_NODE}"
-	echo 'post-commit recovery passed: current owner writes preserved; non-owner copy retained for review'
+	echo 'post-commit cleanup review passed: current owner writes preserved; non-owner copy, Move lock, and capacity hold retained'
 	verify_cleanup_lifecycle "${return_move}" "${DESTINATION_NODE}" "${destination_mount}" "${latest_checksum}" "${current_pod}"
 }
