@@ -136,14 +136,17 @@ wait_for_node() {
 }
 
 stop_source_node() {
-	local boot_id_before='' boot_id_after='' deadline
+	local boot_id_before='' boot_id_after='' deadline reboot_ssh_pid=''
 	if [[ "${FAULT_MODE}" == reboot ]]; then
 		boot_id_before=$(ssh_source cat /proc/sys/kernel/random/boot_id)
 		test -n "${boot_id_before}"
 		# Double force asks systemd to reboot immediately without an orderly unit
 		# shutdown. The host returns automatically, so this remains distinct from
 		# the hard-power stage that requires independent out-of-band recovery.
-		ssh_source sudo systemctl reboot --force --force >/dev/null 2>&1 || true
+		# Run SSH asynchronously because some clients retain the dead connection
+		# even after the host has completed the reboot.
+		ssh_source sudo systemctl reboot --force --force </dev/null >/dev/null 2>&1 &
+		reboot_ssh_pid=$!
 		deadline=$((SECONDS + NODE_TIMEOUT_SECONDS))
 		while ((SECONDS < deadline)); do
 			boot_id_after=$(ssh_source cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
@@ -153,9 +156,13 @@ stop_source_node() {
 			sleep 2
 		done
 		if [[ -z "${boot_id_after}" || "${boot_id_after}" == "${boot_id_before}" ]]; then
+			kill "${reboot_ssh_pid}" >/dev/null 2>&1 || true
+			wait "${reboot_ssh_pid}" 2>/dev/null || true
 			echo "source host did not return with a new boot ID" >&2
 			return 1
 		fi
+		kill "${reboot_ssh_pid}" >/dev/null 2>&1 || true
+		wait "${reboot_ssh_pid}" 2>/dev/null || true
 		printf 'PASS source OS reboot bootID=%s->%s\n' "${boot_id_before}" "${boot_id_after}" |
 			tee -a "${ARTIFACT_DIR}/reboots.txt"
 	fi
