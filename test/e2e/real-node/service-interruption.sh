@@ -16,7 +16,21 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 SYSTEM_NAMESPACE=${SYSTEM_NAMESPACE:-shiftpv-system}
 STORAGE_CLASS=${STORAGE_CLASS:-shiftpv}
-TEST_PREFIX=${TEST_PREFIX:-shiftpv-real-node-stage2}
+FAULT_MODE=${FAULT_MODE:-service}
+case "${FAULT_MODE}" in
+service)
+	TEST_PREFIX=${TEST_PREFIX:-shiftpv-real-node-stage2}
+	RESULT_MARKER=REAL_NODE_SERVICE_INTERRUPTION_OK
+	;;
+reboot)
+	TEST_PREFIX=${TEST_PREFIX:-shiftpv-real-node-stage3}
+	RESULT_MARKER=REAL_NODE_OS_REBOOT_OK
+	;;
+*)
+	echo "unsupported FAULT_MODE: ${FAULT_MODE}; expected service or reboot" >&2
+	exit 1
+	;;
+esac
 PHASE_TIMEOUT_SECONDS=${PHASE_TIMEOUT_SECONDS:-300}
 NODE_TIMEOUT_SECONDS=${NODE_TIMEOUT_SECONDS:-300}
 SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-5}
@@ -25,7 +39,7 @@ RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
 ARTIFACT_DIR=${ARTIFACT_DIR:-${ROOT_DIR}/.tmp/real-node/${RUN_ID}}
 
 if [[ "${FAULT_NODE}" != "${SOURCE_NODE}" || "${FAULT_SSH_TARGET}" != "${SOURCE_SSH_TARGET}" ]]; then
-	echo 'stage 2 requires the fault node to be the source node and its SSH identity to match' >&2
+	echo 'real-node qualification requires the fault node to be the source node and its SSH identity to match' >&2
 	exit 1
 fi
 
@@ -62,12 +76,23 @@ capture_evidence() {
 }
 
 snapshot_non_shiftpv_specs() {
-	local label=$1
-	k get deployments.apps,statefulsets.apps -A -o json | jq -S --arg system "${SYSTEM_NAMESPACE}" --arg prefix "${TEST_PREFIX}-" '
+	local label=$1 autoscaled_workloads
+	autoscaled_workloads=$(k get horizontalpodautoscalers.autoscaling -A -o json | jq -c '
+		[.items[] | {namespace: .metadata.namespace, kind: .spec.scaleTargetRef.kind, name: .spec.scaleTargetRef.name}]')
+	k get deployments.apps,statefulsets.apps -A -o json | jq -S \
+		--arg system "${SYSTEM_NAMESPACE}" --arg prefix "${TEST_PREFIX}-" \
+		--argjson autoscaled "${autoscaled_workloads}" '
 		[.items[]
 		 | select(.metadata.namespace != $system)
 		 | select((.metadata.namespace | startswith($prefix)) | not)
-		 | {apiVersion, kind, metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid, labels: .metadata.labels, annotations: .metadata.annotations}, spec}]
+		 | . as $workload
+		 | {apiVersion, kind, metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid, labels: .metadata.labels, annotations: .metadata.annotations},
+		    spec: (if any($autoscaled[];
+		      .namespace == $workload.metadata.namespace and
+		      .kind == $workload.kind and
+		      .name == $workload.metadata.name)
+		    then ($workload.spec | del(.replicas))
+		    else $workload.spec end)}]
 		| sort_by(.apiVersion, .kind, .metadata.namespace, .metadata.name)' >"${ARTIFACT_DIR}/${label}-non-shiftpv-workloads.json"
 	k get pvc -A -o json | jq -S --arg prefix "${TEST_PREFIX}-" '
 		[.items[]
@@ -85,9 +110,16 @@ snapshot_non_shiftpv_specs() {
 }
 
 restore_environment() {
-	local result_code=$?
+	local result_code=$? deadline
 	trap - EXIT INT TERM
 	set +e
+	if [[ "${FAULT_MODE}" == reboot ]]; then
+		deadline=$((SECONDS + NODE_TIMEOUT_SECONDS))
+		while ((SECONDS < deadline)); do
+			ssh_source true >/dev/null 2>&1 && break
+			sleep 2
+		done
+	fi
 	ssh_source sudo snap start microk8s >/dev/null 2>&1
 	k uncordon "${SOURCE_NODE}" >/dev/null 2>&1
 	k uncordon "${DESTINATION_NODE}" >/dev/null 2>&1
@@ -115,9 +147,41 @@ wait_for_node() {
 }
 
 stop_source_node() {
-	# Stop the runtime and kubelet/apiserver process together. `snap stop microk8s`
-	# shuts services down serially and can leave a small copy enough time to
-	# commit after the controller has already observed Copying.
+	local boot_id_before='' boot_id_after='' deadline reboot_ssh_pid=''
+	if [[ "${FAULT_MODE}" == reboot ]]; then
+		boot_id_before=$(ssh_source cat /proc/sys/kernel/random/boot_id)
+		test -n "${boot_id_before}"
+		# Double force asks systemd to reboot immediately without an orderly unit
+		# shutdown. The host returns automatically, so this remains distinct from
+		# the hard-power stage that requires independent out-of-band recovery.
+		# Run SSH asynchronously because some clients retain the dead connection
+		# even after the host has completed the reboot.
+		ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" \
+			"${SOURCE_SSH_TARGET}" sudo systemctl reboot --force --force \
+			</dev/null >/dev/null 2>&1 &
+		reboot_ssh_pid=$!
+		deadline=$((SECONDS + NODE_TIMEOUT_SECONDS))
+		while ((SECONDS < deadline)); do
+			boot_id_after=$(ssh_source cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+			if [[ -n "${boot_id_after}" && "${boot_id_after}" != "${boot_id_before}" ]]; then
+				break
+			fi
+			sleep 2
+		done
+		if [[ -z "${boot_id_after}" || "${boot_id_after}" == "${boot_id_before}" ]]; then
+			kill "${reboot_ssh_pid}" >/dev/null 2>&1 || true
+			wait "${reboot_ssh_pid}" 2>/dev/null || true
+			echo "source host did not return with a new boot ID" >&2
+			return 1
+		fi
+		kill "${reboot_ssh_pid}" >/dev/null 2>&1 || true
+		wait "${reboot_ssh_pid}" 2>/dev/null || true
+		printf 'PASS source OS reboot bootID=%s->%s\n' "${boot_id_before}" "${boot_id_after}" |
+			tee -a "${ARTIFACT_DIR}/reboots.txt"
+	fi
+	# Stop the runtime and kubelet together. In reboot mode this deterministic
+	# hold starts as soon as SSH returns, keeping the fault window open until the
+	# control plane observes the node unavailable.
 	ssh_source sudo systemctl stop \
 		snap.microk8s.daemon-containerd.service \
 		snap.microk8s.daemon-kubelite.service
@@ -410,5 +474,5 @@ for subject in non-shiftpv-workloads existing-pvcs existing-pvs storageclasses; 
 done
 capture_evidence passed
 
-printf 'REAL_NODE_SERVICE_INTERRUPTION_OK context=%s source=%s destination=%s artifacts=%s\n' \
-	"${KUBECTL_CONTEXT}" "${SOURCE_NODE}" "${DESTINATION_NODE}" "${ARTIFACT_DIR}"
+printf '%s context=%s source=%s destination=%s artifacts=%s\n' \
+	"${RESULT_MARKER}" "${KUBECTL_CONTEXT}" "${SOURCE_NODE}" "${DESTINATION_NODE}" "${ARTIFACT_DIR}"
