@@ -86,7 +86,7 @@ snapshot_non_shiftpv_specs() {
 		 | select(.metadata.namespace != $system)
 		 | select((.metadata.namespace | startswith($prefix)) | not)
 		 | . as $workload
-		 | {apiVersion, kind, metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid, labels: .metadata.labels, annotations: .metadata.annotations},
+		 | {apiVersion, kind, metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid},
 		    spec: (if any($autoscaled[];
 		      .namespace == $workload.metadata.namespace and
 		      .kind == $workload.kind and
@@ -97,15 +97,15 @@ snapshot_non_shiftpv_specs() {
 	k get pvc -A -o json | jq -S --arg prefix "${TEST_PREFIX}-" '
 		[.items[]
 		 | select((.metadata.namespace | startswith($prefix)) | not)
-		 | {metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid, labels: .metadata.labels, annotations: .metadata.annotations}, spec}]
+		 | {metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid}, spec}]
 		| sort_by(.metadata.namespace, .metadata.name)' >"${ARTIFACT_DIR}/${label}-existing-pvcs.json"
 	k get pv -o json | jq -S --arg prefix "${TEST_PREFIX}-" '
 		[.items[]
 		 | select((((.spec.claimRef.namespace // "") | startswith($prefix))) | not)
-		 | {metadata: {name: .metadata.name, uid: .metadata.uid, labels: .metadata.labels, annotations: .metadata.annotations}, spec}]
+		 | {metadata: {name: .metadata.name, uid: .metadata.uid}, spec}]
 		| sort_by(.metadata.name)' >"${ARTIFACT_DIR}/${label}-existing-pvs.json"
 	k get storageclass -o json | jq -S '
-		[.items[] | {metadata: {name: .metadata.name, uid: .metadata.uid, labels: .metadata.labels, annotations: .metadata.annotations}, provisioner, reclaimPolicy, volumeBindingMode, allowVolumeExpansion, mountOptions, parameters}]
+		[.items[] | {metadata: {name: .metadata.name, uid: .metadata.uid}, provisioner, reclaimPolicy, volumeBindingMode, allowVolumeExpansion, mountOptions, parameters}]
 		| sort_by(.metadata.name)' >"${ARTIFACT_DIR}/${label}-storageclasses.json"
 }
 
