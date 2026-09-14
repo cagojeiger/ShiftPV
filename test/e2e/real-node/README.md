@@ -66,8 +66,10 @@ They do not block later qualification runs.
 
 The script never drains the shared node and never edits non-ShiftPV workload
 specs. Those workloads still experience downtime while MicroK8s is stopped. It
-records their specs plus all existing PVCs, PVs, and StorageClasses before the
-test and requires exact equality afterward. A failed run restores MicroK8s and
+records their UID and specs plus all existing PVCs, PVs, and StorageClasses
+before the test and requires exact equality afterward. Controller-owned mutable
+labels and annotations are excluded from this baseline comparison; full resource
+snapshots remain in the evidence bundle. A failed run restores MicroK8s and
 uncordons both nodes, but deliberately preserves test storage for diagnosis.
 
 ```bash
