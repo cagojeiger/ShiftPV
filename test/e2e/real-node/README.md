@@ -112,6 +112,44 @@ This is an unclean OS reboot, not stage 4 hard power loss. Stage 4 still
 requires an independently demonstrated IPMI, managed-PDU, smart-plug, or other
 out-of-band power-on path before power is removed.
 
+## Soak
+
+`soak.sh` alternates one synthetic PVC between the two reviewed nodes while
+preserving its PVC/PV/ShiftPV identity and payload checksum. It proves the old
+copy is absent and the new serving copy is present after every move. Every
+tenth move restarts the controller; every twentieth move deletes the active
+cleanup Pod and requires the move to converge through retry.
+
+`CONTROLLER_RESTART_EVERY` and `CLEANUP_POD_DELETE_EVERY` may lower those
+intervals for a short fault-injection smoke run. The release gate uses their
+defaults, 10 and 20.
+
+The release gate requires both 100 successful moves and 12 elapsed hours. The
+script spaces moves across `MIN_DURATION_SECONDS=43200` by default and prints
+`REAL_NODE_SOAK_OK` only when both thresholds were actually met. Shorter runs
+are smoke tests and print `REAL_NODE_SOAK_SMOKE_OK`; they are not release
+qualification.
+
+Because other controllers remain active during a long soak, the baseline gate
+compares non-test resource UID and spec rather than controller-owned mutable
+labels or annotations. Full resource snapshots are still archived for review.
+
+```bash
+KUBECTL_CONTEXT=home-prod-kr \
+SOURCE_NODE=server-02 \
+DESTINATION_NODE=server-01 \
+FAULT_NODE=server-02 \
+FAULT_SSH_TARGET=ubuntu@home-server-02 \
+SOURCE_SSH_TARGET=ubuntu@home-server-02 \
+DESTINATION_SSH_TARGET=ubuntu@home-server-01 \
+EXPECTED_CONTROLLER_IMAGE=ghcr.io/example/controller:candidate@sha256:... \
+EXPECTED_NODE_IMAGE=ghcr.io/example/node:candidate@sha256:... \
+EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
+ITERATIONS=100 \
+MIN_DURATION_SECONDS=43200 \
+./test/e2e/real-node/soak.sh
+```
+
 ## Acceptance contract
 
 Every interruption, soak iteration, and canary move must preserve all of these
