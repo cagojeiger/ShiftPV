@@ -17,35 +17,11 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
-// Reclaim retires and purges exactly one API-authorized copy. Retries use the
-// same operation ID and local intent, including after rename or response loss.
-func Reclaim(ctx context.Context, root string, target volume.CopyIdentity, operationID string, authority func(context.Context) error) (Receipt, string, error) {
-	if authority == nil {
-		return Receipt{}, "", ErrIdentity
-	}
-	if err := authority(ctx); err != nil {
-		return Receipt{}, "", err
-	}
-	return reclaim(ctx, root, target, operationID, authority, preflightPurge, purgeRetired)
-}
-
 // ReclaimWithResume distinguishes a fresh destructive effect from replay of an
 // exact locally journaled effect. Callers may relax only observation checks
 // that the effect itself necessarily invalidated; API ownership stays required.
 func ReclaimWithResume(ctx context.Context, root string, target volume.CopyIdentity, operationID string, authority func(context.Context, bool) error) (Receipt, string, error) {
 	return reclaimWithState(ctx, root, target, operationID, authority, preflightPurge, purgeRetired)
-}
-
-func reclaim(
-	ctx context.Context,
-	root string,
-	target volume.CopyIdentity,
-	operationID string,
-	authority func(context.Context) error,
-	preflight func(*Store) error,
-	purge func(context.Context, *Store, localIntent) error,
-) (Receipt, string, error) {
-	return reclaimWithState(ctx, root, target, operationID, func(ctx context.Context, _ bool) error { return authority(ctx) }, preflight, purge)
 }
 
 func reclaimWithState(
@@ -149,32 +125,6 @@ func reclaimWithState(
 	}
 	digest, err := receiptDigest(receipt)
 	return receipt, digest, err
-}
-
-func VerifyReceipt(root string, target volume.CopyIdentity, operationID, digest string) (Receipt, error) {
-	if !volume.ValidIdentityToken(operationID) || target.Validate() != nil {
-		return Receipt{}, ErrIdentity
-	}
-	store, err := OpenExisting(root, PoolIdentity{InstallationID: target.InstallationID, PoolUID: target.PoolUID})
-	if err != nil {
-		return Receipt{}, err
-	}
-	defer store.Close()
-	var receipt Receipt
-	if err := store.readMarker(operationMarker("receipt", operationID), &receipt); err != nil {
-		return Receipt{}, err
-	}
-	if receipt.OperationID != operationID || receipt.Target != target || !receipt.Retired || !receipt.Purged {
-		return Receipt{}, ErrIdentity
-	}
-	want, err := receiptDigest(receipt)
-	if err != nil || want != digest {
-		return Receipt{}, ErrIdentity
-	}
-	if err := store.verifyAbsent(target); err != nil {
-		return Receipt{}, err
-	}
-	return receipt, nil
 }
 
 func (s *Store) ensureLocalIntent(target volume.CopyIdentity, operationID string, placed placement) (localIntent, error) {

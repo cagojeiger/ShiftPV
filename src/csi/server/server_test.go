@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,7 @@ func TestServeRejectsInvalidEndpointsBeforeRegistration(t *testing.T) {
 	for _, endpoint := range tests {
 		t.Run(endpoint, func(t *testing.T) {
 			called := false
-			err := Serve(endpoint, func(*grpc.Server) { called = true })
+			err := ServeContext(context.Background(), endpoint, func(*grpc.Server) { called = true })
 			if err == nil || !strings.Contains(err.Error(), "absolute unix URL") {
 				t.Fatalf("expected endpoint error, got %v", err)
 			}
@@ -40,7 +41,7 @@ func TestServePreparesUnixSocketAndRunsRegistration(t *testing.T) {
 	}
 	called := false
 	wasSocket := false
-	err = Serve("unix://"+socket, func(server *grpc.Server) {
+	err = ServeContext(context.Background(), "unix://"+socket, func(server *grpc.Server) {
 		called = true
 		info, statErr := os.Stat(socket)
 		wasSocket = statErr == nil && info.Mode()&os.ModeSocket != 0

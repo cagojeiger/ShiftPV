@@ -71,43 +71,6 @@ type State struct {
 	CurrentCopy         *volume.CopyIdentity
 }
 
-type CopyAuthority int
-
-const (
-	CopyAuthorityNone CopyAuthority = iota
-	CopyAuthorityCurrent
-	CopyAuthoritySuperseded
-	CopyAuthorityUncertain
-)
-
-// ClassifyCopyAuthority determines whether the exact physical copy is still
-// owned by a live volume incarnation. A different, internally consistent
-// current copy proves that the target has been superseded; incomplete or
-// contradictory state remains fail-closed.
-func ClassifyCopyAuthority(states map[string]State, target volume.CopyIdentity) CopyAuthority {
-	matched := 0
-	for volumeID, state := range states {
-		if state.CurrentCopy != nil && *state.CurrentCopy == target {
-			return CopyAuthorityCurrent
-		}
-		if volumeID != target.VolumeID && state.UID != target.VolumeUID {
-			continue
-		}
-		matched++
-		if state.CurrentCopy == nil || state.CurrentCopy.Validate() != nil ||
-			state.CurrentCopy.VolumeID != volumeID || state.CurrentCopy.VolumeUID != state.UID {
-			return CopyAuthorityUncertain
-		}
-	}
-	if matched == 0 {
-		return CopyAuthorityNone
-	}
-	if matched == 1 {
-		return CopyAuthoritySuperseded
-	}
-	return CopyAuthorityUncertain
-}
-
 func CreationOperationID(volumeUID string) (string, error) {
 	operationID := "create-" + volumeUID
 	if !volume.ValidIdentityToken(volumeUID) || !volume.ValidIdentityToken(operationID) {

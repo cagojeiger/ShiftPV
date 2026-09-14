@@ -137,49 +137,6 @@ func TestStatusEncodersPreserveEmbeddedCleanupJournal(t *testing.T) {
 	}
 }
 
-func TestClassifyCopyAuthorityUsesExactCurrentCopy(t *testing.T) {
-	target := volume.CopyIdentity{
-		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
-		VolumeID: "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", VolumeUID: "volume-uid",
-		CopyID: "old-copy", NodeName: "node-a", Role: volume.RoleIncoming,
-	}
-	current := target
-	current.CopyID, current.NodeName, current.Role = "current-copy", "node-b", volume.RoleServing
-
-	for name, test := range map[string]struct {
-		states map[string]State
-		want   CopyAuthority
-	}{
-		"none": {states: map[string]State{}, want: CopyAuthorityNone},
-		"current": {states: map[string]State{target.VolumeID: {
-			UID: target.VolumeUID, CurrentCopy: &target,
-		}}, want: CopyAuthorityCurrent},
-		"superseded": {states: map[string]State{target.VolumeID: {
-			UID: target.VolumeUID, CurrentCopy: &current,
-		}}, want: CopyAuthoritySuperseded},
-		"missing current identity": {states: map[string]State{target.VolumeID: {
-			UID: target.VolumeUID,
-		}}, want: CopyAuthorityUncertain},
-		"contradictory current identity": {states: map[string]State{target.VolumeID: {
-			UID: "another-volume-uid", CurrentCopy: &current,
-		}}, want: CopyAuthorityUncertain},
-		"ambiguous duplicate authority": {states: map[string]State{
-			target.VolumeID: {UID: target.VolumeUID, CurrentCopy: &current},
-			"shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbb": {UID: target.VolumeUID, CurrentCopy: func() *volume.CopyIdentity {
-				duplicate := current
-				duplicate.VolumeID = "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-				return &duplicate
-			}()},
-		}, want: CopyAuthorityUncertain},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if got := ClassifyCopyAuthority(test.states, target); got != test.want {
-				t.Fatalf("authority=%v, want %v", got, test.want)
-			}
-		})
-	}
-}
-
 func TestRegistryLifecycleAndPoolNodes(t *testing.T) {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		VolumeResource: "ShiftPVVolumeList",

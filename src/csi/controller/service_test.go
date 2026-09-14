@@ -200,7 +200,6 @@ func (r *durableCreateRegistry) CompleteCreate(context.Context, string, string, 
 }
 
 type identityCreateOperator struct {
-	fakeDirectoryOperator
 	events      *[]string
 	createErr   error
 	finalizeErr error

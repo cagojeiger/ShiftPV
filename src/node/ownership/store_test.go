@@ -157,7 +157,7 @@ func TestVolumeLockIsSharedAndPoolReplacementIsRejected(t *testing.T) {
 	}
 }
 
-func TestWithLockAndReceiptVerificationUseExactIdentity(t *testing.T) {
+func TestWithLockUsesExactIdentity(t *testing.T) {
 	root := t.TempDir()
 	identity := testIdentity()
 	authority := func(context.Context) error { return nil }
@@ -187,43 +187,10 @@ func TestWithLockAndReceiptVerificationUseExactIdentity(t *testing.T) {
 	if err := WithExistingLock(context.Background(), root, PoolIdentity{InstallationID: identity.InstallationID, PoolUID: identity.PoolUID}, "shiftpv-ffffffffffffffffffffffffffffffff", func(*Store) error { return nil }); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("read-only verification created a missing lock: %v", err)
 	}
+}
 
-	store, err := OpenExisting(root, PoolIdentity{InstallationID: identity.InstallationID, PoolUID: identity.PoolUID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	placed, err := store.readPlacement(identity.CopyID)
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(root, "volumes", identity.VolumeID)); err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	receipt := Receipt{OperationID: "operation-receipt", Target: identity, Device: placed.Device, Inode: placed.Inode, Retired: true, Purged: true}
-	if err := store.ensureMarker(operationMarker("receipt", receipt.OperationID), receipt); err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	digest, err := receiptDigest(receipt)
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	verified, err := VerifyReceipt(root, identity, receipt.OperationID, digest)
-	if err != nil || verified != receipt {
-		t.Fatalf("verified receipt=%#v err=%v", verified, err)
-	}
-	if _, err := VerifyReceipt(root, identity, receipt.OperationID, "changed"); !errors.Is(err, ErrIdentity) {
-		t.Fatalf("changed receipt digest accepted: %v", err)
-	}
-	if _, err := VerifyReceipt(root, identity, "invalid/operation", digest); !errors.Is(err, ErrIdentity) {
-		t.Fatalf("invalid receipt identity accepted: %v", err)
-	}
+func resumeAuthority(authority func(context.Context) error) func(context.Context, bool) error {
+	return func(ctx context.Context, _ bool) error { return authority(ctx) }
 }
 
 func TestInventoryIsBoundedAndPreservesMalformedMarkers(t *testing.T) {

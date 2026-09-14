@@ -1,7 +1,8 @@
 # ShiftPV 0.4 Contracts
 
 이 디렉터리는 0.4 구현과 운영 승인에 사용하는 normative contract다. 현재 checkout의 구현 후보가 이
-계약을 따르지만, fault·power-loss·soak gate와 별도 release가 끝나기 전에는 운영 보증이 아니다.
+계약을 따르고 실제 node의 unclean OS reboot와 100회·12시간 soak를 통과했지만, 별도 release 전에는
+released runtime이 아니다.
 
 | 문서 | 단일 책임 |
 |---|---|

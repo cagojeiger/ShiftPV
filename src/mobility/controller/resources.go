@@ -234,9 +234,10 @@ func (r *Reconciler) ensureJob(ctx context.Context, move volumeapi.Move, name, n
 	job.Spec.Template.Labels["shiftpv.io/move-uid"] = move.UID
 	job.Spec.Template.Spec.Containers[0].Command = command
 	job.Spec.Template.Spec.Containers[0].Args = args
-	created, err := r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	_, err = r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
-		created, err = r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, name, metav1.GetOptions{})
+		created, getErr := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, name, metav1.GetOptions{})
+		err = getErr
 		if err == nil && !sameOperationJob(created, job) {
 			return fmt.Errorf("mobility Job %q identity changed", name)
 		}
