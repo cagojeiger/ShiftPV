@@ -28,14 +28,16 @@ func PoolReadyForActiveMoveRepairAt(pool Pool, move Move, state State, now time.
 		return false
 	}
 	incoming, destination := move.Status.IncomingCopy, move.Status.DestinationCopy
-	if incoming == nil || destination == nil || incoming.Validate() != nil || destination.Validate() != nil ||
-		incoming.Role != volume.RoleIncoming || destination.Role != volume.RoleServing ||
-		incoming.InstallationID != destination.InstallationID || incoming.PoolName != pool.Name || destination.PoolName != pool.Name ||
-		incoming.PoolUID != pool.UID || destination.PoolUID != pool.UID || incoming.NodeName != pool.NodeName || destination.NodeName != pool.NodeName ||
-		incoming.VolumeID != move.Spec.VolumeID || destination.VolumeID != move.Spec.VolumeID ||
-		incoming.VolumeUID != state.UID || destination.VolumeUID != state.UID ||
-		incoming.CopyID != "move-"+move.UID+"-incoming" || destination.CopyID != "move-"+move.UID+"-serving" ||
-		move.Status.CopyOperationID != "copy-"+move.UID || move.Status.PromotionOperationID != "promote-"+move.UID {
+	if incoming == nil || destination == nil {
+		return false
+	}
+	// Repair reads the live destination Pool, so every destination term is
+	// pinned to it. The installation is not observable here; anchoring it to the
+	// incoming copy still rejects a transaction split across two installations.
+	if ValidateMoveTransactionIdentities(move, MoveDestinationAnchor{
+		InstallationID: incoming.InstallationID, PoolName: pool.Name, PoolUID: pool.UID,
+		NodeName: pool.NodeName, VolumeUID: state.UID,
+	}) != nil {
 		return false
 	}
 	expectedMarker := ""

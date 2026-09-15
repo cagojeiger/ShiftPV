@@ -51,7 +51,7 @@ func (r *Reconciler) settleRecoveryArtifacts(ctx context.Context, move *volumeap
 		}
 		if present {
 			spec := cleanupapi.Spec{
-				OperationID: "rollback-" + move.UID,
+				OperationID: volumeapi.MoveRollbackOperationID(move.UID),
 				Target:      target,
 				Reason:      "MoveRollback",
 				Authority:   cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID},
@@ -191,24 +191,84 @@ func noDestinationEffectIntent(move volumeapi.Move) bool {
 		move.Status.PromotionJobName == "" && move.Status.CopyOperationID == "" && move.Status.PromotionOperationID == ""
 }
 
+// validRollbackIntent rechecks the exact Move transaction a rollback cleanup may
+// be derived from. Each sub-predicate names the term it owns, so a NeedsReview
+// entry records which identity contradicted the durable intent.
 func validRollbackIntent(move volumeapi.Move) error {
-	incoming, destination, source := move.Status.IncomingCopy, move.Status.DestinationCopy, move.Status.SourceCopy
-	if move.Name == "" || !volume.ValidIdentityToken(move.UID) || source == nil || incoming == nil || destination == nil ||
-		source.Validate() != nil || incoming.Validate() != nil || destination.Validate() != nil ||
-		source.Role != volume.RoleServing || source.NodeName != move.Spec.SourceNode || source.VolumeID != move.Spec.VolumeID ||
-		!move.Status.CapacityApproved || move.Status.SourceBytes <= 0 ||
-		move.Status.DestinationNode == "" || move.Status.DestinationNode == move.Spec.SourceNode || move.Status.DestinationPoolUID == "" ||
-		incoming.Role != volume.RoleIncoming || destination.Role != volume.RoleServing ||
-		incoming.InstallationID != source.InstallationID || destination.InstallationID != source.InstallationID ||
-		incoming.PoolName != destination.PoolName || incoming.PoolUID != destination.PoolUID || incoming.PoolUID != move.Status.DestinationPoolUID ||
-		incoming.VolumeID != move.Spec.VolumeID || destination.VolumeID != move.Spec.VolumeID ||
-		incoming.VolumeUID != source.VolumeUID || destination.VolumeUID != source.VolumeUID ||
-		incoming.NodeName != move.Status.DestinationNode || destination.NodeName != move.Status.DestinationNode ||
-		incoming.CopyID != "move-"+move.UID+"-incoming" || destination.CopyID != "move-"+move.UID+"-serving" ||
-		move.Status.CopyOperationID != "copy-"+move.UID || move.Status.PromotionOperationID != "promote-"+move.UID ||
-		move.Status.CopyJobName != namesFor(move.Name).CopyJob ||
-		(move.Status.PromotionJobName != "" && move.Status.PromotionJobName != namesFor(move.Name).PromotionJob) {
-		return fmt.Errorf("exact Move transaction identities are required")
+	if err := rollbackSourceIntent(move); err != nil {
+		return err
+	}
+	if err := rollbackDestinationHold(move); err != nil {
+		return err
+	}
+	if err := rollbackTransactionCopies(move); err != nil {
+		return err
+	}
+	return rollbackExecutorIntent(move)
+}
+
+// rollbackSourceIntent requires the exact retained source copy the rollback
+// returns authority to.
+func rollbackSourceIntent(move volumeapi.Move) error {
+	source := move.Status.SourceCopy
+	switch {
+	case move.Name == "":
+		return volumeapi.MoveIdentityMismatch("Name")
+	case source == nil || source.Validate() != nil:
+		return volumeapi.MoveIdentityMismatch("SourceCopy")
+	case source.Role != volume.RoleServing:
+		return volumeapi.MoveIdentityMismatch("SourceCopy.Role")
+	case source.NodeName != move.Spec.SourceNode:
+		return volumeapi.MoveIdentityMismatch("SourceCopy.NodeName")
+	case source.VolumeID != move.Spec.VolumeID:
+		return volumeapi.MoveIdentityMismatch("SourceCopy.VolumeID")
+	}
+	return nil
+}
+
+// rollbackDestinationHold requires the approved destination reservation the
+// transaction artifacts were allowed to be written under.
+func rollbackDestinationHold(move volumeapi.Move) error {
+	switch {
+	case !move.Status.CapacityApproved:
+		return volumeapi.MoveIdentityMismatch("CapacityApproved")
+	case move.Status.SourceBytes <= 0:
+		return volumeapi.MoveIdentityMismatch("SourceBytes")
+	case move.Status.DestinationNode == "" || move.Status.DestinationNode == move.Spec.SourceNode:
+		return volumeapi.MoveIdentityMismatch("DestinationNode")
+	case move.Status.DestinationPoolUID == "":
+		return volumeapi.MoveIdentityMismatch("DestinationPoolUID")
+	}
+	return nil
+}
+
+// rollbackTransactionCopies defers to the volumeapi rule that owns the exact
+// copy and operation names. Rollback reads no destination Pool object, so the
+// Pool name is anchored to the incoming copy and only has to agree across the
+// two transaction copies; the Pool UID is still pinned to the approved hold.
+func rollbackTransactionCopies(move volumeapi.Move) error {
+	source, incoming := move.Status.SourceCopy, move.Status.IncomingCopy
+	if incoming == nil {
+		return volumeapi.MoveIdentityMismatch("IncomingCopy")
+	}
+	if move.Status.DestinationCopy == nil {
+		return volumeapi.MoveIdentityMismatch("DestinationCopy")
+	}
+	return volumeapi.ValidateMoveTransactionIdentities(move, volumeapi.MoveDestinationAnchor{
+		InstallationID: source.InstallationID, PoolName: incoming.PoolName, PoolUID: move.Status.DestinationPoolUID,
+		NodeName: move.Status.DestinationNode, VolumeUID: source.VolumeUID,
+	})
+}
+
+// rollbackExecutorIntent requires the deterministic Job names this Move owns,
+// since a rollback artifact may only exist because one of them ran.
+func rollbackExecutorIntent(move volumeapi.Move) error {
+	names := namesFor(move.Name)
+	switch {
+	case move.Status.CopyJobName != names.CopyJob:
+		return volumeapi.MoveIdentityMismatch("CopyJobName")
+	case move.Status.PromotionJobName != "" && move.Status.PromotionJobName != names.PromotionJob:
+		return volumeapi.MoveIdentityMismatch("PromotionJobName")
 	}
 	return nil
 }
