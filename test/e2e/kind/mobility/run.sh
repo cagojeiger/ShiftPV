@@ -219,7 +219,7 @@ VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 OLD_POD=$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.name}')
 OLD_POD_UID=$(kubectl -n shiftpv-mobility-test get pod "${OLD_POD}" -o jsonpath='{.metadata.uid}')
 SOURCE_NODE=$(kubectl -n shiftpv-mobility-test get pod "${OLD_POD}" -o jsonpath='{.spec.nodeName}')
-CHECKSUM_BEFORE=$(kubectl -n shiftpv-mobility-test exec "${OLD_POD}" -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_BEFORE=$(pod_sha256 shiftpv-mobility-test "${OLD_POD}" /data/payload)
 
 if [[ "${SOURCE_NODE}" == "${CLUSTER_NAME}-worker" ]]; then
 	DESTINATION_NODE="${CLUSTER_NAME}-worker2"
@@ -295,7 +295,7 @@ NEW_POD_UID=$(kubectl -n shiftpv-mobility-test get pod "${NEW_POD}" -o jsonpath=
 test "${NEW_POD_UID}" != "${OLD_POD_UID}"
 test "$(kubectl -n shiftpv-mobility-test get pod "${NEW_POD}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
 
-CHECKSUM_AFTER=$(kubectl -n shiftpv-mobility-test exec "${NEW_POD}" -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_AFTER=$(pod_sha256 shiftpv-mobility-test "${NEW_POD}" /data/payload)
 test "${CHECKSUM_BEFORE}" = "${CHECKSUM_AFTER}"
 test "$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 test "$(kubectl -n shiftpv-mobility-test get pvc wffc -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"

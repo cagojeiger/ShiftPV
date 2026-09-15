@@ -6,6 +6,8 @@ set -euo pipefail
 : "${KUBECONFIG:?isolated kubeconfig required}"
 test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}"
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 # shellcheck source=test/e2e/kind/cleanup-journal.sh
 source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
 NAMESPACE=shiftpv-completion-test
@@ -24,7 +26,7 @@ kubectl -n "${NAMESPACE}" rollout status deployment/wffc --timeout=180s
 PV=$(kubectl -n "${NAMESPACE}" get pvc/wffc -o jsonpath='{.spec.volumeName}')
 VOLUME=$(kubectl get "pv/${PV}" -o jsonpath='{.spec.csi.volumeHandle}')
 SOURCE=$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.status.ownerNode}')
-CHECKSUM=$(kubectl -n "${NAMESPACE}" exec deployment/wffc -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM=$(pod_sha256 "${NAMESPACE}" deployment/wffc /data/payload)
 kubectl patch "pv/${PV}" --type=merge -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
 
 kubectl apply -f - <<EOF
@@ -78,7 +80,7 @@ fi
 grep -Fq 'completion journal failure injection' <<<"${DENIAL}"
 test "$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.status.ownerNode}')" != "${SOURCE}"
 kubectl -n "${NAMESPACE}" rollout status deployment/wffc --timeout=180s
-test "$(kubectl -n "${NAMESPACE}" exec deployment/wffc -- sha256sum /data/payload | awk '{print $1}')" = "${CHECKSUM}"
+test "$(pod_sha256 "${NAMESPACE}" deployment/wffc /data/payload)" = "${CHECKSUM}"
 SOURCE_POOL=$(kubectl get shiftpvpools -o jsonpath="{.items[?(@.spec.nodeName=='${SOURCE}')].spec.mountPath}")
 test -n "${SOURCE_POOL}"
 docker exec "${SOURCE}" test ! -e "${SOURCE_POOL}/volumes/${VOLUME}"

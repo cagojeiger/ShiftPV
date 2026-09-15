@@ -28,7 +28,7 @@ verify_cleanup_lifecycle() {
 		sleep 5
 	done
 
-	test "$(kubectl -n shiftpv-mobility-test exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${checksum}"
+	test "$(pod_sha256 shiftpv-mobility-test "${pod}" /data/payload)" = "${checksum}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.claimRef.uid}')" = "${PVC_UID}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${move}"

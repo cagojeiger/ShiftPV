@@ -267,7 +267,7 @@ PV_NAME=$(kubectl -n "${NAMESPACE}" get "pvc/${FIRST_PVC}" -o jsonpath='{.spec.v
 PVC_UID=$(kubectl -n "${NAMESPACE}" get "pvc/${FIRST_PVC}" -o jsonpath='{.metadata.uid}')
 VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 COPY_ID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
-CHECKSUM=$(kubectl -n "${NAMESPACE}" exec "${FIRST_PVC}" -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM=$(pod_sha256 "${NAMESPACE}" "${FIRST_PVC}" /data/payload)
 test "${CHECKSUM}" = "$(node_sha256 "${NODE}" "${POOL_PATH}/volumes/${VOLUME_ID}/payload")"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 8388608

@@ -2,30 +2,18 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# shellcheck source=test/e2e/real-node/lib.sh
+source "${ROOT_DIR}/test/e2e/real-node/lib.sh"
 
-: "${KUBECTL_CONTEXT:?KUBECTL_CONTEXT is required}"
-: "${SOURCE_NODE:?SOURCE_NODE is required}"
-: "${DESTINATION_NODE:?DESTINATION_NODE is required}"
-: "${FAULT_NODE:?FAULT_NODE is required}"
-: "${FAULT_SSH_TARGET:?FAULT_SSH_TARGET is required}"
-: "${SOURCE_SSH_TARGET:?SOURCE_SSH_TARGET is required}"
-: "${DESTINATION_SSH_TARGET:?DESTINATION_SSH_TARGET is required}"
-: "${EXPECTED_CONTROLLER_IMAGE:?EXPECTED_CONTROLLER_IMAGE is required}"
-: "${EXPECTED_NODE_IMAGE:?EXPECTED_NODE_IMAGE is required}"
-EXPECTED_NON_DAEMONSET_PODS_SHA256=${EXPECTED_NON_DAEMONSET_PODS_SHA256:-}
-export EXPECTED_NON_DAEMONSET_PODS_SHA256
+require_real_node_env
 
-SYSTEM_NAMESPACE=${SYSTEM_NAMESPACE:-shiftpv-system}
-STORAGE_CLASS=${STORAGE_CLASS:-shiftpv}
+apply_real_node_defaults
 TEST_NAMESPACE=${TEST_NAMESPACE:-shiftpv-real-node-soak}
 ITERATIONS=${ITERATIONS:-100}
 MIN_DURATION_SECONDS=${MIN_DURATION_SECONDS:-43200}
 CONTROLLER_RESTART_EVERY=${CONTROLLER_RESTART_EVERY:-10}
 CLEANUP_POD_DELETE_EVERY=${CLEANUP_POD_DELETE_EVERY:-20}
 MOVE_TIMEOUT_SECONDS=${MOVE_TIMEOUT_SECONDS:-900}
-SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-5}
-WORKLOAD_IMAGE=${WORKLOAD_IMAGE:-busybox:1.37@sha256:7a3ebe5bfd1a4a19797d20b0c0bb39d44393e9a03fd852c0865b0f540d868df0}
-RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
 ARTIFACT_DIR=${ARTIFACT_DIR:-${ROOT_DIR}/.tmp/real-node/soak-${RUN_ID}}
 
 if ! [[ "${ITERATIONS}" =~ ^[1-9][0-9]*$ && "${MIN_DURATION_SECONDS}" =~ ^[0-9]+$ &&
@@ -38,27 +26,11 @@ if [[ "${FAULT_NODE}" != "${SOURCE_NODE}" || "${FAULT_SSH_TARGET}" != "${SOURCE_
 	exit 1
 fi
 
-for command in kubectl jq ssh diff tee; do
-	command -v "${command}" >/dev/null || {
-		echo "required command not found: ${command}" >&2
-		exit 1
-	}
-done
+require_real_node_commands
 
 mkdir -p "${ARTIFACT_DIR}"
 
-report_error() {
-	local result_code=$?
-	trap - ERR
-	printf 'FAIL line=%s exit=%d command=%s\n' "${BASH_LINENO[0]}" "${result_code}" "${BASH_COMMAND}" |
-		tee -a "${ARTIFACT_DIR}/failure.txt" >&2
-	exit "${result_code}"
-}
 trap report_error ERR
-
-k() {
-	kubectl --context "${KUBECTL_CONTEXT}" --request-timeout=30s "$@"
-}
 
 ssh_node() {
 	local node=$1
@@ -68,60 +40,6 @@ ssh_node() {
 	"${DESTINATION_NODE}") ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${DESTINATION_SSH_TARGET}" "$@" ;;
 	*) echo "unknown soak node: ${node}" >&2; return 1 ;;
 	esac
-}
-
-capture_evidence() {
-	local label=$1
-	k get nodes -o wide >"${ARTIFACT_DIR}/${label}-nodes.txt" 2>&1 || true
-	k get pods -A -o wide >"${ARTIFACT_DIR}/${label}-pods.txt" 2>&1 || true
-	k get pvc,pv -A -o wide >"${ARTIFACT_DIR}/${label}-storage.txt" 2>&1 || true
-	k get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml >"${ARTIFACT_DIR}/${label}-shiftpv.yaml" 2>&1 || true
-	k get events -A --sort-by=.metadata.creationTimestamp >"${ARTIFACT_DIR}/${label}-events.txt" 2>&1 || true
-	k -n "${SYSTEM_NAMESPACE}" logs deployment/shiftpv-controller --all-containers --tail=-1 >"${ARTIFACT_DIR}/${label}-controller.log" 2>&1 || true
-}
-
-snapshot_non_shiftpv_specs() {
-	local label=$1 autoscaled_workloads
-	autoscaled_workloads=$(k get horizontalpodautoscalers.autoscaling -A -o json | jq -c '
-		[.items[] | {namespace: .metadata.namespace, kind: .spec.scaleTargetRef.kind, name: .spec.scaleTargetRef.name}]')
-	k get deployments.apps,statefulsets.apps -A -o json | jq -S \
-		--arg system "${SYSTEM_NAMESPACE}" --arg test "${TEST_NAMESPACE}" \
-		--argjson autoscaled "${autoscaled_workloads}" '
-		[.items[]
-		 | select(.metadata.namespace != $system and .metadata.namespace != $test)
-		 | . as $workload
-		 | {apiVersion, kind, metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid},
-		    spec: (if any($autoscaled[];
-		      .namespace == $workload.metadata.namespace and
-		      .kind == $workload.kind and
-		      .name == $workload.metadata.name)
-		    then ($workload.spec | del(.replicas))
-		    else $workload.spec end)}]
-		| sort_by(.apiVersion, .kind, .metadata.namespace, .metadata.name)' >"${ARTIFACT_DIR}/${label}-non-shiftpv-workloads.json"
-	k get pvc -A -o json | jq -S --arg test "${TEST_NAMESPACE}" '
-		[.items[]
-		 | select(.metadata.namespace != $test)
-		 | {metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid}, spec}]
-		| sort_by(.metadata.namespace, .metadata.name)' >"${ARTIFACT_DIR}/${label}-existing-pvcs.json"
-	k get pv -o json | jq -S --arg test "${TEST_NAMESPACE}" '
-		[.items[]
-		 | select((.spec.claimRef.namespace // "") != $test)
-		 | {metadata: {name: .metadata.name, uid: .metadata.uid}, spec}]
-		| sort_by(.metadata.name)' >"${ARTIFACT_DIR}/${label}-existing-pvs.json"
-	k get storageclass -o json | jq -S '
-		[.items[] | {metadata: {name: .metadata.name, uid: .metadata.uid}, provisioner, reclaimPolicy, volumeBindingMode, allowVolumeExpansion, mountOptions, parameters}]
-		| sort_by(.metadata.name)' >"${ARTIFACT_DIR}/${label}-storageclasses.json"
-}
-
-warn_uncordon_needed() {
-	local node=$1 reason=$2
-	{
-		printf '\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n'
-		printf 'WARNING: %s\n' "${reason}"
-		printf 'Node %s was left cordoned. Run this once resolved:\n' "${node}"
-		printf '  kubectl --context %s uncordon %s\n' "${KUBECTL_CONTEXT}" "${node}"
-		printf '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n'
-	} | tee -a "${ARTIFACT_DIR}/failure.txt" >&2
 }
 
 restore_environment() {
@@ -290,29 +208,12 @@ cleanup_test_volume() {
 	k wait "shiftpvvolume/${volume_id}" --for=delete --timeout=300s
 }
 
-assert_no_unsettled_moves() {
-	local unsettled
-	unsettled=$(k get shiftpvmoves -o json | jq -r '
-		.items[]
-		| select(
-			((.status.phase == "Succeeded" and .status.cleanup.status.phase == "Completed") or
-			 (.status.phase == "Blocked" and .status.recoveryPhase == "Recovered" and
-			  (.status.capacityApproved // false) == false and .status.capacityReason == "RecoverySettled")) and
-			((.metadata.finalizers // []) | length) == 0
-		  | not)
-		| .metadata.name')
-	if [[ -n "${unsettled}" ]]; then
-		echo "unsettled Move journals remain: ${unsettled}" >&2
-		return 1
-	fi
-}
-
 "${ROOT_DIR}/test/e2e/real-node/preflight.sh" | tee "${ARTIFACT_DIR}/preflight.txt"
 if k get "namespace/${TEST_NAMESPACE}" >/dev/null 2>&1; then
 	echo "test namespace already exists: ${TEST_NAMESPACE}" >&2
 	exit 1
 fi
-snapshot_non_shiftpv_specs before
+snapshot_non_shiftpv_specs before exact "${TEST_NAMESPACE}"
 capture_evidence before
 
 k cordon "${DESTINATION_NODE}" >/dev/null
@@ -424,7 +325,7 @@ cleanup_test_volume "${PV_NAME}" "${VOLUME_ID}"
 k wait shiftpvpool --all --for=condition=Ready --timeout=300s
 test "$(k get shiftpvvolumes -o json | jq '.items | length')" = 0
 assert_no_unsettled_moves
-snapshot_non_shiftpv_specs after
+snapshot_non_shiftpv_specs after exact "${TEST_NAMESPACE}"
 for subject in non-shiftpv-workloads existing-pvcs existing-pvs storageclasses; do
 	diff -u "${ARTIFACT_DIR}/before-${subject}.json" "${ARTIFACT_DIR}/after-${subject}.json" >"${ARTIFACT_DIR}/${subject}.diff"
 done

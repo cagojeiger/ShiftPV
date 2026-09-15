@@ -52,7 +52,7 @@ recover_source_only() {
 	restart_during_recovery "${BLOCKED_MOVE}"
 	kubectl -n shiftpv-mobility-blocked rollout status deployment/source-only --timeout=180s
 	pod=$(kubectl -n shiftpv-mobility-blocked get pod -l app=shiftpv-mobility-source-only -o jsonpath='{.items[0].metadata.name}')
-	test "$(kubectl -n shiftpv-mobility-blocked exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${checksum}"
+	test "$(pod_sha256 shiftpv-mobility-blocked "${pod}" /data/payload)" = "${checksum}"
 	test "$(kubectl -n shiftpv-mobility-blocked get pvc/source-only -o jsonpath='{.metadata.uid}')" = "${source_claim_uid}"
 	test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.ownerNode}')" = "${BLOCKED_SOURCE_NODE}"
 	test "$(kubectl get "shiftpvvolume/${BLOCKED_VOLUME}" -o jsonpath='{.status.activeMove}')" = ""
@@ -95,7 +95,7 @@ recover_after_commit_failure() {
 	current_pod=$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.name}')
 	# New writes on the committed destination must survive recovery.
 	kubectl -n shiftpv-mobility-test exec "${current_pod}" -- sh -ec 'printf "after owner commit\n" >> /data/payload'
-	latest_checksum=$(kubectl -n shiftpv-mobility-test exec "${current_pod}" -- sha256sum /data/payload | awk '{print $1}')
+	latest_checksum=$(pod_sha256 shiftpv-mobility-test "${current_pod}" /data/payload)
 	test "${latest_checksum}" != "${CHECKSUM_BEFORE}"
 	docker exec "${DESTINATION_NODE}" test -f "${fault_path}"
 	docker exec "${DESTINATION_NODE}" rm -- "${fault_path}"
@@ -104,14 +104,14 @@ recover_after_commit_failure() {
 	kubectl wait "shiftpvmove/${return_move}" --for=jsonpath='{.status.recoveryPhase}'=Retiring --timeout=300s
 	kubectl wait "shiftpvmove/${return_move}" --for=jsonpath='{.status.recoveryReason}'=CleanupNeedsReview --timeout=300s
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.phase}')" = Blocked
-	test "$(kubectl -n shiftpv-mobility-test exec "${current_pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${latest_checksum}"
+	test "$(pod_sha256 shiftpv-mobility-test "${current_pod}" /data/payload)" = "${latest_checksum}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(kubectl -n shiftpv-mobility-test get pvc/wffc -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
 	# The committed owner remains available, but NeedsReview is not cleanup
 	# settlement. Preserve the non-owner copy, Move lock, and source capacity hold.
 	docker exec "${DESTINATION_NODE}" test -f "${destination_mount}/volumes/${VOLUME_ID}/payload"
-	test "$(docker exec "${DESTINATION_NODE}" sha256sum "${destination_mount}/volumes/${VOLUME_ID}/payload" | awk '{print $1}')" = "${CHECKSUM_BEFORE}"
+	test "$(node_sha256 "${DESTINATION_NODE}" "${destination_mount}/volumes/${VOLUME_ID}/payload")" = "${CHECKSUM_BEFORE}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = "${return_move}"
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.capacityApproved}')" = true
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.capacityReason}')" != RecoverySettled

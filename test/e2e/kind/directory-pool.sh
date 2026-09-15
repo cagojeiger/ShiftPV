@@ -4,6 +4,8 @@ set -euo pipefail
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORK_DIR:?WORK_DIR is required}"
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 # shellcheck source=test/e2e/kind/cleanup-journal.sh
 source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
 
@@ -294,8 +296,7 @@ if [[ "${SOURCE_NODE}" != "${POOL_A_NODE}" ]]; then
 fi
 MOBILITY_PV=$(kubectl -n "${MOBILITY_NAMESPACE}" get pvc/data -o jsonpath='{.spec.volumeName}')
 MOBILITY_VOLUME=$(kubectl get "pv/${MOBILITY_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
-CHECKSUM_BEFORE=$(kubectl -n "${MOBILITY_NAMESPACE}" exec "${MOBILITY_POD}" -- \
-	sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_BEFORE=$(pod_sha256 "${MOBILITY_NAMESPACE}" "${MOBILITY_POD}" /data/payload)
 
 kubectl uncordon "${POOL_B_NODE}"
 kubectl cordon "${POOL_A_NODE}"
@@ -319,8 +320,7 @@ kubectl -n "${MOBILITY_NAMESPACE}" rollout status deployment/writer --timeout=5m
 MOBILITY_POD=$(kubectl -n "${MOBILITY_NAMESPACE}" get pod \
 	-l app=shiftpv-directory-mobility -o jsonpath='{.items[0].metadata.name}')
 DESTINATION_NODE=$(kubectl -n "${MOBILITY_NAMESPACE}" get "pod/${MOBILITY_POD}" -o jsonpath='{.spec.nodeName}')
-CHECKSUM_AFTER=$(kubectl -n "${MOBILITY_NAMESPACE}" exec "${MOBILITY_POD}" -- \
-	sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_AFTER=$(pod_sha256 "${MOBILITY_NAMESPACE}" "${MOBILITY_POD}" /data/payload)
 if [[ "${DESTINATION_NODE}" != "${POOL_B_NODE}" || "${CHECKSUM_AFTER}" != "${CHECKSUM_BEFORE}" ]]; then
 	echo "ordinary-directory mobility validation failed: destination=${DESTINATION_NODE}" >&2
 	exit 1
