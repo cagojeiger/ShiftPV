@@ -3,6 +3,8 @@ set -euo pipefail
 
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd "${TEST_DIR}/../../../.." && pwd)
+# shellcheck source=test/e2e/kind/node-path.sh
+source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 LOCK_FILE=${ARTIFACT_LOCK_FILE:-"${TEST_DIR}/versions.env"}
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-artifact-e2e}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
@@ -114,7 +116,7 @@ test "$(kubectl get "pv/${pv_name}" -o jsonpath='{.spec.csi.driver}')" = csi.shi
 test "$(kubectl get "shiftpvvolume/${volume_id}" -o jsonpath='{.status.phase}')" = Ready
 owner_node=$(kubectl get "shiftpvvolume/${volume_id}" -o jsonpath='{.status.ownerNode}')
 test "$(kubectl get pod/shiftpv-e2e -o jsonpath='{.spec.nodeName}')" = "${owner_node}"
-checksum=$(kubectl exec pod/shiftpv-e2e -- sha256sum /data/payload | awk '{ print $1 }')
+checksum=$(pod_sha256 default shiftpv-e2e /data/payload)
 test -n "${checksum}"
 
 echo "ShiftPV public artifact smoke passed: chart=${CHART_VERSION} chartSHA256=${CHART_SHA256} controller=${CONTROLLER_IMAGE} node=${NODE_IMAGE} volume=${volume_id} owner=${owner_node} checksum=${checksum}"

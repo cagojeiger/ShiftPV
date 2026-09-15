@@ -4,8 +4,10 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 # shellcheck source=test/e2e/kind/node-path.sh
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
+# shellcheck source=test/e2e/kind/lib/cluster.sh
+source "${ROOT_DIR}/test/e2e/kind/lib/cluster.sh"
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-e2e}
-NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
+NODE_IMAGE=${NODE_IMAGE:-$(kind_node_image)}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 
 for command in docker kind kubectl helm sed jq; do
@@ -41,15 +43,7 @@ export DOCKER_CONFIG=${DOCKER_CONFIG_DIR}
 unset DOCKER_CONTEXT
 docker info >/dev/null
 
-cleanup() {
-  if [[ "${KEEP_CLUSTER}" == "1" ]]; then
-    echo "keeping cluster ${CLUSTER_NAME}, kubeconfig ${KUBECONFIG}, and data under ${WORK_DIR}"
-    return
-  fi
-  kind delete cluster --name "${CLUSTER_NAME}" >/dev/null 2>&1 || true
-  rm -rf -- "${WORK_DIR}"
-}
-trap cleanup EXIT
+trap delete_cluster_unless_kept EXIT
 
 sed \
   -e "s|__WORKER_A_POOL__|${WORKER_A_POOL}|g" \
@@ -224,7 +218,7 @@ kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-e2e --timeout=2m
 PV_NAME=$(kubectl get pvc shiftpv-e2e -o jsonpath='{.spec.volumeName}')
 PVC_UID=$(kubectl get pvc shiftpv-e2e -o jsonpath='{.metadata.uid}')
 OWNER_NODE=$(kubectl get pod shiftpv-e2e -o jsonpath='{.spec.nodeName}')
-CHECKSUM_BEFORE=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_BEFORE=$(pod_sha256 default shiftpv-e2e /data/payload)
 VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 PV_DRIVER=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.driver}')
 if [[ "${PV_DRIVER}" != "csi.shiftpv.io" ]]; then
@@ -272,7 +266,7 @@ if [[ "${NODE_UID_BEFORE}" == "${NODE_UID_AFTER}" ]]; then
 fi
 
 kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=2m
-CHECKSUM_AFTER_RESTARTS=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_AFTER_RESTARTS=$(pod_sha256 default shiftpv-e2e /data/payload)
 if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_RESTARTS}" ]]; then
   echo "checksum mismatch after controller and node plugin replacement" >&2
   exit 1
@@ -282,7 +276,7 @@ fi
 kubectl delete pod shiftpv-e2e --wait=true
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
 kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
-CHECKSUM_RECREATED=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_RECREATED=$(pod_sha256 default shiftpv-e2e /data/payload)
 if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_RECREATED}" ]]; then
   echo "checksum mismatch after Pod recreation" >&2
   exit 1
@@ -301,7 +295,7 @@ kubectl -n shiftpv-system get daemonset/shiftpv-node >/dev/null
 kubectl get validatingwebhookconfiguration shiftpv-lifecycle >/dev/null
 kubectl -n shiftpv-system wait --for=delete configmap/shiftpv-uninstall-permit --timeout=30s
 kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -F 'ShiftPV uninstall denied'
-CHECKSUM_AFTER_DENIAL=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_AFTER_DENIAL=$(pod_sha256 default shiftpv-e2e /data/payload)
 if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_DENIAL}" ]]; then
   echo "checksum mismatch after denied Helm uninstall" >&2
   exit 1
@@ -328,17 +322,13 @@ kubectl get "pv/${PV_NAME}" >/dev/null
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
 
-case "${OWNER_NODE}" in
-  "${CLUSTER_NAME}-worker") DATA_MOUNT=/mnt/shiftpv ;;
-  "${CLUSTER_NAME}-worker2") DATA_MOUNT=/srv/shiftpv-b ;;
-  *) echo "unexpected owner node: ${OWNER_NODE}" >&2; exit 1 ;;
-esac
+DATA_MOUNT=$(pool_mount_for_node "${OWNER_NODE}")
 assert_node_file "${OWNER_NODE}" "${DATA_MOUNT}/volumes/${VOLUME_ID}/payload"
 
 install_shiftpv true
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
 kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
-CHECKSUM_AFTER=$(kubectl exec shiftpv-e2e -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_AFTER=$(pod_sha256 default shiftpv-e2e /data/payload)
 
 if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER}" ]]; then
 	echo "checksum mismatch after Helm reinstall" >&2

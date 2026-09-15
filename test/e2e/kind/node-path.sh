@@ -44,6 +44,24 @@ node_sha256() {
 	docker exec "${node}" sha256sum "${path}" | awk '{print $1}'
 }
 
+# The suite cluster backs each worker with a different registered directory, so
+# an on-node assertion needs the mount that belongs to the node it inspects.
+# Requires CLUSTER_NAME from the caller.
+pool_mount_for_node() {
+	case $1 in
+	"${CLUSTER_NAME}-worker")
+		echo /mnt/shiftpv
+		;;
+	"${CLUSTER_NAME}-worker2")
+		echo /srv/shiftpv-b
+		;;
+	*)
+		echo "unknown storage node: $1" >&2
+		return 1
+		;;
+	esac
+}
+
 # The workload-side counterpart of node_sha256: read the payload through the
 # consumer Pod so the assertion exercises the published mount.
 pod_sha256() {
