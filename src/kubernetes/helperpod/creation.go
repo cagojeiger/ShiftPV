@@ -154,41 +154,101 @@ func (r *Runner) creationPod(ctx context.Context, identity volume.CopyIdentity, 
 }
 
 func sameCreationPod(expected, current *corev1.Pod) error {
-	if expected == nil || current == nil || current.UID == "" || current.DeletionTimestamp != nil ||
-		current.Name != expected.Name || current.Namespace != expected.Namespace ||
-		current.Spec.NodeName != expected.Spec.NodeName || current.Spec.ServiceAccountName != expected.Spec.ServiceAccountName ||
-		current.Spec.RestartPolicy != corev1.RestartPolicyNever || current.Spec.AutomountServiceAccountToken == nil ||
-		!*current.Spec.AutomountServiceAccountToken || current.Spec.HostNetwork || current.Spec.HostPID || current.Spec.HostIPC ||
-		len(current.Spec.Containers) != 1 || len(current.Spec.InitContainers) != 0 || len(current.Spec.EphemeralContainers) != 0 {
-		return fmt.Errorf("creation helper Pod identity or execution shape changed")
+	_, err := creationPodDifference(expected, current)
+	return err
+}
+
+// creationPodDifference names the first field in which a live creation helper
+// Pod departs from the desired one, together with the error that field's group
+// is reported as. The groups are evaluated in their original order, so the
+// container rows may index the first container: a shape row has already fixed
+// the current-side count, and the expected Pod is always the one this package
+// rendered.
+func creationPodDifference(expected, current *corev1.Pod) (string, error) {
+	if expected == nil || current == nil {
+		return "pod", fmt.Errorf("creation helper Pod identity or execution shape changed")
+	}
+	if field := firstDifference(creationPodShapeChecks(expected, current)); field != "" {
+		return field, fmt.Errorf("creation helper Pod identity or execution shape changed")
 	}
 	for key, value := range expected.Labels {
 		if current.Labels[key] != value {
-			return fmt.Errorf("creation helper Pod label changed")
+			return "metadata.labels[" + key + "]", fmt.Errorf("creation helper Pod label changed")
 		}
 	}
 	for key, value := range expected.Annotations {
 		if current.Annotations[key] != value {
-			return fmt.Errorf("creation helper Pod annotation changed")
+			return "metadata.annotations[" + key + "]", fmt.Errorf("creation helper Pod annotation changed")
 		}
 	}
-	want, got := expected.Spec.Containers[0], current.Spec.Containers[0]
-	if got.Name != want.Name || got.Image != want.Image || !reflect.DeepEqual(got.Command, want.Command) ||
-		len(got.Args) != 0 || len(got.Env) != 0 || len(got.EnvFrom) != 0 ||
-		!reflect.DeepEqual(got.Resources, want.Resources) || !reflect.DeepEqual(got.SecurityContext, want.SecurityContext) {
-		return fmt.Errorf("creation helper Pod command changed")
+	if field := firstDifference(creationPodCommandChecks(expected, current)); field != "" {
+		return field, fmt.Errorf("creation helper Pod command changed")
 	}
+	if !creationPoolMountBound(expected, current) {
+		return "spec.volumes[pool]", fmt.Errorf("creation helper Pod Pool mount changed")
+	}
+	return "", nil
+}
+
+// creationPodShapeChecks holds the helper to one identity-bound container with
+// no host namespace and no second execution path.
+func creationPodShapeChecks(expected, current *corev1.Pod) []fieldCheck {
+	return []fieldCheck{
+		{"metadata.uid", func() bool { return current.UID != "" }},
+		{"metadata.deletionTimestamp", func() bool { return current.DeletionTimestamp == nil }},
+		{"metadata.name", func() bool { return current.Name == expected.Name }},
+		{"metadata.namespace", func() bool { return current.Namespace == expected.Namespace }},
+		{"spec.nodeName", func() bool { return current.Spec.NodeName == expected.Spec.NodeName }},
+		{"spec.serviceAccountName", func() bool {
+			return current.Spec.ServiceAccountName == expected.Spec.ServiceAccountName
+		}},
+		{"spec.restartPolicy", func() bool { return current.Spec.RestartPolicy == corev1.RestartPolicyNever }},
+		{"spec.automountServiceAccountToken", func() bool {
+			return current.Spec.AutomountServiceAccountToken != nil && *current.Spec.AutomountServiceAccountToken
+		}},
+		{"spec.hostNetwork", func() bool { return !current.Spec.HostNetwork }},
+		{"spec.hostPID", func() bool { return !current.Spec.HostPID }},
+		{"spec.hostIPC", func() bool { return !current.Spec.HostIPC }},
+		{"spec.containers", func() bool { return len(current.Spec.Containers) == 1 }},
+		{"spec.initContainers", func() bool { return len(current.Spec.InitContainers) == 0 }},
+		{"spec.ephemeralContainers", func() bool { return len(current.Spec.EphemeralContainers) == 0 }},
+	}
+}
+
+// creationPodCommandChecks compares what the container would actually run: the
+// recorded operation command with no injected argument or environment.
+func creationPodCommandChecks(expected, current *corev1.Pod) []fieldCheck {
+	want, got := expected.Spec.Containers[0], current.Spec.Containers[0]
+	return []fieldCheck{
+		{"spec.containers[0].name", func() bool { return got.Name == want.Name }},
+		{"spec.containers[0].image", func() bool { return got.Image == want.Image }},
+		{"spec.containers[0].command", func() bool { return reflect.DeepEqual(got.Command, want.Command) }},
+		{"spec.containers[0].args", func() bool { return len(got.Args) == 0 }},
+		{"spec.containers[0].env", func() bool { return len(got.Env) == 0 }},
+		{"spec.containers[0].envFrom", func() bool { return len(got.EnvFrom) == 0 }},
+		{"spec.containers[0].resources", func() bool { return reflect.DeepEqual(got.Resources, want.Resources) }},
+		{"spec.containers[0].securityContext", func() bool {
+			return reflect.DeepEqual(got.SecurityContext, want.SecurityContext)
+		}},
+	}
+}
+
+// creationPoolMountBound reports whether the Pod still mounts exactly the
+// approved Pool root at the helper's mount path, with no subpath narrowing or
+// redirecting it.
+func creationPoolMountBound(expected, current *corev1.Pod) bool {
+	got := current.Spec.Containers[0]
 	for _, podVolume := range current.Spec.Volumes {
 		if podVolume.Name != "pool" || !reflect.DeepEqual(podVolume.HostPath, expected.Spec.Volumes[0].HostPath) {
 			continue
 		}
 		for _, mount := range got.VolumeMounts {
 			if mount.Name == "pool" && mount.MountPath == mountPath && mount.SubPath == "" && mount.SubPathExpr == "" {
-				return nil
+				return true
 			}
 		}
 	}
-	return fmt.Errorf("creation helper Pod Pool mount changed")
+	return false
 }
 
 func creationTermination(pod *corev1.Pod) (*corev1.ContainerStateTerminated, error) {
