@@ -13,7 +13,10 @@ COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/lifecycle/... ./sr
 # file's dialect from its own shebang.
 SHELL_SCRIPTS := $(shell find build test -type f -name '*.sh' | LC_ALL=C sort)
 
-verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template v04-model
+# helm-template is not listed here: COVERAGE_PACKAGES already contains ./test/...,
+# so coverage runs ./test/helm once with -race. The target stays for running the
+# chart render contracts on their own.
+verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint v04-model
 
 fmt:
 	gofmt -w $$(find src test -name '*.go' -type f)
@@ -92,77 +95,7 @@ linux-mount-integration:
 helm-lint:
 	helm lint charts/shiftpv
 
+# Chart render contracts live in ./test/helm as structural Go assertions, so a
+# broken contract names the flag or object instead of printing "Error 1".
 helm-template:
-	@set -e; controller_version=$$(awk '$$1 == "appVersion:" {gsub(/"/, "", $$2); print $$2; exit}' charts/shiftpv/Chart.yaml); \
-		first=$$(mktemp); second=$$(mktemp); \
-		trap 'rm -f "$$first" "$$second"' EXIT; \
-		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$first"; \
-		helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 >"$$second"; \
-		cmp -s "$$first" "$$second"; \
-		grep -q -- "--helper-image=ghcr.io/cagojeiger/shiftpv-controller:$${controller_version}" "$$first"; \
-		grep -q -- "--mobility-helper-image=ghcr.io/cagojeiger/shiftpv-controller:$${controller_version}" "$$first"; \
-		grep -q -- '--helper-service-account=shiftpv-helper' "$$first"; \
-		grep -q -- '--controller-service-account=shiftpv-controller' "$$first"; \
-		grep -q -- 'name: shiftpv-helper' "$$first"
-	@! helm template shiftpv charts/shiftpv --namespace shiftpv-system --set controller.replicas=2 >/dev/null 2>&1
-	@set -e; rendered="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
-		--set controller.image.repository=controller --set controller.image.tag=test \
-		--set node.image.repository=node --set node.image.tag=test \
-		--set helperPod.image=controller:test --set mobility.helperImage=helper:test)"; \
-		printf '%s\n' "$$rendered" | grep -q 'image: "controller:test"'; \
-		printf '%s\n' "$$rendered" | grep -q 'image: "node:test"'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--helper-image=controller:test'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--helper-service-account=shiftpv-helper'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--controller-service-account=shiftpv-controller'; \
-		printf '%s\n' "$$rendered" | grep -q 'name: shiftpv-helper'; \
-		printf '%s\n' "$$rendered" | grep -q 'resources: \["shiftpvvolumes/status", "shiftpvmoves/status"\]'; \
-		! printf '%s\n' "$$rendered" | grep -q 'shiftpvcleanups'; \
-		printf '%s\n' "$$rendered" | grep -q '"helm.sh/hook": pre-delete'; \
-		! printf '%s\n' "$$rendered" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
-		printf '%s\n' "$$rendered" | grep -q 'command: \["/shiftpv-uninstall-guard"\]'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--mobility-helper-image=helper:test'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--webhook-service-name=shiftpv-webhook'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--webhook-tls-secret-name=shiftpv-webhook-tls'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--webhook-configuration-name=shiftpv-mobility'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--validation-webhook-configuration-name=shiftpv-lifecycle'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--storage-class-name=shiftpv'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--uninstall-permit-name=shiftpv-uninstall-permit'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--permit-name=shiftpv-uninstall-permit'; \
-		printf '%s\n' "$$rendered" | grep -q -- '--validation-webhook=shiftpv-lifecycle'; \
-		! printf '%s\n' "$$rendered" | grep -q '^kind: MutatingWebhookConfiguration$$'; \
-		! printf '%s\n' "$$rendered" | grep -q '^kind: ValidatingWebhookConfiguration$$'; \
-		! printf '%s\n' "$$rendered" | grep -q '^kind: Secret$$'; \
-		printf '%s\n' "$$rendered" | grep -q 'mountPropagation: HostToContainer'
-	@set -e; helpers="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
-		--set controller.image.repository=controller --set controller.image.tag=test \
-		--set helperPod.image=create-helper:test --set mobility.helperImage=move-helper:test)"; \
-		printf '%s\n' "$$helpers" | grep -q -- '--helper-image=create-helper:test'; \
-		printf '%s\n' "$$helpers" | grep -q -- '--mobility-helper-image=move-helper:test'
-	@set -e; external_helper=existing-helper; helpers="$$(helm template shiftpv charts/shiftpv \
-		--namespace shiftpv-system --kube-version 1.35.8 \
-		--set serviceAccount.helper.create=false \
-		--set serviceAccount.helper.name=$$external_helper)"; \
-		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/clusterrole.yaml'; \
-		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/clusterrolebinding.yaml'; \
-		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/role.yaml'; \
-		printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/rolebinding.yaml'; \
-		! printf '%s\n' "$$helpers" | grep -q '# Source: shiftpv/templates/helper/serviceaccount.yaml'; \
-		printf '%s\n' "$$helpers" | grep -q -- "--helper-service-account=$$external_helper"; \
-		[ "$$(printf '%s\n' "$$helpers" | grep -c "^    name: $$external_helper$$")" -eq 2 ]
-	@set -e; argocd="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 --set lifecycle.uninstallMode=argocd)"; \
-		printf '%s\n' "$$argocd" | grep -q '"argocd.argoproj.io/hook": PreDelete'; \
-		! printf '%s\n' "$$argocd" | grep -q '"helm.sh/hook": pre-delete'
-	@set -e; disabled="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 --set mobility.enabled=false)"; \
-		printf '%s\n' "$$disabled" | grep -q '^kind: Service$$'; \
-		printf '%s\n' "$$disabled" | grep -q 'name: shiftpv-webhook'; \
-		printf '%s\n' "$$disabled" | grep -q -- '--mobility-enabled=false'; \
-		printf '%s\n' "$$disabled" | grep -q -- '--webhook-listen-address=:9443'; \
-		! printf '%s\n' "$$disabled" | grep -q -- '--mobility-helper-image='
-	@set -e; kubelet_root=/var/snap/microk8s/common/var/lib/kubelet; \
-		microk8s="$$(helm template shiftpv charts/shiftpv --namespace shiftpv-system --kube-version 1.35.8 \
-			--set node.kubeletRootDir=$$kubelet_root)"; \
-		printf '%s\n' "$$microk8s" | grep -q -- "--target-root=$$kubelet_root/pods"; \
-		printf '%s\n' "$$microk8s" | grep -q -- "--kubelet-registration-path=$$kubelet_root/plugins/csi.shiftpv.io/csi.sock"; \
-		printf '%s\n' "$$microk8s" | grep -q "path: $$kubelet_root/plugins/csi.shiftpv.io"; \
-		printf '%s\n' "$$microk8s" | grep -q "path: $$kubelet_root/plugins_registry"; \
-		printf '%s\n' "$$microk8s" | grep -q "path: $$kubelet_root/pods"
+	go test -count=1 ./test/helm/...
