@@ -8,6 +8,8 @@ source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
 # shellcheck source=test/e2e/kind/mobility/controller.sh
 source "${ROOT_DIR}/test/e2e/kind/mobility/controller.sh"
+# shellcheck source=test/e2e/kind/lib/wait.sh
+source "${ROOT_DIR}/test/e2e/kind/lib/wait.sh"
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORK_DIR:?WORK_DIR is required}"
 : "${WORKER_A_POOL:?WORKER_A_POOL is required}"
@@ -15,8 +17,8 @@ source "${ROOT_DIR}/test/e2e/kind/mobility/controller.sh"
 
 SOURCE_NODE="${CLUSTER_NAME}-worker"
 DESTINATION_NODE="${CLUSTER_NAME}-worker2"
-SOURCE_MOUNT=/mnt/shiftpv
-DESTINATION_MOUNT=/srv/shiftpv-b
+SOURCE_MOUNT=$(pool_mount_for_node "${SOURCE_NODE}")
+DESTINATION_MOUNT=$(pool_mount_for_node "${DESTINATION_NODE}")
 restore_cluster() {
 	for node in "${SOURCE_NODE}" "${DESTINATION_NODE}"; do
 		docker start "${node}" >/dev/null 2>&1 || true
@@ -69,18 +71,6 @@ create_source_workload() {
 	SOURCE_CHECKSUM=$(pod_sha256 "${namespace}" "${SOURCE_POD}" /data/payload)
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
 	kubectl uncordon "${DESTINATION_NODE}"
-}
-
-wait_for_move() {
-	local deadline=$((SECONDS + 120))
-	MOVE_NAME=""
-	while ((SECONDS < deadline)); do
-		MOVE_NAME=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${VOLUME_ID}')].metadata.name}" 2>/dev/null || true)
-		[[ -n "${MOVE_NAME}" ]] && return
-		sleep 0.2
-	done
-	echo "Move was not created for ${VOLUME_ID}" >&2
-	return 1
 }
 
 placement_pod_for_move() {
@@ -367,7 +357,7 @@ run_case() {
 	TEST_NAMESPACE="${namespace}"
 	create_source_workload "${namespace}" "${payload}"
 	kubectl cordon "${SOURCE_NODE}"
-	wait_for_move
+	MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 	pause_before_copy
 	stop_node "${stopped_node}"
 	# When the destination is down, the source is the only worker that can host
@@ -389,7 +379,7 @@ run_copying_source_restart_case() {
 	TEST_NAMESPACE="${namespace}"
 	create_source_workload "${namespace}" "${payload}"
 	kubectl cordon "${SOURCE_NODE}"
-	wait_for_move
+	MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 	pause_at_phase Copying
 	stop_node "${SOURCE_NODE}"
 	controller_up
@@ -405,7 +395,7 @@ run_pre_copy_destination_restart_case() {
 	TEST_NAMESPACE="${namespace}"
 	create_source_workload "${namespace}" "${payload}"
 	kubectl cordon "${SOURCE_NODE}"
-	wait_for_move
+	MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 	pause_before_copy
 	stop_node "${DESTINATION_NODE}"
 	# The destination capacity hold is durable, but the source remains authoritative.
@@ -424,7 +414,7 @@ run_destination_restart_case() {
 	TEST_NAMESPACE="${namespace}"
 	create_source_workload "${namespace}" "${payload}"
 	kubectl cordon "${SOURCE_NODE}"
-	wait_for_move
+	MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 	pause_at_phase "${fault_phase}"
 	if [[ "${expected_owner}" == "${DESTINATION_NODE}" ]]; then
 		test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
@@ -449,7 +439,7 @@ run_cleaning_source_restart_case() {
 	TEST_NAMESPACE="${namespace}"
 	create_source_workload "${namespace}" "${payload}"
 	kubectl cordon "${SOURCE_NODE}"
-	wait_for_move
+	MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 	pause_before_source_cleanup "${namespace}"
 	stop_node "${stopped_node}"
 	if [[ "${stopped_node}" == "${DESTINATION_NODE}" ]]; then

@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 # shellcheck source=test/e2e/kind/node-path.sh
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
+# shellcheck source=test/e2e/kind/lib/cluster.sh
+source "${ROOT_DIR}/test/e2e/kind/lib/cluster.sh"
+# shellcheck source=test/e2e/kind/lib/wait.sh
+source "${ROOT_DIR}/test/e2e/kind/lib/wait.sh"
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-mobility-e2e}
-NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
+NODE_IMAGE=${NODE_IMAGE:-$(kind_node_image)}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 PHASE_TIMEOUT_SECONDS=${PHASE_TIMEOUT_SECONDS:-180}
 # shellcheck source=test/e2e/kind/cleanup-journal.sh
@@ -33,30 +37,7 @@ WORKER_B_POOL="${WORK_DIR}/worker-b"
 mkdir -p "${WORKER_A_POOL}" "${WORKER_B_POOL}"
 export KUBECONFIG="${E2E_KUBECONFIG:-${WORK_DIR}/kubeconfig}"
 
-cleanup() {
-	if [[ "${KEEP_CLUSTER}" == "1" ]]; then
-		echo "keeping cluster ${CLUSTER_NAME}, kubeconfig ${KUBECONFIG}, and data under ${WORK_DIR}"
-		return
-	fi
-	kind delete cluster --name "${CLUSTER_NAME}" >/dev/null 2>&1 || true
-	rm -rf -- "${WORK_DIR}"
-}
-trap cleanup EXIT
-
-pool_mount_for_node() {
-	case $1 in
-	"${CLUSTER_NAME}-worker")
-		echo /mnt/shiftpv
-		;;
-	"${CLUSTER_NAME}-worker2")
-		echo /srv/shiftpv-b
-		;;
-	*)
-		echo "unknown storage node: $1" >&2
-		return 1
-		;;
-	esac
-}
+trap delete_cluster_unless_kept EXIT
 
 assert_move_diagnostics() {
 	local move=$1 expected_phase=$2 expected_reason=$3 expected_event=$4
@@ -179,12 +160,7 @@ echo "ShiftPV unknown destination data fail-closed E2E passed: volume=${BLOCKED_
 
 docker exec "${COPY_FAULT_NODE}" rm -- "${UNRECORDED_PATH}"
 kubectl wait shiftpvpool/worker-b --for=jsonpath='{.status.inventory.valid}'=true --timeout=120s
-for _ in {1..120}; do
-	BLOCKED_MOVE=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${BLOCKED_VOLUME}')].metadata.name}" 2>/dev/null || true)
-	[[ -n "${BLOCKED_MOVE}" ]] && break
-	sleep 1
-done
-test -n "${BLOCKED_MOVE:-}"
+BLOCKED_MOVE=$(wait_for_move "${BLOCKED_VOLUME}" 120)
 kubectl wait "shiftpvmove/${BLOCKED_MOVE}" --for=jsonpath='{.status.phase}'=Blocked --timeout=300s
 BLOCKED_PHASE=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.phase}')
 test "${BLOCKED_PHASE:-}" = "Blocked"
@@ -228,12 +204,7 @@ else
 fi
 
 kubectl cordon "${SOURCE_NODE}"
-for _ in {1..120}; do
-	MOVE_NAME=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${VOLUME_ID}')].metadata.name}" 2>/dev/null || true)
-	[[ -n "${MOVE_NAME}" ]] && break
-	sleep 1
-done
-test -n "${MOVE_NAME}"
+MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120)
 
 if kubectl patch "shiftpvmove/${MOVE_NAME}" --type merge -p '{"spec":{"recovery":"ResumeOwner"}}' >"${WORK_DIR}/early-recovery.txt" 2>&1; then
 	echo 'recovery was accepted before the move was Blocked' >&2

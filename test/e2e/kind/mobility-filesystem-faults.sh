@@ -8,6 +8,8 @@ source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
 # shellcheck source=test/e2e/kind/mobility/controller.sh
 source "${ROOT_DIR}/test/e2e/kind/mobility/controller.sh"
+# shellcheck source=test/e2e/kind/lib/wait.sh
+source "${ROOT_DIR}/test/e2e/kind/lib/wait.sh"
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORK_DIR:?WORK_DIR is required}"
 : "${WORKER_A_POOL:?WORKER_A_POOL is required}"
@@ -15,8 +17,8 @@ source "${ROOT_DIR}/test/e2e/kind/mobility/controller.sh"
 
 SOURCE_NODE="${CLUSTER_NAME}-worker"
 DESTINATION_NODE="${CLUSTER_NAME}-worker2"
-SOURCE_MOUNT=/mnt/shiftpv
-DESTINATION_MOUNT=/srv/shiftpv-b
+SOURCE_MOUNT=$(pool_mount_for_node "${SOURCE_NODE}")
+DESTINATION_MOUNT=$(pool_mount_for_node "${DESTINATION_NODE}")
 MOUNT_STATE=normal
 
 restore_destination_mount() {
@@ -62,18 +64,6 @@ create_source_workload() {
 	SOURCE_CHECKSUM=$(pod_sha256 "${namespace}" "${SOURCE_POD}" /data/payload)
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
 	kubectl uncordon "${DESTINATION_NODE}"
-}
-
-wait_for_move() {
-	local deadline=$((SECONDS + 120))
-	MOVE_NAME=""
-	while ((SECONDS < deadline)); do
-		MOVE_NAME=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${VOLUME_ID}')].metadata.name}" 2>/dev/null || true)
-		[[ -n "${MOVE_NAME}" ]] && return
-		sleep 0.2
-	done
-	echo "Move was not created for ${VOLUME_ID}" >&2
-	return 1
 }
 
 wait_for_deferred_discovery() {
@@ -178,7 +168,7 @@ docker exec "${DESTINATION_NODE}" test ! -e "${DESTINATION_MOUNT}/.shiftpv/incom
 docker exec "${DESTINATION_NODE}" umount "${DESTINATION_MOUNT}"
 MOUNT_STATE=normal
 wait_for_pool_condition worker-b True PoolReady
-wait_for_move
+MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 wait_for_success "${ENOSPC_NAMESPACE}"
 echo "mobility resumed after destination ENOSPC recovery: volume=${VOLUME_ID} move=${MOVE_NAME}"
 delete_workload "${ENOSPC_NAMESPACE}"
@@ -191,7 +181,7 @@ create_source_workload "${READONLY_NAMESPACE}" 'ShiftPV mobility read-only recov
 docker exec "${DESTINATION_NODE}" mount -t tmpfs -o size=8m,nr_inodes=1024 shiftpv-mobility-readonly "${DESTINATION_MOUNT}"
 MOUNT_STATE=tmpfs_rw
 kubectl cordon "${SOURCE_NODE}"
-wait_for_move
+MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 COPY_JOB=""
 COPY_JOB_DEADLINE=$((SECONDS + 180))
 while ((SECONDS < COPY_JOB_DEADLINE)); do

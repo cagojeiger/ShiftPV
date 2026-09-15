@@ -12,6 +12,8 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 # shellcheck source=test/e2e/kind/cleanup-journal.sh
 source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
+# shellcheck source=test/e2e/kind/lib/wait.sh
+source "${ROOT_DIR}/test/e2e/kind/lib/wait.sh"
 
 test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}"
 test -d "${WORK_DIR}"
@@ -21,8 +23,8 @@ test -d "${WORKER_B_POOL}"
 NAMESPACE=shiftpv-cleanup-retry
 SOURCE_NODE="${CLUSTER_NAME}-worker"
 DESTINATION_NODE="${CLUSTER_NAME}-worker2"
-SOURCE_MOUNT=/mnt/shiftpv
-DESTINATION_MOUNT=/srv/shiftpv-b
+SOURCE_MOUNT=$(pool_mount_for_node "${SOURCE_NODE}")
+DESTINATION_MOUNT=$(pool_mount_for_node "${DESTINATION_NODE}")
 
 cleanup() {
 	local result_code=$?
@@ -125,13 +127,7 @@ SOURCE_CHECKSUM=$(pod_sha256 "${NAMESPACE}" "${SOURCE_POD}" /data/payload)
 
 kubectl uncordon "${DESTINATION_NODE}"
 kubectl cordon "${SOURCE_NODE}"
-MOVE_NAME=""
-for _ in {1..180}; do
-	MOVE_NAME=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${VOLUME_ID}')].metadata.name}" 2>/dev/null || true)
-	[[ -n "${MOVE_NAME}" ]] && break
-	sleep 1
-done
-test -n "${MOVE_NAME}"
+MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 180)
 
 killed_pod_uid=""
 killed_pod_name=""

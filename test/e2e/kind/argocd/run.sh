@@ -6,8 +6,10 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 # shellcheck source=test/e2e/kind/cleanup-journal.sh
 source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
+# shellcheck source=test/e2e/kind/lib/cluster.sh
+source "${ROOT_DIR}/test/e2e/kind/lib/cluster.sh"
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-argocd-e2e}
-NODE_IMAGE=${NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}
+NODE_IMAGE=${NODE_IMAGE:-$(kind_node_image)}
 ARGOCD_VERSION=${ARGOCD_VERSION:-v3.5.2}
 ARGOCD_MANIFEST_SHA256=${ARGOCD_MANIFEST_SHA256:-9a87f2b3e14c278f12501eb0ef5c3955b27cf05370ca425381c6a908cf85a5c5}
 IMAGE_REPOSITORY=${IMAGE_REPOSITORY:-shiftpv-argocd-e2e}
@@ -49,15 +51,7 @@ export DOCKER_HOST=${DOCKER_HOST:-${ACTIVE_DOCKER_HOST}}
 export DOCKER_CONFIG=${DOCKER_CONFIG_DIR}
 unset DOCKER_CONTEXT
 
-cleanup() {
-	if [[ "${KEEP_CLUSTER}" == "1" ]]; then
-		echo "keeping cluster ${CLUSTER_NAME}, kubeconfig ${KUBECONFIG}, and data under ${WORK_DIR}"
-		return
-	fi
-	kind delete cluster --name "${CLUSTER_NAME}" >/dev/null 2>&1 || true
-	rm -rf -- "${WORK_DIR}"
-}
-trap cleanup EXIT
+trap delete_cluster_unless_kept EXIT
 
 sed "s|__WORKER_POOL__|${WORKER_POOL}|g" \
 	"${ROOT_DIR}/test/e2e/kind/argocd/cluster.yaml.tpl" >"${WORK_DIR}/cluster.yaml"
@@ -146,7 +140,7 @@ PV_NAME=$(kubectl get pvc shiftpv-argocd-e2e -o jsonpath='{.spec.volumeName}')
 VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 PVC_UID=$(kubectl get pvc shiftpv-argocd-e2e -o jsonpath='{.metadata.uid}')
 COPY_ID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
-CHECKSUM_BEFORE=$(kubectl exec shiftpv-argocd-e2e -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_BEFORE=$(pod_sha256 default shiftpv-argocd-e2e /data/payload)
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${NODE}"
@@ -192,7 +186,7 @@ if [[ "${UNINSTALL_STATE}" == "granted" ]]; then
 	exit 1
 fi
 
-CHECKSUM_AFTER_DENIAL=$(kubectl exec shiftpv-argocd-e2e -- sha256sum /data/payload | awk '{print $1}')
+CHECKSUM_AFTER_DENIAL=$(pod_sha256 default shiftpv-argocd-e2e /data/payload)
 if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_DENIAL}" ]]; then
 	echo "checksum mismatch after denied Argo CD Application deletion" >&2
 	exit 1
