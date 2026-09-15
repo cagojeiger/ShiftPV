@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -57,13 +58,13 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 		Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: volumeID, UID: copy.VolumeUID},
 	}}
 	setVolumeStateFixture(t, dynamicClient, volumeID, volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy})
-	if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), registry, cleanup); err == nil {
 		t.Fatal("Ready volume was accepted without a deletion fence")
 	}
 	if _, err := registry.BeginDelete(context.Background(), volumeID, copy.VolumeUID, copy); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err != nil {
+	if err := verifyCleanupAuthority(context.Background(), registry, cleanup); err != nil {
 		t.Fatalf("durably fenced deletion was rejected: %v", err)
 	}
 	state, err := registry.Get(context.Background(), volumeID)
@@ -72,7 +73,7 @@ func TestVolumeCleanupAuthorityRequiresDurableDeletionFence(t *testing.T) {
 	}
 	state.PublishedNodes = []string{copy.NodeName}
 	setVolumeStateFixture(t, dynamicClient, volumeID, state)
-	if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), registry, cleanup); err == nil {
 		t.Fatal("published volume crossed deletion authority")
 	}
 }
@@ -90,7 +91,7 @@ func TestUnknownOrphanCleanupHasNoExecutableAuthority(t *testing.T) {
 	if err := cleanup.Spec.Validate(); err == nil {
 		t.Fatal("orphan cleanup intent unexpectedly validated")
 	}
-	if err := verifyCleanupAuthority(context.Background(), nil, cleanup, false); err == nil {
+	if err := verifyCleanupAuthority(context.Background(), nil, cleanup); err == nil {
 		t.Fatal("unknown orphan observation gained destructive authority")
 	}
 }
@@ -210,13 +211,13 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 				OperationID: test.operationID, Target: test.target, Reason: test.reason,
 				Authority: cleanupapi.Authority{Kind: "ShiftPVMove", Name: moveName, UID: moveUID},
 			}}
-			if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err != nil {
+			if err := verifyCleanupAuthority(context.Background(), registry, cleanup); err != nil {
 				t.Fatalf("exact recovery cleanup rejected: %v", err)
 			}
 			if test.reason == "MoveSource" {
 				state.PublishedNodes = nil
 				setVolumeStateFixture(t, client, volumeID, state)
-				if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+				if err := verifyCleanupAuthority(context.Background(), registry, cleanup); err == nil {
 					t.Fatal("postcommit source cleanup was accepted before destination publish intent")
 				}
 				state.PublishedNodes = []string{test.current.NodeName}
@@ -233,7 +234,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 				}); err != nil {
 					t.Fatal(err)
 				}
-				if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+				if err := verifyCleanupAuthority(context.Background(), registry, cleanup); err == nil {
 					t.Fatal("postcommit source cleanup was accepted before scanner publication proof")
 				}
 				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
@@ -249,13 +250,13 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 				}
 			}
 			cleanup.Spec.OperationID = "replacement-operation"
-			if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+			if err := verifyCleanupAuthority(context.Background(), registry, cleanup); err == nil {
 				t.Fatal("replacement cleanup operation was accepted")
 			}
 			cleanup.Spec.OperationID = test.operationID
 			state.PublishedNodes = append(state.PublishedNodes, test.target.NodeName)
 			setVolumeStateFixture(t, client, volumeID, state)
-			if err := verifyCleanupAuthority(context.Background(), registry, cleanup, false); err == nil {
+			if err := verifyCleanupAuthority(context.Background(), registry, cleanup); err == nil {
 				t.Fatal("published cleanup target was accepted")
 			}
 		})
@@ -306,6 +307,32 @@ func TestMoveAuthorityRequiresExactMoveJobPoolAndSourceCopy(t *testing.T) {
 	}
 	if err := authority(context.Background()); err == nil {
 		t.Fatal("changed executor identity was accepted")
+	}
+}
+
+func TestOwnedMoveJobReportsTerminatingExecutorPodWithoutNilError(t *testing.T) {
+	const (
+		moveName = "move-test"
+		moveUID  = "move-uid"
+	)
+	deletionTimestamp := metav1.Now()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "copy-pod", Namespace: "system", UID: "pod-uid", DeletionTimestamp: &deletionTimestamp,
+		Finalizers: []string{"shiftpv.io/test"},
+	}, Spec: corev1.PodSpec{NodeName: "destination"}}
+	client := fake.NewClientset(pod)
+	t.Setenv("POD_NAME", pod.Name)
+	options := moveOptions{moveName: moveName, moveUID: moveUID, operationID: "copy-operation", namespace: "system"}
+	move := volumeapi.Move{Name: moveName, UID: moveUID}
+	_, err := ownedMoveJob(context.Background(), client, options, move, "destination")
+	if err == nil {
+		t.Fatal("terminating executor Pod was accepted")
+	}
+	if !errors.Is(err, volumeapi.ErrStateConflict) {
+		t.Fatalf("error = %v, want a state conflict", err)
+	}
+	if got := err.Error(); got != "move executor Pod is terminating: "+volumeapi.ErrStateConflict.Error() {
+		t.Fatalf("error = %q", got)
 	}
 }
 

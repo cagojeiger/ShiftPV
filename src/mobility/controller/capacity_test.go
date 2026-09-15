@@ -74,6 +74,34 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 	}
 }
 
+func TestEnsureCapacityRejectsNonPositiveSourceUsage(t *testing.T) {
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}}
+	repository := &memoryRepository{
+		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CapacityBytes: 32 << 20}},
+		pools: []volumeapi.Pool{
+			{Name: "source", UID: "source-pool-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "128Mi"},
+			{Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: "128Mi"},
+		},
+		moves: []volumeapi.Move{move},
+	}
+	reconciler := &Reconciler{
+		Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", HelperImage: "helper",
+		CapacityProbe: fakeMoveCapacityProbe{usage: 0, stats: poolcapacity.Filesystem{AvailableBytes: 64 << 20}},
+		PoolLocks:     &poolcapacity.Locker{},
+	}
+	err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"})
+	if err == nil {
+		t.Fatal("unmeasured source usage was approved")
+	}
+	if !strings.Contains(err.Error(), "source volume usage must be positive") {
+		t.Fatalf("error = %v", err)
+	}
+	if move.Status.CapacityApproved || move.Status.CapacityReason != "" || move.Status.SourceBytes != 0 {
+		t.Fatalf("capacity status = %+v", move.Status)
+	}
+}
+
 func TestDestinationCapacityRetainsRecoveredMoveUntilSettled(t *testing.T) {
 	currentID := "shiftpv-0123456789abcdef0123456789abcdef"
 	recoveredID := "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

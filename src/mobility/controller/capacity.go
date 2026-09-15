@@ -35,6 +35,9 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 		if err != nil {
 			return fmt.Errorf("measure source volume usage: %w", err)
 		}
+		if sourceBytes <= 0 {
+			return fmt.Errorf("source volume usage must be positive, got %d", sourceBytes)
+		}
 	}
 	stats, err := r.CapacityProbe.StatFS(ctx, observed.DestinationNode)
 	if err != nil {
@@ -107,9 +110,6 @@ func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current vol
 			return 0, 0, 0, 0, fmt.Errorf("destination physical pending total overflows int64")
 		}
 		physicalPending += move.Status.SourceBytes
-	}
-	if logicalReserved > limit {
-		return requested, logicalReserved, physicalPending, limit, nil
 	}
 	return requested, logicalReserved, physicalPending, limit, nil
 }

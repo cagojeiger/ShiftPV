@@ -41,6 +41,8 @@ SOURCE_NODE=lab-worker-1 \
 DESTINATION_NODE=lab-worker-2 \
 FAULT_NODE=lab-worker-2 \
 FAULT_SSH_TARGET=ubuntu@lab-worker-2 \
+SOURCE_SSH_TARGET=ubuntu@lab-worker-1 \
+DESTINATION_SSH_TARGET=ubuntu@lab-worker-2 \
 EXPECTED_CONTROLLER_IMAGE=registry.example/shiftpv-controller:candidate@sha256:... \
 EXPECTED_NODE_IMAGE=registry.example/shiftpv-node:candidate@sha256:... \
 EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
@@ -71,7 +73,14 @@ records their UID and specs plus all existing PVCs, PVs, and StorageClasses
 before the test and requires exact equality afterward. Controller-owned mutable
 labels and annotations are excluded from this baseline comparison; full resource
 snapshots remain in the evidence bundle. A failed run restores MicroK8s and
-uncordons both nodes, but deliberately preserves test storage for diagnosis.
+uncordons both nodes, but deliberately preserves test storage for diagnosis. If
+an uncordon itself fails, the script leaves a loud warning with the exact
+manual `kubectl uncordon` command in stderr and `failure.txt`, and exits
+non-zero even when the qualification steps otherwise passed.
+
+`service-interruption.sh` runs `preflight.sh` internally, which enforces
+`EXPECTED_NON_DAEMONSET_PODS_SHA256` only when the fault node actually hosts an
+approved shared-node baseline (see Preflight); otherwise leave it unset.
 
 ```bash
 KUBECTL_CONTEXT=home-prod-kr \
@@ -83,7 +92,6 @@ SOURCE_SSH_TARGET=ubuntu@home-server-02 \
 DESTINATION_SSH_TARGET=ubuntu@home-server-01 \
 EXPECTED_CONTROLLER_IMAGE=ghcr.io/example/controller:candidate@sha256:... \
 EXPECTED_NODE_IMAGE=ghcr.io/example/node:candidate@sha256:... \
-EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
 ./test/e2e/real-node/service-interruption.sh
 ```
 
@@ -94,7 +102,9 @@ gates as stage 2. Set `FAULT_MODE=reboot`. Each fault immediately reboots the
 source host with `systemctl reboot --force --force`, waits for a different boot
 ID, then stops the MicroK8s runtime and kubelite together until Kubernetes has
 observed the node unavailable. This makes the fault boundary deterministic
-without claiming a physical power cut.
+without claiming a physical power cut. If the source node does not come back
+within `NODE_TIMEOUT_SECONDS`, restore deliberately leaves it cordoned instead
+of uncordoning an unreachable node, and prints the manual recovery command.
 
 ```bash
 FAULT_MODE=reboot \
@@ -107,7 +117,6 @@ SOURCE_SSH_TARGET=ubuntu@home-server-02 \
 DESTINATION_SSH_TARGET=ubuntu@home-server-01 \
 EXPECTED_CONTROLLER_IMAGE=ghcr.io/example/controller:candidate@sha256:... \
 EXPECTED_NODE_IMAGE=ghcr.io/example/node:candidate@sha256:... \
-EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
 ./test/e2e/real-node/service-interruption.sh
 ```
 
@@ -136,6 +145,13 @@ qualification.
 Because other controllers remain active during a long soak, the baseline gate
 compares non-test resource UID and spec rather than controller-owned mutable
 labels or annotations. Full resource snapshots are still archived for review.
+A failed uncordon during restore leaves a loud warning with the exact
+manual `kubectl uncordon` command and exits non-zero even when the soak
+otherwise passed.
+
+`soak.sh` also runs `preflight.sh` internally, which enforces
+`EXPECTED_NON_DAEMONSET_PODS_SHA256` only when the fault node actually hosts an
+approved shared-node baseline (see Preflight); otherwise leave it unset.
 
 ```bash
 KUBECTL_CONTEXT=home-prod-kr \
@@ -147,7 +163,6 @@ SOURCE_SSH_TARGET=ubuntu@home-server-02 \
 DESTINATION_SSH_TARGET=ubuntu@home-server-01 \
 EXPECTED_CONTROLLER_IMAGE=ghcr.io/example/controller:candidate@sha256:... \
 EXPECTED_NODE_IMAGE=ghcr.io/example/node:candidate@sha256:... \
-EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
 ITERATIONS=100 \
 MIN_DURATION_SECONDS=43200 \
 ./test/e2e/real-node/soak.sh

@@ -12,7 +12,8 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 : "${DESTINATION_SSH_TARGET:?DESTINATION_SSH_TARGET is required}"
 : "${EXPECTED_CONTROLLER_IMAGE:?EXPECTED_CONTROLLER_IMAGE is required}"
 : "${EXPECTED_NODE_IMAGE:?EXPECTED_NODE_IMAGE is required}"
-: "${EXPECTED_NON_DAEMONSET_PODS_SHA256:?EXPECTED_NON_DAEMONSET_PODS_SHA256 is required}"
+EXPECTED_NON_DAEMONSET_PODS_SHA256=${EXPECTED_NON_DAEMONSET_PODS_SHA256:-}
+export EXPECTED_NON_DAEMONSET_PODS_SHA256
 
 SYSTEM_NAMESPACE=${SYSTEM_NAMESPACE:-shiftpv-system}
 STORAGE_CLASS=${STORAGE_CLASS:-shiftpv}
@@ -112,15 +113,35 @@ snapshot_non_shiftpv_specs() {
 		| sort_by(.metadata.name)' >"${ARTIFACT_DIR}/${label}-storageclasses.json"
 }
 
+warn_uncordon_needed() {
+	local node=$1 reason=$2
+	{
+		printf '\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n'
+		printf 'WARNING: %s\n' "${reason}"
+		printf 'Node %s was left cordoned. Run this once resolved:\n' "${node}"
+		printf '  kubectl --context %s uncordon %s\n' "${KUBECTL_CONTEXT}" "${node}"
+		printf '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n'
+	} | tee -a "${ARTIFACT_DIR}/failure.txt" >&2
+}
+
 restore_environment() {
-	local result_code=$?
+	local result_code=$? restore_failed=0
 	trap - ERR EXIT INT TERM
 	set +e
-	k uncordon "${SOURCE_NODE}" >/dev/null 2>&1
-	k uncordon "${DESTINATION_NODE}" >/dev/null 2>&1
+	if ! k uncordon "${SOURCE_NODE}" >/dev/null 2>&1; then
+		restore_failed=1
+		warn_uncordon_needed "${SOURCE_NODE}" "uncordon failed for ${SOURCE_NODE}"
+	fi
+	if ! k uncordon "${DESTINATION_NODE}" >/dev/null 2>&1; then
+		restore_failed=1
+		warn_uncordon_needed "${DESTINATION_NODE}" "uncordon failed for ${DESTINATION_NODE}"
+	fi
 	capture_evidence final
 	if ((result_code != 0)); then
 		echo "soak failed; test resources were preserved for diagnosis in ${ARTIFACT_DIR}" >&2
+	fi
+	if ((result_code == 0 && restore_failed)); then
+		result_code=1
 	fi
 	exit "${result_code}"
 }

@@ -52,6 +52,7 @@ spec:
             - --permit-namespace={{ .Release.Namespace }}
             - --permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --validation-webhook={{ include "shiftpv.validationWebhookConfigurationName" . }}
+            - --pool-readiness-stale-after={{ .Values.poolReadiness.staleAfter }}
             - --timeout=90s
             {{- if eq $uninstallMode "argocd" }}
             - --retry
