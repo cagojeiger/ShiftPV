@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 	"github.com/cagojeiger/ShiftPV/src/volume"
@@ -50,7 +51,7 @@ type ProvisioningGate interface {
 }
 
 type cleanupOperator interface {
-	Reclaim(context.Context, cleanupapi.Cleanup, *cleanupapi.Store) (cleanupapi.Cleanup, error)
+	Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error)
 }
 
 type Service struct {

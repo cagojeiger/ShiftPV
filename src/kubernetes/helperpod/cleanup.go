@@ -26,7 +26,13 @@ const (
 	cleanupUIDLabel  = "shiftpv.io/cleanup-uid"
 )
 
-func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store *cleanupapi.Store) (cleanupapi.Cleanup, error) {
+// CleanupJournal is the parent-owned journal access Reclaim needs.
+type CleanupJournal interface {
+	Get(context.Context, cleanupapi.Authority) (cleanupapi.Cleanup, error)
+	UpdateStatus(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error
+}
+
+func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal) (cleanupapi.Cleanup, error) {
 	if r == nil || r.Client == nil || r.Pools == nil || r.Namespace == "" || r.Image == "" || r.Timeout <= 0 || store == nil || cleanup.UID == "" || cleanup.Name == "" || cleanup.Spec.Validate() != nil {
 		return cleanupapi.Cleanup{}, fmt.Errorf("cleanup runner configuration is incomplete")
 	}
@@ -171,7 +177,7 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 	return cleanup, nil
 }
 
-func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup, store *cleanupapi.Store, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
+func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
 	if cleanup.Status.Executor == nil || cleanup.Status.Receipt == nil ||
 		cleanup.Status.Receipt.OperationID != cleanup.Spec.OperationID ||
 		cleanup.Status.Receipt.ExecutorUID != cleanup.Status.Executor.JobUID ||
@@ -243,7 +249,7 @@ func ownedByJob(pod *corev1.Pod, uid types.UID) bool {
 	return false
 }
 
-func refreshCleanup(ctx context.Context, store *cleanupapi.Store, expected cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
+func refreshCleanup(ctx context.Context, store CleanupJournal, expected cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
 	current, err := store.Get(ctx, expected.Spec.Authority)
 	if err != nil {
 		return cleanupapi.Cleanup{}, fmt.Errorf("read cleanup intent: %w", classifyKubernetesAPIError(err))
@@ -254,7 +260,7 @@ func refreshCleanup(ctx context.Context, store *cleanupapi.Store, expected clean
 	return current, nil
 }
 
-func (r *Runner) startCleanupJob(ctx context.Context, store *cleanupapi.Store, cleanup cleanupapi.Cleanup, created, expected *batchv1.Job) error {
+func (r *Runner) startCleanupJob(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, created, expected *batchv1.Job) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current, err := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, created.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -277,7 +283,7 @@ func (r *Runner) startCleanupJob(ctx context.Context, store *cleanupapi.Store, c
 	})
 }
 
-func (r *Runner) needsReview(ctx context.Context, store *cleanupapi.Store, cleanup cleanupapi.Cleanup, reason, message string) error {
+func (r *Runner) needsReview(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, reason, message string) error {
 	if updateErr := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{
 		Phase: cleanupapi.PhaseNeedsReview, Reason: reason, Message: message,
 		Executor: cleanup.Status.Executor, Receipt: cleanup.Status.Receipt,

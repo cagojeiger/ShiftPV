@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -18,22 +17,17 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 var (
-	VolumeResource = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvvolumes"}
-	MoveResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvmoves"}
-	PoolResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvpools"}
+	ErrConflict = errors.New("cleanup journal state precondition failed")
+	// ErrNoJournal reports that the exact parent carries no cleanup journal.
+	ErrNoJournal = errors.New("cleanup journal not found")
 )
 
-var ErrConflict = errors.New("cleanup journal state precondition failed")
-
 const (
-	VolumeProtectionFinalizer = "shiftpv.io/volume-protection"
-	MoveProtectionFinalizer   = "shiftpv.io/move-protection"
-	PoolProtectionFinalizer   = "shiftpv.io/pool-protection"
-
 	PhasePending           = "Pending"
 	PhaseRunning           = "Running"
 	PhaseVerifying         = "Verifying"
@@ -236,7 +230,7 @@ func (s *Store) Get(ctx context.Context, authority Authority) (Cleanup, error) {
 		return Cleanup{}, err
 	}
 	if !found {
-		return Cleanup{}, apierrors.NewNotFound(schema.GroupResource{Group: "shiftpv.io", Resource: "cleanupjournals"}, authority.Name)
+		return Cleanup{}, fmt.Errorf("%w: %s %q", ErrNoJournal, authority.Kind, authority.Name)
 	}
 	return cleanup, nil
 }
@@ -257,7 +251,7 @@ func (s *Store) list(ctx context.Context, volumeID string) ([]Cleanup, error) {
 		return nil, err
 	}
 	result := make([]Cleanup, 0)
-	for _, resource := range []schema.GroupVersionResource{VolumeResource, MoveResource} {
+	for _, resource := range []schema.GroupVersionResource{volumeapi.VolumeResource, volumeapi.MoveResource} {
 		objects, err := s.Client.Resource(resource).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, err
@@ -376,11 +370,11 @@ func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup
 		return Cleanup{}, false, fmt.Errorf("%w: cleanup is phase=%q", ErrConflict, current.Status.Phase)
 	}
 
-	pool, err := s.Client.Resource(PoolResource).Get(ctx, current.Spec.Target.PoolName, metav1.GetOptions{})
+	pool, err := s.Client.Resource(volumeapi.PoolResource).Get(ctx, current.Spec.Target.PoolName, metav1.GetOptions{})
 	if err != nil {
 		return Cleanup{}, false, err
 	}
-	if string(pool.GetUID()) != current.Spec.Target.PoolUID || !hasFinalizer(pool, PoolProtectionFinalizer) {
+	if string(pool.GetUID()) != current.Spec.Target.PoolUID || !hasFinalizer(pool, volumeapi.PoolProtectionFinalizer) {
 		return Cleanup{}, false, fmt.Errorf("%w: cleanup Pool identity or protection changed", ErrConflict)
 	}
 	proof := current.Status.AbsenceProof
@@ -394,7 +388,7 @@ func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup
 	if observedGeneration != pool.GetGeneration() || observedGeneration < proof.RequiredGeneration {
 		return current, false, nil
 	}
-	inventory, found, err := poolInventoryFrom(pool)
+	inventory, found, err := volumeapi.PoolInventoryFrom(pool)
 	if err != nil {
 		return Cleanup{}, false, err
 	}
@@ -433,22 +427,7 @@ func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup
 	return current, current.Status.Phase == PhaseCompleted, nil
 }
 
-type poolInventory struct {
-	Valid     bool              `json:"valid"`
-	Truncated bool              `json:"truncated,omitempty"`
-	Message   string            `json:"message,omitempty"`
-	Copies    []copyObservation `json:"copies,omitempty"`
-}
-
-type copyObservation struct {
-	Marker    string        `json:"marker"`
-	Identity  *CopyIdentity `json:"identity,omitempty"`
-	Present   bool          `json:"present"`
-	Published bool          `json:"published,omitempty"`
-	Problem   string        `json:"problem,omitempty"`
-}
-
-func inventoryProvesAbsence(inventory poolInventory, poolName, poolUID, nodeName string, target CopyIdentity) bool {
+func inventoryProvesAbsence(inventory volumeapi.PoolInventory, poolName, poolUID, nodeName string, target CopyIdentity) bool {
 	for _, observed := range inventory.Copies {
 		if observed.Marker == "" || observed.Problem != "" || observed.Identity == nil || observed.Identity.Validate() != nil {
 			return false
@@ -465,27 +444,15 @@ func inventoryProvesAbsence(inventory poolInventory, poolName, poolUID, nodeName
 	return true
 }
 
-func poolInventoryFrom(pool *unstructured.Unstructured) (poolInventory, bool, error) {
-	value, found, err := unstructured.NestedMap(pool.Object, "status", "inventory")
-	if err != nil || !found {
-		return poolInventory{}, found, err
-	}
-	var inventory poolInventory
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(value, &inventory); err != nil {
-		return poolInventory{}, true, fmt.Errorf("decode Pool inventory: %w", err)
-	}
-	return inventory, true, nil
-}
-
 func (s *Store) requestPoolScan(ctx context.Context, target CopyIdentity) (int64, error) {
 	var generation int64
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		resource := s.Client.Resource(PoolResource)
+		resource := s.Client.Resource(volumeapi.PoolResource)
 		pool, err := resource.Get(ctx, target.PoolName, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
-		if string(pool.GetUID()) != target.PoolUID || !hasFinalizer(pool, PoolProtectionFinalizer) {
+		if string(pool.GetUID()) != target.PoolUID || !hasFinalizer(pool, volumeapi.PoolProtectionFinalizer) {
 			return fmt.Errorf("%w: cleanup Pool identity or protection changed", ErrConflict)
 		}
 		nodeName, _, err := unstructured.NestedString(pool.Object, "spec", "nodeName")
@@ -643,9 +610,9 @@ func (s *Store) parentResource(authority Authority) (dynamic.ResourceInterface, 
 	}
 	switch authority.Kind {
 	case "ShiftPVVolume":
-		return s.Client.Resource(VolumeResource), VolumeProtectionFinalizer, nil
+		return s.Client.Resource(volumeapi.VolumeResource), volumeapi.VolumeProtectionFinalizer, nil
 	case "ShiftPVMove":
-		return s.Client.Resource(MoveResource), MoveProtectionFinalizer, nil
+		return s.Client.Resource(volumeapi.MoveResource), volumeapi.MoveProtectionFinalizer, nil
 	default:
 		return nil, "", fmt.Errorf("invalid cleanup authority %q", authority.Kind)
 	}

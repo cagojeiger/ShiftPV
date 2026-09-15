@@ -22,14 +22,15 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 var cleanupListKinds = map[schema.GroupVersionResource]string{
-	cleanupapi.VolumeResource: "ShiftPVVolumeList",
-	cleanupapi.MoveResource:   "ShiftPVMoveList",
-	cleanupapi.PoolResource:   "ShiftPVPoolList",
+	volumeapi.VolumeResource: "ShiftPVVolumeList",
+	volumeapi.MoveResource:   "ShiftPVMoveList",
+	volumeapi.PoolResource:   "ShiftPVPoolList",
 }
 
 type fakeVolumeRegistry struct {
@@ -229,7 +230,7 @@ type blockingCleanupOperator struct {
 	delegate receiptCleanupOperator
 }
 
-func (o *blockingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store *cleanupapi.Store) (cleanupapi.Cleanup, error) {
+func (o *blockingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
 	if o.calls.Add(1) == 1 {
 		o.started <- struct{}{}
 		<-o.release
@@ -251,7 +252,7 @@ func configuredService(service *Service) *Service {
 	return service
 }
 
-func (o *receiptCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store *cleanupapi.Store) (cleanupapi.Cleanup, error) {
+func (o *receiptCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
 	o.calls++
 	if cleanup.Status.Phase == cleanupapi.PhaseVerifying || cleanup.Status.Phase == cleanupapi.PhaseCompleted {
 		return cleanup, nil
@@ -303,7 +304,7 @@ func (o *receiptCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi
 	return store.Get(ctx, cleanup.Spec.Authority)
 }
 
-func (o *verifyingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store *cleanupapi.Store) (cleanupapi.Cleanup, error) {
+func (o *verifyingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
 	o.calls++
 	executor := &cleanupapi.Executor{JobName: "job", JobUID: "job-uid", PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
 	if err := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
@@ -330,7 +331,7 @@ func cleanupParentVolume(volumeID string, copy volume.CopyIdentity) *unstructure
 		"kind":       "ShiftPVVolume",
 		"metadata": map[string]any{
 			"name": volumeID, "uid": copy.VolumeUID, "generation": int64(1),
-			"finalizers": []any{cleanupapi.VolumeProtectionFinalizer},
+			"finalizers": []any{volumeapi.VolumeProtectionFinalizer},
 		},
 		"spec": map[string]any{
 			"volumeID": volumeID, "requestName": "pvc", "initialNode": copy.NodeName, "capacityBytes": int64(64 << 20),
@@ -345,7 +346,7 @@ func cleanupPool(copy volume.CopyIdentity, present bool) *unstructured.Unstructu
 		"kind":       "ShiftPVPool",
 		"metadata": map[string]any{
 			"name": copy.PoolName, "uid": copy.PoolUID, "generation": int64(2),
-			"finalizers": []any{cleanupapi.PoolProtectionFinalizer},
+			"finalizers": []any{volumeapi.PoolProtectionFinalizer},
 		},
 		"spec": map[string]any{"nodeName": copy.NodeName, "scanEpoch": int64(1)},
 		"status": map[string]any{
@@ -439,7 +440,7 @@ func TestDeleteVolumeRetainsFinalizerAndCapacityUntilCausalAbsenceProof(t *testi
 	if err != nil || journal.Status.Phase != cleanupapi.PhaseConfirmingAbsence || journal.Status.AbsenceProof == nil {
 		t.Fatalf("journal=%#v err=%v", journal, err)
 	}
-	pool, err := dynamicClient.Resource(cleanupapi.PoolResource).Get(ctx, copy.PoolName, metav1.GetOptions{})
+	pool, err := dynamicClient.Resource(volumeapi.PoolResource).Get(ctx, copy.PoolName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +450,7 @@ func TestDeleteVolumeRetainsFinalizerAndCapacityUntilCausalAbsenceProof(t *testi
 	if err := unstructured.SetNestedSlice(pool.Object, []any{}, "status", "inventory", "copies"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dynamicClient.Resource(cleanupapi.PoolResource).UpdateStatus(ctx, pool, metav1.UpdateOptions{}); err != nil {
+	if _, err := dynamicClient.Resource(volumeapi.PoolResource).UpdateStatus(ctx, pool, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.DeleteVolume(ctx, request); err != nil {

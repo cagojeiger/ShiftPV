@@ -125,7 +125,7 @@ func (r *Reconciler) rollbackArtifact(ctx context.Context, move volumeapi.Move) 
 		destination.UID != move.Status.IncomingCopy.PoolUID || destination.UID != move.Status.DestinationCopy.PoolUID {
 		return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination Pool identity changed")
 	}
-	if !contains(destination.Finalizers, cleanupapi.PoolProtectionFinalizer) {
+	if !contains(destination.Finalizers, volumeapi.PoolProtectionFinalizer) {
 		return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination Pool lacks lifecycle protection")
 	}
 
