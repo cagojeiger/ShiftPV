@@ -24,7 +24,7 @@ controller:
   logLevel: 2
   image:
     repository: ghcr.io/cagojeiger/shiftpv-controller
-    tag: 0.4.0
+    tag: 0.4.1
     pullPolicy: IfNotPresent
   resources: {}
 
@@ -46,7 +46,7 @@ node:
   logLevel: 2
   image:
     repository: ghcr.io/cagojeiger/shiftpv-node
-    tag: 0.4.0
+    tag: 0.4.1
     pullPolicy: IfNotPresent
   nodeSelector: {}
   tolerations: []
@@ -77,6 +77,12 @@ lifecycle:
 storageClass:
   create: true
   name: shiftpv
+  defaultClass: true
+  reclaimPolicy: Delete
+
+retainStorageClass:
+  create: true
+  name: shiftpv-retain
   defaultClass: false
   reclaimPolicy: Retain
 

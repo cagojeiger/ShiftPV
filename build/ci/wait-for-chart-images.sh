@@ -20,19 +20,26 @@ if ! [[ "${attempts}" =~ ^[1-9][0-9]*$ && "${delay}" =~ ^[0-9]+$ ]]; then
 fi
 
 expected_platforms=$'linux/amd64\nlinux/arm64'
-controller_version=${SHIFTPV_CONTROLLER_VERSION:-$(<"${repo_root}/versions/controller")}
-node_version=${SHIFTPV_NODE_VERSION:-$(<"${repo_root}/versions/node")}
+chart_component_version() {
+	local component=$1
+	awk -v component="${component}" '
+		$0 ~ "^" component ":" { in_component = 1; next }
+		in_component && $0 ~ /^[^[:space:]]/ { in_component = 0 }
+		in_component && $1 == "tag:" { gsub(/"/, "", $2); print $2; exit }
+	' "${repo_root}/charts/shiftpv/values.yaml"
+}
+
+controller_version=${SHIFTPV_CONTROLLER_VERSION:-$(chart_component_version controller)}
+node_version=${SHIFTPV_NODE_VERSION:-$(chart_component_version node)}
 controller_image="${registry}/${owner,,}/shiftpv-controller:${controller_version}"
 node_image="${registry}/${owner,,}/shiftpv-node:${node_version}"
-chart_app_version=$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' "${repo_root}/charts/shiftpv/Chart.yaml")
 rendered=$(helm template shiftpv "${repo_root}/charts/shiftpv" --namespace shiftpv-system --kube-version 1.35.8)
 
-if [[ "${chart_app_version}" != "${controller_version}" ]] ||
-	! grep -Fq "image: \"${controller_image}\"" <<<"${rendered}" ||
+if ! grep -Fq "image: \"${controller_image}\"" <<<"${rendered}" ||
 	! grep -Fq "image: \"${node_image}\"" <<<"${rendered}" ||
 	! grep -Fq -- "--helper-image=${controller_image}" <<<"${rendered}" ||
 	! grep -Fq -- "--mobility-helper-image=${controller_image}" <<<"${rendered}"; then
-	echo "::error::chart defaults do not match versions/controller and versions/node" >&2
+	echo "::error::chart defaults do not consistently reference their pinned component images" >&2
 	exit 1
 fi
 

@@ -43,8 +43,9 @@ jobs:
             echo "::error::${chart_file} version must use numeric major.minor.patch format"
             exit 1
           fi
-          if [[ "${version}" == "${previous_version}" ]]; then
-            echo "::error::${chart_file} changed without a version bump"
+          if [[ -n "${previous_version}" ]] && \
+            ! build/ci/assert-version-increase.sh "${version}" "${previous_version}"; then
+            echo "::error::${chart_file} version must increase"
             exit 1
           fi
 

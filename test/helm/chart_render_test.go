@@ -271,22 +271,29 @@ func wantHostPath(t *testing.T, assertion string, object renderedObject, volume,
 	t.Errorf("%s: no volume named %q", assertion, volume)
 }
 
-func chartAppVersion(t *testing.T) string {
+// controllerImageTag reads the default controller tag from values.yaml: the chart
+// version is independent of the component version, so Chart.yaml carries no
+// application version to derive it from.
+func controllerImageTag(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile("../../charts/shiftpv/Chart.yaml")
+	raw, err := os.ReadFile("../../charts/shiftpv/values.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var metadata struct {
-		AppVersion string `json:"appVersion"`
+	var values struct {
+		Controller struct {
+			Image struct {
+				Tag string `json:"tag"`
+			} `json:"image"`
+		} `json:"controller"`
 	}
-	if err := yaml.Unmarshal(raw, &metadata); err != nil {
+	if err := yaml.Unmarshal(raw, &values); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.AppVersion == "" {
-		t.Fatal("Chart.yaml has no appVersion")
+	if values.Controller.Image.Tag == "" {
+		t.Fatal("values.yaml has no controller.image.tag")
 	}
-	return metadata.AppVersion
+	return values.Controller.Image.Tag
 }
 
 // TestChartRender covers the chart contracts that make helm-template used to
@@ -311,10 +318,10 @@ func TestChartRender(t *testing.T) {
 		{
 			name: "default images and service accounts",
 			assert: func(t *testing.T, c chart) {
-				defaultImage := "ghcr.io/cagojeiger/shiftpv-controller:" + chartAppVersion(t)
+				defaultImage := "ghcr.io/cagojeiger/shiftpv-controller:" + controllerImageTag(t)
 				args := c.controllerArgs(t)
-				wantArg(t, "helper image tracks appVersion", args, "--helper-image="+defaultImage)
-				wantArg(t, "mobility helper image tracks appVersion", args, "--mobility-helper-image="+defaultImage)
+				wantArg(t, "helper image tracks the controller tag", args, "--helper-image="+defaultImage)
+				wantArg(t, "mobility helper image tracks the controller tag", args, "--mobility-helper-image="+defaultImage)
 				wantArg(t, "helper service account wiring", args, "--helper-service-account="+helperName)
 				wantArg(t, "controller service account wiring", args, "--controller-service-account="+fullname+"-controller")
 				c.wantObject(t, "helper service account is created", "ServiceAccount", helperName)

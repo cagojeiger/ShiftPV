@@ -49,6 +49,7 @@ spec:
           command: ["/shiftpv-uninstall-guard"]
           args:
             - --storage-class={{ .Values.storageClass.name }}
+            - --storage-class={{ .Values.retainStorageClass.name }}
             - --permit-namespace={{ .Release.Namespace }}
             - --permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --validation-webhook={{ include "shiftpv.validationWebhookConfigurationName" . }}

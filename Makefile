@@ -75,6 +75,7 @@ image-version-check:
 	done
 
 release-workflow-test:
+	./test/release/version-increase.sh
 	./test/release/wait-for-chart-images.sh
 	./test/release/validate-artifact-lock.sh
 

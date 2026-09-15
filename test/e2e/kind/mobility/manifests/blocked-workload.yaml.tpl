@@ -14,7 +14,9 @@ spec:
   accessModes:
     - ReadWriteOnce
   volumeMode: Filesystem
-  storageClassName: shiftpv
+  # Preflight scenarios delete and recreate the namespace while retaining the
+  # physical volume as a regression fixture, so they must opt into retention.
+  storageClassName: shiftpv-retain
   resources:
     requests:
       storage: 16Mi

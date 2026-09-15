@@ -114,6 +114,7 @@ isolated Kind fault injection, 실제 node의 unclean OS reboot와 soak를 모�
 | 왜 이 구조인가? | [ADR](docs/adr/README.md) |
 | 어떻게 구현하고 검증하는가? | [Development](docs/development/README.md) |
 | 어떻게 설치하고 운영하는가? | [Helm chart guide](charts/shiftpv/README.md) |
+| 버전과 artifact를 어떻게 릴리즈하는가? | [Versioning](docs/development/versioning.md) |
 
 ## License
 

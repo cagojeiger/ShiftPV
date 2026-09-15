@@ -42,7 +42,7 @@ func TestCheckBlocksUnsettledCleanupContract(t *testing.T) {
 		{Name: "move-journal", Spec: cleanupapi.Spec{OperationID: "cleanup-b", Target: volume.CopyIdentity{VolumeID: "shiftpv-fedcba9876543210fedcba9876543210"}, Authority: cleanupapi.Authority{Kind: "ShiftPVMove", Name: "move-a"}}, Status: cleanupapi.Status{Phase: cleanupapi.PhaseVerifying}},
 		{Name: "settled", Status: cleanupapi.Status{Phase: cleanupapi.PhaseCompleted}},
 	}
-	checker := &Checker{Client: fake.NewClientset(), Volumes: &memoryRepository{}, Cleanups: cleanupRepository{items: items}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
+	checker := &Checker{Client: fake.NewClientset(), Volumes: &memoryRepository{}, Cleanups: cleanupRepository{items: items}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system"}
 	report, err := checker.Check(context.Background())
 	if err != nil || len(report.Blockers) != 2 || report.Blockers[0].Kind != "ShiftPVMove" || report.Blockers[0].Name != "move-a" || report.Blockers[1].Kind != "ShiftPVVolume" {
 		t.Fatalf("cleanup blockers=%#v err=%v", report.Blockers, err)
@@ -79,7 +79,7 @@ func (m *memoryRepository) RemovePoolFinalizer(_ context.Context, name, uid stri
 }
 
 func TestCheckAllowsEmptyCluster(t *testing.T) {
-	checker := &Checker{Client: fake.NewClientset(), Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
+	checker := &Checker{Client: fake.NewClientset(), Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system"}
 	report, err := checker.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -127,7 +127,7 @@ func TestCheckPoolDeleteAllowsExactEmptyPoolWhileOtherPoolsRemainActive(t *testi
 		moves:   []volumeapi.Move{{Name: "other", Spec: volumeapi.MoveSpec{SourceNode: poolB.NodeName}, Status: volumeapi.MoveStatus{Phase: "Copying", DestinationPoolUID: poolB.UID}}},
 	}
 	cleanups := cleanupRepository{items: []cleanupapi.Cleanup{{Name: "other", Spec: cleanupapi.Spec{Target: volume.CopyIdentity{PoolName: poolB.Name, PoolUID: poolB.UID}}}}}
-	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanups, StorageClassName: "shiftpv", Namespace: "shiftpv-system", Now: func() time.Time { return now }}
+	checker := &Checker{Client: client, Volumes: repository, Cleanups: cleanups, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system", Now: func() time.Time { return now }}
 
 	report, err := checker.CheckPoolDeleteAfter(context.Background(), poolA.Name, types.UID(poolA.UID), now.Add(-time.Second))
 	if err != nil || !report.Safe() {
@@ -285,7 +285,7 @@ func TestCheckIgnoresLegacyReservationConfigMaps(t *testing.T) {
 		"app.kubernetes.io/name": "shiftpv", "app.kubernetes.io/component": "volume-reservation",
 	}}}
 	client := fake.NewClientset(legacyReservation)
-	checker := &Checker{Client: client, Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
+	checker := &Checker{Client: client, Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system"}
 
 	report, err := checker.Check(context.Background())
 	if err != nil || !report.Safe() {
@@ -294,7 +294,7 @@ func TestCheckIgnoresLegacyReservationConfigMaps(t *testing.T) {
 }
 
 func TestCheckBlocksUnfinishedCompletionWithoutVolumeLock(t *testing.T) {
-	checker := &Checker{Client: fake.NewClientset(), StorageClassName: "shiftpv", Namespace: "shiftpv-system", Cleanups: cleanupRepository{}, Volumes: &memoryRepository{
+	checker := &Checker{Client: fake.NewClientset(), StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system", Cleanups: cleanupRepository{}, Volumes: &memoryRepository{
 		moves: []volumeapi.Move{{Name: "finishing", Spec: volumeapi.MoveSpec{VolumeID: "volume"}, Status: volumeapi.MoveStatus{Phase: "Completing"}}},
 	}}
 	report, err := checker.Check(context.Background())
@@ -325,7 +325,7 @@ func TestCheckReportsEveryShiftPVDependency(t *testing.T) {
 		},
 	}
 
-	report, err := (&Checker{Client: client, Volumes: repository, Cleanups: cleanupRepository{}, StorageClassName: storageClassName, Namespace: "shiftpv-system"}).Check(context.Background())
+	report, err := (&Checker{Client: client, Volumes: repository, Cleanups: cleanupRepository{}, StorageClassNames: []string{storageClassName}, Namespace: "shiftpv-system"}).Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
@@ -352,12 +352,42 @@ func TestCheckReportsEveryShiftPVDependency(t *testing.T) {
 	}
 }
 
+func TestCheckBlocksPendingClaimForEveryConfiguredStorageClass(t *testing.T) {
+	retainClass := "shiftpv-retain"
+	otherClass := "other"
+	client := fake.NewClientset(
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "retained", Namespace: "app"},
+			Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &retainClass},
+		},
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "app"},
+			Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &otherClass},
+		},
+	)
+	checker := &Checker{
+		Client:            client,
+		Volumes:           &memoryRepository{},
+		Cleanups:          cleanupRepository{},
+		StorageClassNames: []string{"shiftpv", "shiftpv-retain"},
+		Namespace:         "shiftpv-system",
+	}
+
+	report, err := checker.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Blockers) != 1 || report.Blockers[0].Kind != "PersistentVolumeClaim" || report.Blockers[0].Name != "retained" {
+		t.Fatalf("unexpected blockers: %#v", report.Blockers)
+	}
+}
+
 func TestCheckFailsClosedOnAPIError(t *testing.T) {
 	client := fake.NewClientset()
 	client.PrependReactor("list", "persistentvolumes", func(clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("api unavailable")
 	})
-	checker := &Checker{Client: client, Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
+	checker := &Checker{Client: client, Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system"}
 	_, err := checker.Check(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "api unavailable") {
 		t.Fatalf("Check() error = %v", err)
@@ -371,7 +401,7 @@ func TestCheckDoesNotListLegacyReservations(t *testing.T) {
 		listed = true
 		return true, nil, errors.New("reservation API unavailable")
 	})
-	checker := &Checker{Client: client, Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
+	checker := &Checker{Client: client, Volumes: &memoryRepository{}, Cleanups: cleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system"}
 	report, err := checker.Check(context.Background())
 	if err != nil || !report.Safe() || listed {
 		t.Fatalf("legacy reservation API was consulted: report=%#v err=%v listed=%t", report, err, listed)
@@ -379,7 +409,7 @@ func TestCheckDoesNotListLegacyReservations(t *testing.T) {
 }
 
 func TestCheckFailsClosedOnRepositoryError(t *testing.T) {
-	checker := &Checker{Client: fake.NewClientset(), Volumes: &memoryRepository{volumesErr: errors.New("crd unavailable")}, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system"}
+	checker := &Checker{Client: fake.NewClientset(), Volumes: &memoryRepository{volumesErr: errors.New("crd unavailable")}, Cleanups: cleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system"}
 	_, err := checker.Check(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "crd unavailable") {
 		t.Fatalf("Check() error = %v", err)
@@ -400,7 +430,7 @@ func TestCheckBlocksPhysicalPoolCopiesAndUncertainInventory(t *testing.T) {
 		}},
 	}}}
 	checker := &Checker{
-		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system",
 		Now: func() time.Time { return now },
 	}
 
@@ -426,7 +456,7 @@ func TestCheckRequiresEmptyInventoryObservedAfterQuiesce(t *testing.T) {
 	}
 	repository := &memoryRepository{pools: []volumeapi.Pool{pool}}
 	checker := &Checker{
-		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system",
 		Now: func() time.Time { return now },
 	}
 
@@ -462,7 +492,7 @@ func TestCheckWaitsForDeletingPoolIdentityRelease(t *testing.T) {
 	}
 	repository := &memoryRepository{pools: []volumeapi.Pool{pool}}
 	checker := &Checker{
-		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassName: "shiftpv", Namespace: "shiftpv-system",
+		Client: fake.NewClientset(), Volumes: repository, Cleanups: cleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system",
 		Now: func() time.Time { return now },
 	}
 	report, err := checker.CheckAfter(context.Background(), deletedAt.Time)
@@ -490,7 +520,7 @@ func TestCheckValidatesConfiguration(t *testing.T) {
 		t.Fatalf("Check() empty StorageClass error = %v", err)
 	}
 
-	checker.StorageClassName = "shiftpv"
+	checker.StorageClassNames = []string{"shiftpv"}
 	checker.Namespace = ""
 	report, err := checker.Check(context.Background())
 	if err != nil || !report.Safe() {

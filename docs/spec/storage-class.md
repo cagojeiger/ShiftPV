@@ -3,6 +3,7 @@
 > **Status:** ShiftPV 0.4 구현·검증 목표다. 모든 acceptance gate가 끝나야 runtime 보증이 된다.
 
 ShiftPV StorageClass는 등록된 node-local Pool의 directory를 RWO Filesystem PV로 동적 provisioning한다.
+Chart는 일반 lifecycle용 `shiftpv`와 명시적 보존용 `shiftpv-retain`을 함께 제공한다.
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -10,18 +11,27 @@ kind: StorageClass
 metadata:
   name: shiftpv
 provisioner: csi.shiftpv.io
+reclaimPolicy: Delete
+allowVolumeExpansion: false
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: shiftpv-retain
+provisioner: csi.shiftpv.io
 reclaimPolicy: Retain
 allowVolumeExpansion: false
 volumeBindingMode: WaitForFirstConsumer
 ```
 
-| 필드 | 계약 |
-|---|---|
-| Provisioner | `csi.shiftpv.io` |
-| Access / mode | `ReadWriteOnce` / `Filesystem` |
-| Binding | `WaitForFirstConsumer` |
-| Reclaim | `Retain` |
-| Expansion | 범위 밖 |
+| Class | Default | Reclaim | 용도 |
+|---|---:|---|---|
+| `shiftpv` | yes | `Delete` | PVC와 함께 data lifecycle을 끝내는 일반 workload와 DR 시험 |
+| `shiftpv-retain` | no | `Retain` | PVC 삭제 뒤에도 PV와 원본 data를 보존해야 하는 workload |
+
+두 class의 provisioner는 `csi.shiftpv.io`, access/mode는 `ReadWriteOnce`/`Filesystem`, binding은
+`WaitForFirstConsumer`다. Expansion은 범위 밖이다.
 
 ## Placement and admission
 
@@ -57,6 +67,19 @@ valid, complete absence proof가 모두 있을 때만 해제한다. stale scan, 
 Job 종료 또는 object absence 하나만으로는 capacity를 반환하지 않는다. Move identity 모순은 `Blocked`,
 cleanup identity 모순은 cleanup subjournal `NeedsReview`로 수렴하며 관련 hold를 보존한다.
 
+## Delete lifecycle
+
+```text
+PVC 삭제
+  -> PV와 Volume deletion 시작
+  -> NodeUnpublish mount recheck + empty publication fence
+  -> exact purge API receipt + fresh absence proof
+  -> Volume, PV와 capacity hold 종결
+```
+
+`shiftpv`의 `Delete`는 workload의 PVC lifecycle과 data 폐기를 결합한다. 삭제가 시작된 뒤에도 mount,
+node outage 또는 cleanup evidence가 불충분하면 finalizer와 capacity hold를 보존하고 eventually retry한다.
+
 ## Retain lifecycle
 
 ```text
@@ -69,9 +92,13 @@ PVC 삭제
   -> Volume 종결과 capacity release
 ```
 
-`Retain`은 workload 삭제와 data 폐기를 분리한다. PV나 API object를 직접 제거해 filesystem data와 capacity
+`shiftpv-retain`의 `Retain`은 workload 삭제와 data 폐기를 분리한다. PV나 API object를 직접 제거해 filesystem data와 capacity
 ownership을 분리하면 안 된다. 폐기 중에도 fresh observation이나 cleanup 증거가 불충분하면 data와 hold를
 보존한다.
 
-cluster 기본 StorageClass 선택은 운영 정책이며 기존 PV의 provisioner를 바꾸지 않는다. node/disk의 영구
+`shiftpv`만 cluster default다. 보존이 필요한 PVC는 default에 의존하지 않고 `shiftpv-retain`을 명시한다.
+기존 PVC의 class와 PV reclaim policy는 Chart upgrade만으로 소급 변경되지 않는다. node/disk의 영구
 손실 처리, HA/replication, RWX, snapshot, expansion과 hard quota는 이 계약 범위 밖이다.
+
+StorageClass `reclaimPolicy`는 immutable이다. 설치된 class의 정책을 바꾸려면 ShiftPV PV/PVC 및 진행 중인
+provisioning이 없는 안전한 구간에서 해당 StorageClass를 삭제하고 Chart sync로 즉시 재생성해야 한다.

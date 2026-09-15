@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
+	"github.com/cagojeiger/ShiftPV/src/cmd/internal/flagvalue"
 	"github.com/cagojeiger/ShiftPV/src/cmd/internal/wiring"
 	controllercsi "github.com/cagojeiger/ShiftPV/src/csi/controller"
 	"github.com/cagojeiger/ShiftPV/src/csi/identity"
@@ -42,6 +43,7 @@ import (
 var version = "dev"
 
 func main() {
+	var storageClassNames flagvalue.Names
 	var (
 		endpoint                 = flag.String("endpoint", "unix:///run/csi/csi.sock", "CSI Unix socket endpoint")
 		namespace                = flag.String("namespace", os.Getenv("POD_NAMESPACE"), "namespace for helper Pods and controller state")
@@ -63,11 +65,11 @@ func main() {
 		webhookConfiguration     = flag.String("webhook-configuration-name", "shiftpv-mobility", "managed MutatingWebhookConfiguration name")
 		validationConfiguration  = flag.String("validation-webhook-configuration-name", "shiftpv-lifecycle", "managed lifecycle ValidatingWebhookConfiguration name")
 		controllerServiceAccount = flag.String("controller-service-account", "shiftpv-controller", "trusted controller service account for runtime ShiftPV resource deletion")
-		storageClassName         = flag.String("storage-class-name", "shiftpv", "StorageClass protected from unsafe driver deletion")
 		uninstallPermitName      = flag.String("uninstall-permit-name", "shiftpv-uninstall-permit", "trusted uninstall permit ConfigMap name")
 		metricsAddress           = flag.String("metrics-listen-address", "", "metrics HTTP address; empty disables observation")
 		metricsInterval          = flag.Duration("metrics-snapshot-interval", 30*time.Second, "read-only metrics metadata interval")
 	)
+	flag.Var(&storageClassNames, "storage-class-name", "repeatable StorageClass name protected from unsafe driver deletion")
 	klog.InitFlags(nil)
 	flag.Parse()
 	if *poolReadinessStaleAfter <= 0 {
@@ -118,7 +120,7 @@ func main() {
 	}
 	poolLocks := &poolcapacity.Locker{}
 	lifecycleChecker := &uninstallcheck.Checker{
-		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassName: *storageClassName, Namespace: *namespace,
+		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassNames: storageClassNames.Values("shiftpv"), Namespace: *namespace,
 		InventoryMaxAge: *poolReadinessStaleAfter,
 	}
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}

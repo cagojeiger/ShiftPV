@@ -39,13 +39,13 @@ type CleanupRepository interface {
 }
 
 type Checker struct {
-	Client           kubernetes.Interface
-	Volumes          VolumeRepository
-	StorageClassName string
-	Namespace        string
-	Cleanups         CleanupRepository
-	Now              func() time.Time
-	InventoryMaxAge  time.Duration
+	Client            kubernetes.Interface
+	Volumes           VolumeRepository
+	StorageClassNames []string
+	Namespace         string
+	Cleanups          CleanupRepository
+	Now               func() time.Time
+	InventoryMaxAge   time.Duration
 }
 
 type Blocker struct {
@@ -96,8 +96,13 @@ func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Rep
 	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
 		return Report{}, fmt.Errorf("uninstall checker is not configured")
 	}
-	if strings.TrimSpace(c.StorageClassName) == "" {
-		return Report{}, fmt.Errorf("ShiftPV StorageClass name is required")
+	if len(c.StorageClassNames) == 0 {
+		return Report{}, fmt.Errorf("at least one ShiftPV StorageClass name is required")
+	}
+	for _, storageClassName := range c.StorageClassNames {
+		if strings.TrimSpace(storageClassName) == "" {
+			return Report{}, fmt.Errorf("ShiftPV StorageClass names must not be empty")
+		}
 	}
 
 	report := Report{}
@@ -274,7 +279,7 @@ func (c *Checker) claimBlockers(ctx context.Context) ([]Blocker, error) {
 	}
 	blockers := []Blocker{}
 	for _, claim := range claims.Items {
-		if claim.Spec.StorageClassName == nil || *claim.Spec.StorageClassName != c.StorageClassName {
+		if claim.Spec.StorageClassName == nil || !slices.Contains(c.StorageClassNames, *claim.Spec.StorageClassName) {
 			continue
 		}
 		reason := "references the ShiftPV StorageClass"

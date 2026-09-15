@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shiftpv-fsgroup-e2e
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+  containers:
+    - name: writer
+      image: busybox:1.37
+      command:
+        - sh
+        - -ec
+        - |
+          test -w /data
+          test "$(stat -c %g /data)" = 10001
+          printf 'ShiftPV non-root fsGroup write\n' > /data/non-root
+          sleep 3600
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: shiftpv-e2e
