@@ -118,10 +118,11 @@ jobs:
         run: |
           short_sha="${GITHUB_SHA::8}"
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/shiftpv-${COMPONENT}"
+          base_version=$(<"versions/${COMPONENT}")
           {
             echo "image=${image}"
             echo "tag=candidate-${short_sha}"
-            echo "version=0.4.0-candidate.${short_sha}"
+            echo "version=${base_version}-candidate.${short_sha}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx

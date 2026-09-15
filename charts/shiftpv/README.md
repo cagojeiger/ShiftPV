@@ -1,9 +1,9 @@
-# ShiftPV 0.4 Helm Contract
+# ShiftPV Helm Contract
 
-> **Status:** 이 파일은 현재 checkout의 0.4 chart 구현 후보를 설명한다. 운영 gate와 별도 release가
+> **Status:** 이 파일은 현재 checkout의 Chart 구현 후보를 설명한다. 운영 gate와 별도 release가
 > 끝나기 전에는 배포 승인 또는 runtime 보증으로 사용하지 않는다.
 
-0.4 chart는 CSI Controller/Node, 세 CRD(`ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`), StorageClass,
+Chart는 CSI Controller/Node, 세 CRD(`ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`), StorageClass,
 admission, metrics와 fail-closed removal guard를 설치해야 한다. Pool directory와 host filesystem은
 storage operator가 준비해야 한다.
 
@@ -30,7 +30,7 @@ helm repo update shiftpv
 helm install shiftpv shiftpv/shiftpv \
   --namespace shiftpv-system \
   --create-namespace \
-  --version <approved-0.4-version> \
+  --version <approved-chart-version> \
   --wait
 ```
 
@@ -81,13 +81,20 @@ Chart는 directory, filesystem, mount, RAID, encryption과 backup을 만들거�
 
 ## StorageClass
 
-기본 정책은 `WaitForFirstConsumer`, RWO filesystem, `Retain`이다. Default class 지정은 명시적인 운영
-선택이어야 한다.
+Chart는 같은 provisioner를 사용하는 두 StorageClass를 설치한다. `shiftpv`는 일반 PVC lifecycle에 맞춰
+삭제되는 기본 class이고, `shiftpv-retain`은 PVC 삭제 뒤에도 PV와 data를 보존해야 하는 workload가
+명시적으로 선택한다. 둘 다 `WaitForFirstConsumer`와 RWO filesystem을 사용한다.
 
 ```yaml
 storageClass:
   create: true
   name: shiftpv
+  defaultClass: true
+  reclaimPolicy: Delete
+
+retainStorageClass:
+  create: true
+  name: shiftpv-retain
   defaultClass: false
   reclaimPolicy: Retain
 ```
@@ -101,7 +108,7 @@ metadata:
   name: data
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: shiftpv
+  storageClassName: shiftpv-retain
   resources:
     requests:
       storage: 20Gi
@@ -110,6 +117,27 @@ spec:
 Capacity는 hard quota가 아니다. Admission은 Pool limit, filesystem available bytes, 모든 Volume owner
 hold와 미완료 Move hold를 보수적으로 계산한다. 이동 중 두 물리 copy가 있으면 두 Pool에 동시에
 capacity가 잡히는 것이 정상이다.
+
+중요한 data는 cluster default에 의존하지 않고 `shiftpv-retain`을 명시해야 한다. `Retain`은 PVC 삭제를
+막지 않으며, 삭제 뒤 PV와 실제 data를 보존해 운영자의 별도 폐기 결정을 요구한다.
+
+ShiftPV는 CSI `File` fsGroup 정책을 선언한다. Pod가 `securityContext.fsGroup`을 지정하면 kubelet이
+볼륨의 그룹 소유권과 쓰기 권한을 적용하므로 비-root workload도 별도 init container 없이 사용할 수 있다.
+
+### StorageClass lifecycle 변경
+
+Kubernetes StorageClass의 `reclaimPolicy`는 immutable이다. 설치된 class와 Chart의 정책이 다르면 일반적인
+Helm upgrade만으로 변경할 수 없다. 이 경우에는 먼저 ShiftPV PV/PVC와 진행 중인 provisioning이 없는지
+확인하고, 기존 StorageClass만 삭제한 직후 Chart를 sync해 다시 생성한다. 기존 PV의 reclaim policy는
+StorageClass를 다시 만들어도 소급 변경되지 않는다.
+
+```bash
+kubectl get pv,pvc -A
+kubectl get shiftpvvolumes.shiftpv.io -A
+kubectl delete storageclass shiftpv
+helm upgrade shiftpv shiftpv/shiftpv --namespace shiftpv-system --version <approved-chart-version> --wait
+kubectl get storageclass shiftpv shiftpv-retain
+```
 
 ## Planned mobility
 

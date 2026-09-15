@@ -8,6 +8,6 @@ spec:
   attachRequired: false
   podInfoOnMount: false
   storageCapacity: false
-  fsGroupPolicy: None
+  fsGroupPolicy: File
   volumeLifecycleModes:
     - Persistent

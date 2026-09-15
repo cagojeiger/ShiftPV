@@ -31,4 +31,10 @@ storageClass:
   create: true
   name: shiftpv
   defaultClass: true
+  reclaimPolicy: Delete
+
+retainStorageClass:
+  create: true
+  name: shiftpv-retain
+  defaultClass: false
   reclaimPolicy: Retain

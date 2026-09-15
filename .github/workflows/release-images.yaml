@@ -52,6 +52,13 @@ jobs:
               exit 1
             fi
 
+            previous_version="$(git show "${{ github.event.before }}:${version_file}" 2>/dev/null | tr -d '[:space:]' || true)"
+            if [[ -n "${previous_version}" ]] && \
+              ! build/ci/assert-version-increase.sh "${version}" "${previous_version}"; then
+              echo "::error::${version_file} version must increase"
+              exit 1
+            fi
+
             tag="${component}/v${version}"
             if tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}" 2>/dev/null)" && \
               [[ "${tagged_commit}" != "${RELEASE_SHA}" ]]; then
