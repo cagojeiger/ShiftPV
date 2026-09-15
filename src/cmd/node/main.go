@@ -10,10 +10,9 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
+	"github.com/cagojeiger/ShiftPV/src/cmd/internal/wiring"
 	"github.com/cagojeiger/ShiftPV/src/csi/identity"
 	nodecsi "github.com/cagojeiger/ShiftPV/src/csi/node"
 	csiserver "github.com/cagojeiger/ShiftPV/src/csi/server"
@@ -41,15 +40,7 @@ func main() {
 		klog.Fatalf("pool readiness interval must be positive")
 	}
 
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		klog.Fatalf("load in-cluster configuration: %v", err)
-	}
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		klog.Fatalf("create dynamic Kubernetes client: %v", err)
-	}
-	registry := &volumeapi.Registry{Client: dynamicClient}
+	registry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -96,3 +87,5 @@ func main() {
 		stop()
 	}
 }
+
+func fatal(step string, err error) { klog.Fatalf("%s: %v", step, err) }

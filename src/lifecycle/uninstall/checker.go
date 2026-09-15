@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	DriverName                    = "csi.shiftpv.io"
+	DriverName                    = volume.DriverName
 	PoolProtectionFinalizer       = volumeapi.PoolProtectionFinalizer
 	PoolIdentityReleaseAnnotation = volumeapi.PoolIdentityReleaseAnnotation
 )
