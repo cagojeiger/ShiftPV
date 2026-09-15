@@ -90,6 +90,57 @@ func (c *Checker) ReleasePoolProtection(ctx context.Context) error {
 	return result
 }
 
+// CheckAfter determines whether the whole driver can be removed. Every ShiftPV
+// dependency is a blocker regardless of which Pool owns it.
+func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Report, error) {
+	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
+		return Report{}, fmt.Errorf("uninstall checker is not configured")
+	}
+	if strings.TrimSpace(c.StorageClassName) == "" {
+		return Report{}, fmt.Errorf("ShiftPV StorageClass name is required")
+	}
+
+	report := Report{}
+	persistentVolumes, err := c.listDriverPersistentVolumes(ctx)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Blockers = append(report.Blockers, persistentVolumeBlockers(persistentVolumes)...)
+
+	claimed, err := c.claimBlockers(ctx)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Blockers = append(report.Blockers, claimed...)
+
+	volumes, err := c.Volumes.ListVolumes(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("list ShiftPVVolumes: %w", err)
+	}
+	report.Blockers = append(report.Blockers, volumeBlockers(volumes)...)
+
+	moved, err := c.moveBlockers(ctx, nil)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Blockers = append(report.Blockers, moved...)
+
+	cleaned, err := c.cleanupBlockers(ctx, nil)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Blockers = append(report.Blockers, cleaned...)
+
+	pooled, err := c.poolBlockers(ctx, inventoryAfter)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Blockers = append(report.Blockers, pooled...)
+
+	sortBlockers(report.Blockers)
+	return report, nil
+}
+
 // CheckPoolDeleteAfter determines whether one exact Pool registration can be
 // removed without losing authority over a volume, move, embedded cleanup
 // journal, PersistentVolume, or physical copy. Other Pools may remain in use.
@@ -97,75 +148,172 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
 		return Report{}, fmt.Errorf("Pool deletion checker is not configured")
 	}
-	if strings.TrimSpace(poolName) == "" || poolUID == "" {
-		return Report{}, fmt.Errorf("exact Pool identity is required")
-	}
-	pools, err := c.Volumes.ListPoolRegistrations(ctx)
+	target, err := c.exactPool(ctx, poolName, poolUID)
 	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPVPools: %w", err)
-	}
-	var target *volumeapi.Pool
-	for index := range pools {
-		if pools[index].Name == poolName {
-			target = &pools[index]
-			break
-		}
-	}
-	if target == nil {
-		return Report{}, fmt.Errorf("Pool %q was not found", poolName)
-	}
-	if target.UID != string(poolUID) {
-		return Report{}, fmt.Errorf("Pool %q identity changed", poolName)
+		return Report{}, err
 	}
 
 	report := Report{}
-	now := time.Now().UTC()
-	if c.Now != nil {
-		now = c.Now().UTC()
-	}
-	maxAge := c.InventoryMaxAge
-	if maxAge <= 0 {
-		maxAge = volumeapi.DefaultPoolReadinessStaleAfter
-	}
-	report.Blockers = append(report.Blockers, poolInventoryBlockers(*target, now, maxAge, inventoryAfter.UTC())...)
+	report.Blockers = append(report.Blockers, poolInventoryBlockers(target, c.now(), c.inventoryMaxAge(), inventoryAfter.UTC())...)
 
 	volumes, err := c.Volumes.ListVolumes(ctx)
 	if err != nil {
 		return Report{}, fmt.Errorf("list ShiftPVVolumes: %w", err)
 	}
 
-	persistentVolumes, err := c.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	persistentVolumes, err := c.listDriverPersistentVolumes(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("list PersistentVolumes: %w", err)
+		return Report{}, err
 	}
-	for _, persistentVolume := range persistentVolumes.Items {
+	report.Blockers = append(report.Blockers, poolPersistentVolumeBlockers(persistentVolumes, volumes, target)...)
+	report.Blockers = append(report.Blockers, poolVolumeBlockers(volumes, target)...)
+
+	moved, err := c.moveBlockers(ctx, &target)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Blockers = append(report.Blockers, moved...)
+
+	cleaned, err := c.cleanupBlockers(ctx, &target)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Blockers = append(report.Blockers, cleaned...)
+
+	sortBlockers(report.Blockers)
+	return report, nil
+}
+
+// exactPool resolves the registration that still carries the requested identity.
+func (c *Checker) exactPool(ctx context.Context, poolName string, poolUID types.UID) (volumeapi.Pool, error) {
+	if strings.TrimSpace(poolName) == "" || poolUID == "" {
+		return volumeapi.Pool{}, fmt.Errorf("exact Pool identity is required")
+	}
+	pools, err := c.Volumes.ListPoolRegistrations(ctx)
+	if err != nil {
+		return volumeapi.Pool{}, fmt.Errorf("list ShiftPVPools: %w", err)
+	}
+	for _, pool := range pools {
+		if pool.Name != poolName {
+			continue
+		}
+		if pool.UID != string(poolUID) {
+			return volumeapi.Pool{}, fmt.Errorf("Pool %q identity changed", poolName)
+		}
+		return pool, nil
+	}
+	return volumeapi.Pool{}, fmt.Errorf("Pool %q was not found", poolName)
+}
+
+func (c *Checker) listDriverPersistentVolumes(ctx context.Context) ([]corev1.PersistentVolume, error) {
+	list, err := c.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list PersistentVolumes: %w", err)
+	}
+	driverOwned := []corev1.PersistentVolume{}
+	for _, persistentVolume := range list.Items {
 		if persistentVolume.Spec.CSI == nil || persistentVolume.Spec.CSI.Driver != DriverName {
 			continue
 		}
+		driverOwned = append(driverOwned, persistentVolume)
+	}
+	return driverOwned, nil
+}
+
+// persistentVolumeBlockers reports every driver-owned PersistentVolume. Driver
+// removal loses the mount path of all of them.
+func persistentVolumeBlockers(persistentVolumes []corev1.PersistentVolume) []Blocker {
+	blockers := []Blocker{}
+	for _, persistentVolume := range persistentVolumes {
+		if persistentVolume.Spec.CSI == nil {
+			continue
+		}
+		reason := fmt.Sprintf("driver=%s volumeHandle=%s", DriverName, persistentVolume.Spec.CSI.VolumeHandle)
+		if persistentVolume.Spec.ClaimRef != nil {
+			reason += fmt.Sprintf(" claim=%s/%s", persistentVolume.Spec.ClaimRef.Namespace, persistentVolume.Spec.ClaimRef.Name)
+		}
+		blockers = append(blockers, Blocker{Kind: "PersistentVolume", Name: persistentVolume.Name, Reason: reason})
+	}
+	return blockers
+}
+
+// poolPersistentVolumeBlockers reports only the PersistentVolumes whose data
+// may live on the target Pool. An exact current copy decides on its own; an
+// unknown copy falls back to node affinity and fails closed when the placement
+// cannot be read.
+func poolPersistentVolumeBlockers(persistentVolumes []corev1.PersistentVolume, volumes map[string]volumeapi.State, pool volumeapi.Pool) []Blocker {
+	blockers := []Blocker{}
+	for _, persistentVolume := range persistentVolumes {
+		if persistentVolume.Spec.CSI == nil {
+			continue
+		}
 		if state, exists := volumes[persistentVolume.Spec.CSI.VolumeHandle]; exists {
-			if usesPool, known := currentCopyUsesPool(persistentVolume.Spec.CSI.VolumeHandle, state, *target); known {
+			if usesPool, known := currentCopyUsesPool(persistentVolume.Spec.CSI.VolumeHandle, state, pool); known {
 				if usesPool {
-					report.Blockers = append(report.Blockers, Blocker{Kind: "PersistentVolume", Name: persistentVolume.Name, Reason: "pool=" + target.Name + " poolUID=" + target.UID})
+					blockers = append(blockers, Blocker{Kind: "PersistentVolume", Name: persistentVolume.Name, Reason: "pool=" + pool.Name + " poolUID=" + pool.UID})
 				}
 				continue
 			}
 		}
-		matches, known := persistentVolumeTargetsNode(persistentVolume, target.NodeName)
+		matches, known := persistentVolumeTargetsNode(persistentVolume, pool.NodeName)
 		if !known || matches {
 			reason := "placement=unknown"
 			if matches {
-				reason = "node=" + target.NodeName
+				reason = "node=" + pool.NodeName
 			}
-			report.Blockers = append(report.Blockers, Blocker{Kind: "PersistentVolume", Name: persistentVolume.Name, Reason: reason})
+			blockers = append(blockers, Blocker{Kind: "PersistentVolume", Name: persistentVolume.Name, Reason: reason})
 		}
 	}
+	return blockers
+}
 
+func (c *Checker) claimBlockers(ctx context.Context) ([]Blocker, error) {
+	claims, err := c.Client.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list PersistentVolumeClaims: %w", err)
+	}
+	blockers := []Blocker{}
+	for _, claim := range claims.Items {
+		if claim.Spec.StorageClassName == nil || *claim.Spec.StorageClassName != c.StorageClassName {
+			continue
+		}
+		reason := "references the ShiftPV StorageClass"
+		if claim.Spec.VolumeName != "" {
+			reason += " volume=" + claim.Spec.VolumeName
+		}
+		blockers = append(blockers, Blocker{Kind: "PersistentVolumeClaim", Namespace: claim.Namespace, Name: claim.Name, Reason: reason})
+	}
+	return blockers, nil
+}
+
+// volumeBlockers reports every ShiftPVVolume. Driver removal loses the
+// lifecycle of all of them.
+func volumeBlockers(volumes map[string]volumeapi.State) []Blocker {
+	blockers := []Blocker{}
 	for volumeID, state := range volumes {
-		usesPool, known := currentCopyUsesPool(volumeID, state, *target)
+		reasonParts := []string{"phase=" + state.Phase, "owner=" + state.OwnerNode}
+		if state.ActiveMove != "" {
+			reasonParts = append(reasonParts, "activeMove="+state.ActiveMove)
+		}
+		if len(state.PublishedNodes) > 0 {
+			reasonParts = append(reasonParts, "publishedNodes="+strings.Join(state.PublishedNodes, ","))
+		}
+		blockers = append(blockers, Blocker{Kind: "ShiftPVVolume", Name: volumeID, Reason: strings.Join(reasonParts, " ")})
+	}
+	return blockers
+}
+
+// poolVolumeBlockers reports only the ShiftPVVolumes that may still hold data
+// on the target Pool, and fails closed on an unknown current copy that either
+// is owned by or is published on the Pool node.
+func poolVolumeBlockers(volumes map[string]volumeapi.State, pool volumeapi.Pool) []Blocker {
+	blockers := []Blocker{}
+	for volumeID, state := range volumes {
+		usesPool, known := currentCopyUsesPool(volumeID, state, pool)
 		if known && !usesPool {
 			continue
 		}
-		if !known && !slices.Contains(state.PublishedNodes, target.NodeName) && state.OwnerNode != target.NodeName {
+		if !known && !slices.Contains(state.PublishedNodes, pool.NodeName) && state.OwnerNode != pool.NodeName {
 			continue
 		}
 		reason := "owner=" + state.OwnerNode
@@ -174,41 +322,106 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		} else {
 			reason += " pool=" + state.CurrentCopy.PoolName + " poolUID=" + state.CurrentCopy.PoolUID
 		}
-		report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVVolume", Name: volumeID, Reason: reason})
+		blockers = append(blockers, Blocker{Kind: "ShiftPVVolume", Name: volumeID, Reason: reason})
 	}
+	return blockers
+}
 
+// moveBlockers reports unsettled ShiftPVMoves. A nil pool scopes the scan to
+// the whole driver; a non-nil pool keeps only the moves that still reference
+// that exact Pool identity or node.
+func (c *Checker) moveBlockers(ctx context.Context, pool *volumeapi.Pool) ([]Blocker, error) {
 	moves, err := c.Volumes.ListMoves(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPVMoves: %w", err)
+		return nil, fmt.Errorf("list ShiftPVMoves: %w", err)
 	}
+	blockers := []Blocker{}
 	for _, move := range moves {
 		if volumeapi.MoveCleanupSettled(move) {
 			continue
 		}
-		if moveUsesPool(move, *target) {
-			report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVMove", Name: move.Name, Reason: fmt.Sprintf("phase=%s volume=%s", move.Status.Phase, move.Spec.VolumeID)})
+		if pool != nil && !moveUsesPool(move, *pool) {
+			continue
 		}
+		blockers = append(blockers, Blocker{
+			Kind:   "ShiftPVMove",
+			Name:   move.Name,
+			Reason: fmt.Sprintf("phase=%s volume=%s", move.Status.Phase, move.Spec.VolumeID),
+		})
 	}
+	return blockers, nil
+}
 
+// cleanupBlockers reports unfinished cleanup journals. A nil pool scopes the
+// scan to the whole driver; a non-nil pool keeps only the journals targeting
+// that exact Pool identity.
+func (c *Checker) cleanupBlockers(ctx context.Context, pool *volumeapi.Pool) ([]Blocker, error) {
 	cleanups, err := c.Cleanups.List(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("list cleanup journals: %w", err)
+		return nil, fmt.Errorf("list cleanup journals: %w", err)
 	}
+	blockers := []Blocker{}
 	for _, cleanup := range cleanups {
-		if cleanup.Status.Phase == cleanupapi.PhaseCompleted || cleanup.Spec.Target.PoolName != target.Name || cleanup.Spec.Target.PoolUID != target.UID {
+		if cleanup.Status.Phase == cleanupapi.PhaseCompleted {
+			continue
+		}
+		if pool != nil && (cleanup.Spec.Target.PoolName != pool.Name || cleanup.Spec.Target.PoolUID != pool.UID) {
 			continue
 		}
 		blocker, err := cleanupJournalBlocker(cleanup)
 		if err != nil {
-			return Report{}, err
+			return nil, err
 		}
-		report.Blockers = append(report.Blockers, blocker)
+		blockers = append(blockers, blocker)
 	}
+	return blockers, nil
+}
 
-	sort.Slice(report.Blockers, func(left, right int) bool {
-		return blockerKey(report.Blockers[left]) < blockerKey(report.Blockers[right])
+// poolBlockers reports the inventory and retained identity of every Pool.
+func (c *Checker) poolBlockers(ctx context.Context, inventoryAfter time.Time) ([]Blocker, error) {
+	pools, err := c.Volumes.ListPools(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list ShiftPVPools: %w", err)
+	}
+	now := c.now()
+	maxAge := c.inventoryMaxAge()
+	observedAfter := inventoryAfter.UTC()
+	blockers := []Blocker{}
+	for _, pool := range pools {
+		blockers = append(blockers, poolInventoryBlockers(pool, now, maxAge, observedAfter)...)
+		if pool.DeletionTimestamp == nil {
+			continue
+		}
+		released := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionIdentityReleased)
+		if released == nil || released.Status != metav1.ConditionTrue || released.ObservedGeneration != pool.Generation {
+			reason := "identity=retained"
+			if released != nil && released.Reason != "" {
+				reason = released.Reason
+			}
+			blockers = append(blockers, Blocker{Kind: "ShiftPVPoolIdentity", Name: pool.Name, Reason: reason})
+		}
+	}
+	return blockers, nil
+}
+
+func (c *Checker) now() time.Time {
+	if c.Now != nil {
+		return c.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (c *Checker) inventoryMaxAge() time.Duration {
+	if c.InventoryMaxAge > 0 {
+		return c.InventoryMaxAge
+	}
+	return volumeapi.DefaultPoolReadinessStaleAfter
+}
+
+func sortBlockers(blockers []Blocker) {
+	sort.Slice(blockers, func(left, right int) bool {
+		return blockerKey(blockers[left]) < blockerKey(blockers[right])
 	})
-	return report, nil
 }
 
 func copyUsesPool(copy *cleanupapi.CopyIdentity, pool volumeapi.Pool) bool {
@@ -288,122 +501,6 @@ func persistentVolumeTargetsNode(persistentVolume corev1.PersistentVolume, nodeN
 		}
 	}
 	return false, true
-}
-
-func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Report, error) {
-	if c == nil || c.Client == nil || c.Volumes == nil || c.Cleanups == nil {
-		return Report{}, fmt.Errorf("uninstall checker is not configured")
-	}
-	if strings.TrimSpace(c.StorageClassName) == "" {
-		return Report{}, fmt.Errorf("ShiftPV StorageClass name is required")
-	}
-	report := Report{}
-	persistentVolumes, err := c.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return Report{}, fmt.Errorf("list PersistentVolumes: %w", err)
-	}
-	for _, persistentVolume := range persistentVolumes.Items {
-		if persistentVolume.Spec.CSI == nil || persistentVolume.Spec.CSI.Driver != DriverName {
-			continue
-		}
-		reason := fmt.Sprintf("driver=%s volumeHandle=%s", DriverName, persistentVolume.Spec.CSI.VolumeHandle)
-		if persistentVolume.Spec.ClaimRef != nil {
-			reason += fmt.Sprintf(" claim=%s/%s", persistentVolume.Spec.ClaimRef.Namespace, persistentVolume.Spec.ClaimRef.Name)
-		}
-		report.Blockers = append(report.Blockers, Blocker{Kind: "PersistentVolume", Name: persistentVolume.Name, Reason: reason})
-	}
-
-	claims, err := c.Client.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return Report{}, fmt.Errorf("list PersistentVolumeClaims: %w", err)
-	}
-	for _, claim := range claims.Items {
-		if claim.Spec.StorageClassName == nil || *claim.Spec.StorageClassName != c.StorageClassName {
-			continue
-		}
-		reason := "references the ShiftPV StorageClass"
-		if claim.Spec.VolumeName != "" {
-			reason += " volume=" + claim.Spec.VolumeName
-		}
-		report.Blockers = append(report.Blockers, Blocker{Kind: "PersistentVolumeClaim", Namespace: claim.Namespace, Name: claim.Name, Reason: reason})
-	}
-
-	volumes, err := c.Volumes.ListVolumes(ctx)
-	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPVVolumes: %w", err)
-	}
-	for volumeID, state := range volumes {
-		reasonParts := []string{"phase=" + state.Phase, "owner=" + state.OwnerNode}
-		if state.ActiveMove != "" {
-			reasonParts = append(reasonParts, "activeMove="+state.ActiveMove)
-		}
-		if len(state.PublishedNodes) > 0 {
-			reasonParts = append(reasonParts, "publishedNodes="+strings.Join(state.PublishedNodes, ","))
-		}
-		report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVVolume", Name: volumeID, Reason: strings.Join(reasonParts, " ")})
-	}
-
-	moves, err := c.Volumes.ListMoves(ctx)
-	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPVMoves: %w", err)
-	}
-	for _, move := range moves {
-		if volumeapi.MoveCleanupSettled(move) {
-			continue
-		}
-		report.Blockers = append(report.Blockers, Blocker{
-			Kind:   "ShiftPVMove",
-			Name:   move.Name,
-			Reason: fmt.Sprintf("phase=%s volume=%s", move.Status.Phase, move.Spec.VolumeID),
-		})
-	}
-	requests, err := c.Cleanups.List(ctx)
-	if err != nil {
-		return Report{}, fmt.Errorf("list cleanup journals: %w", err)
-	}
-	for _, request := range requests {
-		if request.Status.Phase == cleanupapi.PhaseCompleted {
-			continue
-		}
-		blocker, err := cleanupJournalBlocker(request)
-		if err != nil {
-			return Report{}, err
-		}
-		report.Blockers = append(report.Blockers, blocker)
-	}
-
-	pools, err := c.Volumes.ListPools(ctx)
-	if err != nil {
-		return Report{}, fmt.Errorf("list ShiftPVPools: %w", err)
-	}
-	now := time.Now().UTC()
-	if c.Now != nil {
-		now = c.Now().UTC()
-	}
-	maxAge := c.InventoryMaxAge
-	if maxAge <= 0 {
-		maxAge = volumeapi.DefaultPoolReadinessStaleAfter
-	}
-	for _, pool := range pools {
-		report.Blockers = append(report.Blockers, poolInventoryBlockers(pool, now, maxAge, inventoryAfter.UTC())...)
-		if pool.DeletionTimestamp != nil {
-			released := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionIdentityReleased)
-			if released == nil || released.Status != metav1.ConditionTrue || released.ObservedGeneration != pool.Generation {
-				reason := "identity=retained"
-				if released != nil && released.Reason != "" {
-					reason = released.Reason
-				}
-				report.Blockers = append(report.Blockers, Blocker{Kind: "ShiftPVPoolIdentity", Name: pool.Name, Reason: reason})
-			}
-		}
-	}
-
-	sort.Slice(report.Blockers, func(left, right int) bool {
-		leftKey := blockerKey(report.Blockers[left])
-		rightKey := blockerKey(report.Blockers[right])
-		return leftKey < rightKey
-	})
-	return report, nil
 }
 
 func cleanupJournalBlocker(cleanup cleanupapi.Cleanup) (Blocker, error) {
