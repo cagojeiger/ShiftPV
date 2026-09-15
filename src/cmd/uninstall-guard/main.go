@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cagojeiger/ShiftPV/src/cmd/internal/flagvalue"
 	"github.com/cagojeiger/ShiftPV/src/cmd/internal/wiring"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
@@ -17,7 +18,8 @@ import (
 )
 
 func main() {
-	storageClassName := flag.String("storage-class", "shiftpv", "ShiftPV StorageClass name")
+	var storageClassNames flagvalue.Names
+	flag.Var(&storageClassNames, "storage-class", "repeatable ShiftPV StorageClass name")
 	permitNamespace := flag.String("permit-namespace", os.Getenv("POD_NAMESPACE"), "namespace for the uninstall permit ConfigMap")
 	permitName := flag.String("permit-name", "shiftpv-uninstall-permit", "uninstall permit ConfigMap name")
 	validationWebhook := flag.String("validation-webhook", "shiftpv-lifecycle", "lifecycle ValidatingWebhookConfiguration name")
@@ -36,12 +38,12 @@ func main() {
 	clients := wiring.InCluster(deny)
 
 	checker := &uninstallcheck.Checker{
-		Client:           clients.Typed,
-		Volumes:          &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: *poolReadinessStaleAfter},
-		Cleanups:         &cleanupapi.Store{Client: clients.Dynamic},
-		StorageClassName: *storageClassName,
-		Namespace:        *permitNamespace,
-		InventoryMaxAge:  *poolReadinessStaleAfter,
+		Client:            clients.Typed,
+		Volumes:           &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: *poolReadinessStaleAfter},
+		Cleanups:          &cleanupapi.Store{Client: clients.Dynamic},
+		StorageClassNames: storageClassNames.Values("shiftpv"),
+		Namespace:         *permitNamespace,
+		InventoryMaxAge:   *poolReadinessStaleAfter,
 	}
 	permit := &uninstallcheck.PermitStore{Client: clients.Typed, Namespace: *permitNamespace, Name: *permitName, CSIDriver: uninstallcheck.DriverName}
 	var runErr error

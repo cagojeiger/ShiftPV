@@ -49,8 +49,9 @@ verify_cleanup_lifecycle() {
 	test "${release_status}" = uninstalling
 	kubectl -n shiftpv-system get deployment/shiftpv-controller >/dev/null
 	kubectl -n shiftpv-system wait --for=delete configmap/shiftpv-uninstall-permit --timeout=30s
-	kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -Fq 'ShiftPVMove'
-	kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -Fq "${move}"
+	kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard >"${WORK_DIR}/cleanup-uninstall-guard.txt"
+	grep -Fq 'ShiftPVMove' "${WORK_DIR}/cleanup-uninstall-guard.txt"
+	grep -Fq "${move}" "${WORK_DIR}/cleanup-uninstall-guard.txt"
 	helm rollback shiftpv "${release_revision}" --namespace shiftpv-system \
 		--no-hooks --wait --timeout 5m
 	test "$(helm status shiftpv --namespace shiftpv-system -o json | jq -r '.info.status')" = deployed

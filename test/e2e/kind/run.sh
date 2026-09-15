@@ -201,8 +201,13 @@ install_shiftpv true
 
 DEFAULT_CLASS=$(kubectl get storageclass shiftpv \
   -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
-if [[ "${DEFAULT_CLASS}" != "true" ]]; then
-  echo "shiftpv StorageClass is not marked as the cluster default" >&2
+DEFAULT_POLICY=$(kubectl get storageclass shiftpv -o jsonpath='{.reclaimPolicy}')
+RETAIN_CLASS=$(kubectl get storageclass shiftpv-retain \
+  -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+RETAIN_POLICY=$(kubectl get storageclass shiftpv-retain -o jsonpath='{.reclaimPolicy}')
+if [[ "${DEFAULT_CLASS}" != "true" || "${DEFAULT_POLICY}" != "Delete" || \
+  "${RETAIN_CLASS}" != "false" || "${RETAIN_POLICY}" != "Retain" ]]; then
+  echo "unexpected StorageClass contract: shiftpv=${DEFAULT_CLASS}/${DEFAULT_POLICY} shiftpv-retain=${RETAIN_CLASS}/${RETAIN_POLICY}" >&2
   exit 1
 fi
 
@@ -272,8 +277,16 @@ if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_RESTARTS}" ]]; then
   exit 1
 fi
 
-# Verify ordinary kubelet unpublish/publish before testing the Helm boundary.
+# Verify kubelet applies Pod fsGroup ownership on a previously root-owned
+# ShiftPV volume before testing an ordinary unpublish/publish.
 kubectl delete pod shiftpv-e2e --wait=true
+kubectl apply -f "${ROOT_DIR}/test/e2e/kind/fs-group-pod.yaml"
+kubectl wait --for=condition=Ready pod/shiftpv-fsgroup-e2e --timeout=5m
+test "$(kubectl exec shiftpv-fsgroup-e2e -- stat -c %g /data)" = 10001
+kubectl exec shiftpv-fsgroup-e2e -- grep -Fx 'ShiftPV non-root fsGroup write' /data/non-root
+kubectl delete pod shiftpv-fsgroup-e2e --wait=true
+
+# Verify ordinary kubelet unpublish/publish before testing the Helm boundary.
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
 kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
 CHECKSUM_RECREATED=$(pod_sha256 default shiftpv-e2e /data/payload)
@@ -346,8 +359,11 @@ EXISTING_DEFAULT=$(kubectl get storageclass existing-default \
 	-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
 SHIFTPV_DEFAULT=$(kubectl get storageclass shiftpv \
 	-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
-if [[ "${EXISTING_DEFAULT}" != "true" || "${SHIFTPV_DEFAULT}" != "false" ]]; then
-	echo "StorageClass default annotations changed unexpectedly: existing=${EXISTING_DEFAULT} shiftpv=${SHIFTPV_DEFAULT}" >&2
+SHIFTPV_RETAIN_DEFAULT=$(kubectl get storageclass shiftpv-retain \
+	-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+if [[ "${EXISTING_DEFAULT}" != "true" || "${SHIFTPV_DEFAULT}" != "false" || \
+	"${SHIFTPV_RETAIN_DEFAULT}" != "false" ]]; then
+	echo "StorageClass default annotations changed unexpectedly: existing=${EXISTING_DEFAULT} shiftpv=${SHIFTPV_DEFAULT} shiftpv-retain=${SHIFTPV_RETAIN_DEFAULT}" >&2
 	exit 1
 fi
 

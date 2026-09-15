@@ -1,16 +1,22 @@
-{{- if .Values.storageClass.create }}
+{{- if and .Values.storageClass.create .Values.retainStorageClass.create (eq .Values.storageClass.name .Values.retainStorageClass.name) }}
+{{- fail "storageClass.name and retainStorageClass.name must differ" }}
+{{- end }}
+{{- range $class := list .Values.storageClass .Values.retainStorageClass }}
+{{- if $class.create }}
+---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: {{ .Values.storageClass.name }}
+  name: {{ $class.name }}
   labels:
-    {{- include "shiftpv.labels" . | nindent 4 }}
+    {{- include "shiftpv.labels" $ | nindent 4 }}
   annotations:
-    storageclass.kubernetes.io/is-default-class: {{ .Values.storageClass.defaultClass | quote }}
+    storageclass.kubernetes.io/is-default-class: {{ $class.defaultClass | quote }}
 provisioner: csi.shiftpv.io
-reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+reclaimPolicy: {{ $class.reclaimPolicy }}
 allowVolumeExpansion: false
 volumeBindingMode: WaitForFirstConsumer
 parameters:
   shiftpv.io/capacity-enforcement: none
+{{- end }}
 {{- end }}

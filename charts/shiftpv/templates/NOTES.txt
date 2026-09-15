@@ -1,6 +1,12 @@
 ShiftPV CSI driver chart {{ .Chart.Version }} is installed.
 
-StorageClass: {{ .Values.storageClass.name }}
+StorageClasses:
+{{- if .Values.storageClass.create }}
+  {{ .Values.storageClass.name }} ({{ .Values.storageClass.reclaimPolicy }}{{ if .Values.storageClass.defaultClass }}, default{{ end }})
+{{- end }}
+{{- if .Values.retainStorageClass.create }}
+  {{ .Values.retainStorageClass.name }} ({{ .Values.retainStorageClass.reclaimPolicy }})
+{{- end }}
 Driver: csi.shiftpv.io
 
 Use the documentation and operational checks that match this exact chart and
