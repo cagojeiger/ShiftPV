@@ -8,6 +8,22 @@ k() {
 	kubectl --context "${KUBECTL_CONTEXT}" --request-timeout=30s "$@"
 }
 
+# Remote access is addressed by reviewed role, never by a hostname the cluster
+# reports, so a stage can only ever reach the two identities the preflight
+# approved.
+ssh_node() {
+	local role=$1
+	shift
+	case "${role}" in
+	source) ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${SOURCE_SSH_TARGET}" "$@" ;;
+	destination) ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${DESTINATION_SSH_TARGET}" "$@" ;;
+	*)
+		echo "unknown ssh node role: ${role}" >&2
+		return 1
+		;;
+	esac
+}
+
 # The fault stages refuse to start unless the reviewed identity of the cluster,
 # both nodes, and both candidate images is supplied in full.
 require_real_node_env() {
@@ -41,8 +57,80 @@ apply_real_node_defaults() {
 	STORAGE_CLASS=${STORAGE_CLASS:-shiftpv}
 	SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-5}
 	WORKLOAD_IMAGE=${WORKLOAD_IMAGE:-busybox:1.37@sha256:7a3ebe5bfd1a4a19797d20b0c0bb39d44393e9a03fd852c0865b0f540d868df0}
+	# The qualified hosts run MicroK8s; these defaults describe that node runtime
+	# and may be overridden for another distribution without editing a stage.
+	NODE_RUNTIME_STOP_CMD=${NODE_RUNTIME_STOP_CMD:-'sudo systemctl stop snap.microk8s.daemon-containerd.service snap.microk8s.daemon-kubelite.service'}
+	NODE_RUNTIME_START_CMD=${NODE_RUNTIME_START_CMD:-'sudo snap start microk8s'}
+	NODE_RUNTIME_JOURNAL_UNIT=${NODE_RUNTIME_JOURNAL_UNIT:-snap.microk8s.daemon-kubelite}
 	# shellcheck disable=SC2034 # the sourcing stage builds ARTIFACT_DIR from it.
 	RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+}
+
+# Both fault stages drive the same synthetic writer: an admission-enabled
+# namespace, one RWO claim on the ShiftPV class, and one Deployment that fills a
+# payload file once and then idles. They differ only in the names, the claim
+# size, and the payload they write.
+create_test_workload() {
+	local namespace=$1 app_label=$2 storage=$3 payload_mb=$4 payload=$5
+	k apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${namespace}
+  labels:
+    shiftpv.io/admission: enabled
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: ${namespace}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: ${storage}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: writer
+  namespace: ${namespace}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${app_label}
+  template:
+    metadata:
+      labels:
+        app: ${app_label}
+    spec:
+      containers:
+        - name: writer
+          image: ${WORKLOAD_IMAGE}
+          command: [sh, -ec]
+          args:
+            - |
+              if [ ! -f /data/payload ]; then
+                dd if=/dev/zero of=/data/payload bs=1M count=${payload_mb}
+                printf '%s\\n' '${payload}' >>/data/payload
+                sync
+              fi
+              sleep 86400
+          readinessProbe:
+            exec:
+              command: [test, -f, /data/payload]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data
+EOF
 }
 
 report_error() {
@@ -58,8 +146,8 @@ report_error() {
 }
 
 # Pass the optional second argument source-kubelite to additionally collect the
-# source host kubelite journal; only stages that define ssh_source may ask for
-# it.
+# source host control-plane journal; only the fault stages that actually stop
+# the source node ask for it.
 capture_evidence() {
 	local label=$1 extra=${2:-}
 	k get nodes -o wide >"${ARTIFACT_DIR}/${label}-nodes.txt" 2>&1 || true
@@ -69,10 +157,8 @@ capture_evidence() {
 	k get events -A --sort-by=.metadata.creationTimestamp >"${ARTIFACT_DIR}/${label}-events.txt" 2>&1 || true
 	k -n "${SYSTEM_NAMESPACE}" logs deployment/shiftpv-controller --all-containers --tail=-1 >"${ARTIFACT_DIR}/${label}-controller.log" 2>&1 || true
 	if [[ "${extra}" == source-kubelite ]]; then
-		# Only stages that define ssh_source (service-interruption.sh) may ask for
-		# the source-kubelite journal; soak.sh never passes this flag.
-		declare -F ssh_source >/dev/null || { echo "capture_evidence source-kubelite requires ssh_source" >&2; return 1; }
-		ssh_source sudo journalctl -u snap.microk8s.daemon-kubelite --since '-1 hour' --no-pager >"${ARTIFACT_DIR}/${label}-${SOURCE_NODE}-kubelite.log" 2>&1 || true
+		# service-interruption.sh passes this flag; soak.sh never does.
+		ssh_node source sudo journalctl -u "${NODE_RUNTIME_JOURNAL_UNIT}" --since '-1 hour' --no-pager >"${ARTIFACT_DIR}/${label}-${SOURCE_NODE}-kubelite.log" 2>&1 || true
 	fi
 }
 

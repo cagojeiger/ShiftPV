@@ -38,14 +38,6 @@ mkdir -p "${ARTIFACT_DIR}"
 
 trap report_error ERR
 
-ssh_source() {
-	ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${SOURCE_SSH_TARGET}" "$@"
-}
-
-ssh_destination() {
-	ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${DESTINATION_SSH_TARGET}" "$@"
-}
-
 restore_environment() {
 	local result_code=$? deadline source_ready=1 restore_failed=0
 	trap - ERR EXIT INT TERM
@@ -54,14 +46,15 @@ restore_environment() {
 		source_ready=0
 		deadline=$((SECONDS + NODE_TIMEOUT_SECONDS))
 		while ((SECONDS < deadline)); do
-			if ssh_source true >/dev/null 2>&1; then
+			if ssh_node source true >/dev/null 2>&1; then
 				source_ready=1
 				break
 			fi
 			sleep 2
 		done
 	fi
-	ssh_source sudo snap start microk8s >/dev/null 2>&1
+	# shellcheck disable=SC2086 # the override is a command line, not one argument.
+	ssh_node source ${NODE_RUNTIME_START_CMD} >/dev/null 2>&1
 	if ((source_ready)); then
 		if ! k uncordon "${SOURCE_NODE}" >/dev/null 2>&1; then
 			restore_failed=1
@@ -105,7 +98,7 @@ wait_for_node() {
 stop_source_node() {
 	local boot_id_before='' boot_id_after='' deadline reboot_ssh_pid=''
 	if [[ "${FAULT_MODE}" == reboot ]]; then
-		boot_id_before=$(ssh_source cat /proc/sys/kernel/random/boot_id)
+		boot_id_before=$(ssh_node source cat /proc/sys/kernel/random/boot_id)
 		test -n "${boot_id_before}"
 		# Double force asks systemd to reboot immediately without an orderly unit
 		# shutdown. The host returns automatically, so this remains distinct from
@@ -118,7 +111,7 @@ stop_source_node() {
 		reboot_ssh_pid=$!
 		deadline=$((SECONDS + NODE_TIMEOUT_SECONDS))
 		while ((SECONDS < deadline)); do
-			boot_id_after=$(ssh_source cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+			boot_id_after=$(ssh_node source cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
 			if [[ -n "${boot_id_after}" && "${boot_id_after}" != "${boot_id_before}" ]]; then
 				break
 			fi
@@ -138,14 +131,14 @@ stop_source_node() {
 	# Stop the runtime and kubelet together. In reboot mode this deterministic
 	# hold starts as soon as SSH returns, keeping the fault window open until the
 	# control plane observes the node unavailable.
-	ssh_source sudo systemctl stop \
-		snap.microk8s.daemon-containerd.service \
-		snap.microk8s.daemon-kubelite.service
+	# shellcheck disable=SC2086 # the override is a command line, not one argument.
+	ssh_node source ${NODE_RUNTIME_STOP_CMD}
 	wait_for_node "${SOURCE_NODE}" unavailable
 }
 
 start_source_node() {
-	ssh_source sudo snap start microk8s
+	# shellcheck disable=SC2086 # the override is a command line, not one argument.
+	ssh_node source ${NODE_RUNTIME_START_CMD}
 	wait_for_node "${SOURCE_NODE}" ready
 	k -n "${SYSTEM_NAMESPACE}" rollout status daemonset/shiftpv-node --timeout=300s
 }
@@ -171,65 +164,7 @@ create_source_workload() {
 		return 1
 	fi
 	k cordon "${DESTINATION_NODE}" >/dev/null
-	k apply -f - <<EOF
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ${namespace}
-  labels:
-    shiftpv.io/admission: enabled
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: data
-  namespace: ${namespace}
-spec:
-  accessModes: [ReadWriteOnce]
-  volumeMode: Filesystem
-  storageClassName: ${STORAGE_CLASS}
-  resources:
-    requests:
-      storage: 512Mi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: writer
-  namespace: ${namespace}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: ${namespace}
-  template:
-    metadata:
-      labels:
-        app: ${namespace}
-    spec:
-      containers:
-        - name: writer
-          image: ${WORKLOAD_IMAGE}
-          command: [sh, -ec]
-          args:
-            - |
-              if [ ! -f /data/payload ]; then
-                dd if=/dev/zero of=/data/payload bs=1M count=256
-                printf '%s\\n' '${payload}' >>/data/payload
-                sync
-              fi
-              sleep 86400
-          readinessProbe:
-            exec:
-              command: [test, -f, /data/payload]
-          volumeMounts:
-            - name: data
-              mountPath: /data
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: data
-EOF
+	create_test_workload "${namespace}" "${namespace}" 512Mi 256 "${payload}"
 	k -n "${namespace}" rollout status deployment/writer --timeout=600s
 	k -n "${namespace}" wait pvc/data --for=jsonpath='{.status.phase}'=Bound --timeout=180s
 	pod=$(k -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
@@ -329,7 +264,7 @@ run_precommit_source_interruption() {
 	reason=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.reason}')
 	test "${reason}" = SourceUnavailable
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	ssh_source sudo test -f "${SOURCE_POOL}/volumes/${VOLUME_ID}/payload"
+	ssh_node source sudo test -f "${SOURCE_POOL}/volumes/${VOLUME_ID}/payload"
 	start_source_node
 	k uncordon "${SOURCE_NODE}" >/dev/null
 	k patch "shiftpvmove/${MOVE_NAME}" --type=merge -p '{"spec":{"recovery":"ResumeOwner"}}'
@@ -337,7 +272,7 @@ run_precommit_source_interruption() {
 	assert_identity_and_checksum "${namespace}" "${SOURCE_NODE}"
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	ssh_destination sudo test ! -e "${DESTINATION_POOL}/volumes/${VOLUME_ID}"
+	ssh_node destination sudo test ! -e "${DESTINATION_POOL}/volumes/${VOLUME_ID}"
 	printf 'PASS precommit source recovery volume=%s move=%s checksum=%s\n' "${VOLUME_ID}" "${MOVE_NAME}" "${SOURCE_CHECKSUM}"
 	cleanup_case "${namespace}"
 }
@@ -367,7 +302,7 @@ run_postcommit_cleanup_interruption() {
 	trigger_move
 	stop_after_commit_before_cleanup
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
-	ssh_source sudo test -f "${SOURCE_POOL}/volumes/${VOLUME_ID}/payload"
+	ssh_node source sudo test -f "${SOURCE_POOL}/volumes/${VOLUME_ID}/payload"
 	deadline=$((SECONDS + 300))
 	while ((SECONDS < deadline)); do
 		phase=$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
@@ -391,8 +326,8 @@ run_postcommit_cleanup_interruption() {
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 	test "$(k get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.phase}')" = Completed
-	ssh_source sudo test ! -e "${SOURCE_POOL}/volumes/${VOLUME_ID}"
-	ssh_destination sudo test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
+	ssh_node source sudo test ! -e "${SOURCE_POOL}/volumes/${VOLUME_ID}"
+	ssh_node destination sudo test -f "${DESTINATION_POOL}/volumes/${VOLUME_ID}/payload"
 	printf 'PASS postcommit cleanup recovery volume=%s move=%s checksum=%s\n' "${VOLUME_ID}" "${MOVE_NAME}" "${SOURCE_CHECKSUM}"
 	cleanup_case "${namespace}"
 }
