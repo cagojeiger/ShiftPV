@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -14,7 +15,9 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -603,4 +606,384 @@ func TestRecoveredMoveReleasesFinalizerOnlyAfterCapacitySettlement(t *testing.T)
 
 func cleanupapiAuthority(move volumeapi.Move) cleanupapi.Authority {
 	return cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID}
+}
+
+func rollbackCleanupSpec(move volumeapi.Move, target volume.CopyIdentity) cleanupapi.Spec {
+	return cleanupapi.Spec{
+		OperationID: volumeapi.MoveRollbackOperationID(move.UID),
+		Target:      target,
+		Reason:      "MoveRollback",
+		Authority:   cleanupapiAuthority(move),
+	}
+}
+
+// seedConfirmingAbsenceJournal reproduces the durable shape a 0.4.1 cluster is
+// stuck in: the exact intent, an executor, a retired and purged API receipt, and
+// a requested post-receipt scan fence that nothing has confirmed yet.
+func seedConfirmingAbsenceJournal(t *testing.T, r *Reconciler, spec cleanupapi.Spec) {
+	t.Helper()
+	ctx := context.Background()
+	seedWorkingJournal(t, r, spec, cleanupapi.PhaseRunning)
+	request, err := r.Cleanups.Get(ctx, spec.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write the receipt through the store rather than an operator stub, so a
+	// recording operator's call count stays a clean signal about the code path
+	// under test.
+	if err := r.Cleanups.UpdateStatus(ctx, request, cleanupapi.Status{
+		Phase: cleanupapi.PhaseVerifying, Executor: request.Status.Executor,
+		Receipt: &cleanupapi.Receipt{
+			OperationID: spec.OperationID, ExecutorUID: request.Status.Executor.JobUID,
+			ObservedAt: r.now().Format(time.RFC3339Nano), Retired: true, Purged: true,
+			LocalReceiptDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if request, err = r.Cleanups.Get(ctx, spec.Authority); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.Cleanups.ReconcileAbsence(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	seeded, err := r.Cleanups.Get(ctx, spec.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seeded.Status.Phase != cleanupapi.PhaseConfirmingAbsence || seeded.Status.Receipt == nil ||
+		seeded.Status.AbsenceProof == nil || seeded.Status.AbsenceProof.ConfirmedAt != "" {
+		t.Fatalf("seed is not a requested-but-unconfirmed absence fence: %#v", seeded.Status)
+	}
+}
+
+// seedWorkingJournal records an exact intent that never reached a purge
+// receipt, which is the shape a terminal Move must never execute from.
+func seedWorkingJournal(t *testing.T, r *Reconciler, spec cleanupapi.Spec, phase string) {
+	t.Helper()
+	ctx := context.Background()
+	request, err := r.Cleanups.Ensure(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phase == cleanupapi.PhasePending {
+		return
+	}
+	if err := r.Cleanups.UpdateStatus(ctx, request, cleanupapi.Status{Phase: phase, Executor: &cleanupapi.Executor{
+		JobName: request.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: spec.Target.NodeName,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// listedJournal reads the embedded journal the way the uninstall checker does,
+// which does not require the parent to still be protected.
+func listedJournal(t *testing.T, r *Reconciler, move volumeapi.Move) cleanupapi.Cleanup {
+	t.Helper()
+	cleanups, err := r.Cleanups.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cleanup := range cleanups {
+		if cleanup.Spec.Authority == cleanupapiAuthority(move) {
+			return cleanup
+		}
+	}
+	t.Fatalf("no cleanup journal is embedded on move %q", move.Name)
+	return cleanupapi.Cleanup{}
+}
+
+// cleanupPoolObject reaches the Pool the journal store fences against.
+func cleanupPoolObject(t *testing.T, store *cleanupapi.Store, poolName string) (*unstructured.Unstructured, dynamic.ResourceInterface) {
+	t.Helper()
+	pools := store.Client.Resource(volumeapi.PoolResource)
+	pool, err := pools.Get(context.Background(), poolName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pool, pools
+}
+
+// settledTerminalMoveFixture builds the exact 0.4.1 shape: a terminal Move whose
+// capacity is already released, whose volume no longer references it, and whose
+// executor requests are recorded rather than fabricated. Protection is still
+// present so a journal can be seeded; stripMoveProtection removes it afterwards.
+func settledTerminalMoveFixture(t *testing.T, phase, recovery, capacityReason string) (*Reconciler, *memoryRepository, *recordingCleanupOperator, volumeapi.Move, volume.CopyIdentity) {
+	t.Helper()
+	r, repo, incoming, _ := rollbackRecoveryFixture(t, nil)
+	operator := &recordingCleanupOperator{}
+	withRecordingCleanupOperator(operator)(r)
+	repo.journalParents = r.Cleanups.Client
+	move := repo.moves[0]
+	move.Status.Phase, move.Status.RecoveryPhase = phase, recovery
+	move.Status.CapacityApproved, move.Status.CapacityReason = false, capacityReason
+	move.Status.LastTransitionTime = r.now().Format(time.RFC3339Nano)
+	repo.moves[0] = move
+	state := repo.volumes[move.Spec.VolumeID]
+	state.Phase, state.ActiveMove = volumeapi.PhaseReady, ""
+	repo.volumes[move.Spec.VolumeID] = state
+	return r, repo, operator, move, incoming
+}
+
+// stripMoveProtection reproduces the 0.4.1 release of the protection finalizer
+// while the journal was still mid-flight, which is what made it unreachable.
+func stripMoveProtection(t *testing.T, repo *memoryRepository, move volumeapi.Move) {
+	t.Helper()
+	if err := repo.RemoveMoveFinalizer(context.Background(), move.Name, move.UID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reconcileUntilQuiet runs the whole loop repeatedly and returns the reconcile
+// errors it reported, so a test can pin both the durable outcome and the single
+// operator-visible message that announced it.
+func reconcileUntilQuiet(t *testing.T, r *Reconciler, cycles int) []string {
+	t.Helper()
+	reported := []string{}
+	for cycle := 0; cycle < cycles; cycle++ {
+		if err := r.ReconcileAll(context.Background()); err != nil {
+			reported = append(reported, err.Error())
+		}
+	}
+	return reported
+}
+
+// staleDestinationScan makes the fenced Pool report a superseded observation, so
+// the absence fence cannot be proven on this pass.
+func staleDestinationScan(t *testing.T, store *cleanupapi.Store, poolName string) {
+	t.Helper()
+	pools := store.Client.Resource(volumeapi.PoolResource)
+	pool, err := pools.Get(context.Background(), poolName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedField(pool.Object, pool.GetGeneration()-1, "status", "observedGeneration"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pools.UpdateStatus(context.Background(), pool, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRecoveryRollbackWaitsForItsOwnJournalAfterTheArtifactIsGone pins the 0.4.1
+// production failure. The rollback purge already ran, so the destination
+// inventory no longer shows the artifact, but the journal is still at
+// ConfirmingAbsence holding only a requested fence. Absence of the artifact
+// proves only that the effect happened; the journal still owns the receipt and
+// the post-receipt absence proof. Declaring settlement there releases the hold
+// with RecoverySettled, and ReconcileAll never hands a Recovered Move back to
+// recovery, so the journal would stay unfinished for the life of the cluster.
+func TestRecoveryRollbackWaitsForItsOwnJournalAfterTheArtifactIsGone(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("unfinished fence keeps the hold", func(t *testing.T) {
+		r, repo, incoming, _ := rollbackRecoveryFixture(t, nil)
+		move := repo.moves[0]
+		seedConfirmingAbsenceJournal(t, r, rollbackCleanupSpec(move, incoming))
+		staleDestinationScan(t, r.Cleanups, incoming.PoolName)
+
+		state, err := repo.Get(ctx, move.Spec.VolumeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done, err := r.settleRecoveryArtifacts(ctx, &move, state); err != nil || done {
+			t.Fatalf("unproven absence fence settled: done=%v err=%v", done, err)
+		}
+		if !repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason == recoveryCapacitySettled {
+			t.Fatalf("unfinished rollback journal released the hold: %+v", repo.moves[0].Status)
+		}
+	})
+
+	t.Run("journal is driven to Completed", func(t *testing.T) {
+		r, repo, incoming, _ := rollbackRecoveryFixture(t, nil)
+		move := repo.moves[0]
+		seedConfirmingAbsenceJournal(t, r, rollbackCleanupSpec(move, incoming))
+
+		state, err := repo.Get(ctx, move.Spec.VolumeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.settleRecoveryArtifacts(ctx, &move, state); err != nil {
+			t.Fatal(err)
+		}
+		journal, err := r.Cleanups.Get(ctx, cleanupapiAuthority(move))
+		if err != nil || journal.Status.Phase != cleanupapi.PhaseCompleted {
+			t.Fatalf("settlement left the rollback journal unfinished: phase=%q err=%v", journal.Status.Phase, err)
+		}
+		if repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason != recoveryCapacitySettled {
+			t.Fatalf("completed rollback journal did not settle the hold: %+v", repo.moves[0].Status)
+		}
+	})
+}
+
+// TestSettledTerminalMoveStillFinishesItsCleanupJournal covers the upgrade path
+// for clusters already carrying the stuck journals: the Move is settled, its
+// capacity is released and its protection finalizer is gone, yet status.cleanup
+// is mid-flight. ReconcileAll must finish that journal instead of parking the
+// Move for GC, without re-approving capacity or starting any executor.
+func TestSettledTerminalMoveStillFinishesItsCleanupJournal(t *testing.T) {
+	for _, scenario := range []struct{ name, phase, recovery, capacityReason string }{
+		{"rollback journal on a settled Blocked move", "Blocked", recoveryRecovered, recoveryCapacitySettled},
+		{"source journal on a Succeeded move", "Succeeded", "", ""},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, repo, operator, move, incoming := settledTerminalMoveFixture(t, scenario.phase, scenario.recovery, scenario.capacityReason)
+			spec := rollbackCleanupSpec(move, incoming)
+			if scenario.phase == "Succeeded" {
+				var err error
+				if spec, err = moveCleanupSpec(move); err != nil {
+					t.Fatal(err)
+				}
+			}
+			seedConfirmingAbsenceJournal(t, r, spec)
+			stripMoveProtection(t, repo, move)
+			state := repo.volumes[move.Spec.VolumeID]
+
+			if reported := reconcileUntilQuiet(t, r, 4); len(reported) != 0 {
+				t.Fatalf("self-heal reported errors: %v", reported)
+			}
+
+			// Read the journal the way the uninstall checker does: Store.Get
+			// requires a protected parent, and protection is released again
+			// exactly when the journal settles.
+			if phase := listedJournal(t, r, move).Status.Phase; phase != cleanupapi.PhaseCompleted {
+				t.Fatalf("settled move never finished its journal: phase=%q", phase)
+			}
+			listed, err := repo.ListMoves(ctx)
+			if err != nil || len(listed) != 1 {
+				t.Fatalf("self-heal changed the journal set: %+v err=%v", listed, err)
+			}
+			got := listed[0]
+			if got.Status.Phase != scenario.phase || got.Status.RecoveryPhase != scenario.recovery ||
+				got.Status.CapacityApproved || got.Status.CapacityReason != scenario.capacityReason {
+				t.Fatalf("self-heal changed the settled move: %+v", got.Status)
+			}
+			if slices.Contains(got.Finalizers, volumeapi.MoveProtectionFinalizer) {
+				t.Fatalf("protection was not released after the journal settled: %v", got.Finalizers)
+			}
+			if !volumeapi.MoveCleanupSettled(got) {
+				t.Fatalf("self-healed move is not settled: %+v", got.Status)
+			}
+			if !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
+				t.Fatalf("self-heal touched the volume: %+v", repo.volumes[move.Spec.VolumeID])
+			}
+			reserved, err := poolcapacity.ReservedBytes(repo.volumes, repo.moves, "destination")
+			if err != nil || reserved != 0 {
+				t.Fatalf("self-heal re-reserved destination capacity: reserved=%d err=%v", reserved, err)
+			}
+			if operator.reclaims != 0 {
+				t.Fatalf("self-heal requested %d cleanup executors", operator.reclaims)
+			}
+		})
+	}
+}
+
+// TestTerminalMoveNeverExecutesAnIntentWithoutAReceipt pins the authority
+// boundary of the terminal arm. A settled Move has already released its capacity
+// hold, so a journal that never reached a purge receipt has no live authority to
+// order one: driving it into Reclaim would create a real helper Job and block the
+// loop on --helper-timeout. Missing intent preserves data instead.
+func TestTerminalMoveNeverExecutesAnIntentWithoutAReceipt(t *testing.T) {
+	for _, phase := range []string{cleanupapi.PhasePending, cleanupapi.PhaseRunning} {
+		t.Run(phase, func(t *testing.T) {
+			r, repo, operator, move, incoming := settledTerminalMoveFixture(t, "Blocked", recoveryRecovered, recoveryCapacitySettled)
+			seedWorkingJournal(t, r, rollbackCleanupSpec(move, incoming), phase)
+			stripMoveProtection(t, repo, move)
+
+			reported := reconcileUntilQuiet(t, r, 4)
+			journal := listedJournal(t, r, move)
+			if journal.Status.Phase != cleanupapi.PhaseNeedsReview || journal.Status.Reason != "TerminalMoveCleanupIntentUnfinished" {
+				t.Fatalf("receiptless intent on a settled move was not preserved for review: %+v", journal.Status)
+			}
+			if !strings.Contains(journal.Status.Message, phase) {
+				t.Fatalf("review message does not name the unfinished phase: %q", journal.Status.Message)
+			}
+			if operator.reclaims != 0 {
+				t.Fatalf("terminal cleanup requested %d executors", operator.reclaims)
+			}
+			if len(reported) != 1 || !strings.Contains(reported[0], "TerminalMoveCleanupIntentUnfinished") {
+				t.Fatalf("contradiction was not announced exactly once: %v", reported)
+			}
+			assertMoveUnpinned(t, repo, move)
+		})
+	}
+}
+
+// TestTerminalMoveSendsALostCleanupPoolToReview covers the other half: the
+// journal does hold a receipt, but the Pool its absence fence is anchored to has
+// been re-registered or removed. No retry can restore that identity, so it is a
+// contradiction to record on the journal rather than an error to log forever
+// while the re-asserted finalizer pins the Move.
+func TestTerminalMoveSendsALostCleanupPoolToReview(t *testing.T) {
+	for _, scenario := range []string{"pool re-registered", "pool deleted"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			r, repo, operator, move, incoming := settledTerminalMoveFixture(t, "Blocked", recoveryRecovered, recoveryCapacitySettled)
+			seedConfirmingAbsenceJournal(t, r, rollbackCleanupSpec(move, incoming))
+			pool, pools := cleanupPoolObject(t, r.Cleanups, incoming.PoolName)
+			if scenario == "pool deleted" {
+				if err := pools.Delete(ctx, pool.GetName(), metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				pool.SetUID("reinstalled-pool-uid")
+				if _, err := pools.Update(ctx, pool, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stripMoveProtection(t, repo, move)
+
+			reported := reconcileUntilQuiet(t, r, 4)
+			journal := listedJournal(t, r, move)
+			if journal.Status.Phase != cleanupapi.PhaseNeedsReview || journal.Status.Reason != "CleanupPoolIdentityChanged" {
+				t.Fatalf("lost cleanup Pool was not recorded as a contradiction: %+v", journal.Status)
+			}
+			if journal.Status.Receipt == nil || journal.Status.AbsenceProof == nil {
+				t.Fatalf("review erased the receipt or the absence fence: %+v", journal.Status)
+			}
+			if operator.reclaims != 0 {
+				t.Fatalf("lost cleanup Pool requested %d executors", operator.reclaims)
+			}
+			if len(reported) != 1 || !strings.Contains(reported[0], "CleanupPoolIdentityChanged") {
+				t.Fatalf("contradiction was not announced exactly once: %v", reported)
+			}
+			assertMoveUnpinned(t, repo, move)
+		})
+	}
+}
+
+// TestTerminalCleanupCannotProtectADeletingMove keeps the self-heal path
+// fail-closed. Protection can never be added back to an object the API server is
+// already deleting, so the journal is left exactly as it stands and the
+// contradiction is reported instead of being worked around.
+func TestTerminalCleanupCannotProtectADeletingMove(t *testing.T) {
+	r, repo, operator, move, incoming := settledTerminalMoveFixture(t, "Blocked", recoveryRecovered, recoveryCapacitySettled)
+	seedConfirmingAbsenceJournal(t, r, rollbackCleanupSpec(move, incoming))
+	stripMoveProtection(t, repo, move)
+	repo.deletingMoves = map[string]bool{move.Name: true}
+
+	reported := reconcileUntilQuiet(t, r, 3)
+	if len(reported) != 3 || !strings.Contains(reported[0], "already deleting") {
+		t.Fatalf("deleting move was not reported fail-closed: %v", reported)
+	}
+	if phase := listedJournal(t, r, move).Status.Phase; phase != cleanupapi.PhaseConfirmingAbsence {
+		t.Fatalf("deleting move changed its journal: phase=%q", phase)
+	}
+	if operator.reclaims != 0 {
+		t.Fatalf("deleting move requested %d executors", operator.reclaims)
+	}
+}
+
+// assertMoveUnpinned proves the re-asserted protection is released again once
+// the journal reaches a terminal phase, so review never pins the Move forever.
+func assertMoveUnpinned(t *testing.T, repo *memoryRepository, move volumeapi.Move) {
+	t.Helper()
+	listed, err := repo.ListMoves(context.Background())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("moves=%+v err=%v", listed, err)
+	}
+	if slices.Contains(listed[0].Finalizers, volumeapi.MoveProtectionFinalizer) {
+		t.Fatalf("review pinned the move with protection: %v", listed[0].Finalizers)
+	}
 }

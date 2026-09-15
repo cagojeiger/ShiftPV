@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
@@ -87,6 +90,122 @@ func (r *Reconciler) ensureCleanupSpec(ctx context.Context, move *volumeapi.Move
 	return err
 }
 
+// moveCleanupAuthority is the exact durable parent every Move cleanup journal,
+// rollback or source, is embedded on.
+func moveCleanupAuthority(move volumeapi.Move) cleanupapi.Authority {
+	return cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID}
+}
+
+// moveCleanupPending reports whether a Move still carries a cleanup journal in a
+// working phase. It reads the phase the Move object already decoded, so it
+// answers before any journal store call: a Move that has already lost its
+// protection finalizer cannot be read through the store at all.
+func moveCleanupPending(move volumeapi.Move) bool {
+	switch move.Status.CleanupPhase {
+	case "", cleanupapi.PhaseCompleted, cleanupapi.PhaseNeedsReview:
+		return false
+	default:
+		return true
+	}
+}
+
+// cleanupIntentMatches reports whether an embedded journal is one of the two
+// exact cleanup operations this Move owns. A journal bound to anything else is a
+// contradiction to preserve, never an intent to drive.
+func cleanupIntentMatches(move volumeapi.Move, spec cleanupapi.Spec) bool {
+	switch spec.Reason {
+	case "MoveRollback":
+		return spec.OperationID == volumeapi.MoveRollbackOperationID(move.UID)
+	case "MoveSource":
+		return spec.OperationID == volumeapi.MoveCleanupOperationID(move.UID)
+	default:
+		return false
+	}
+}
+
+// contradictedCleanup reports whether a journal drive failed because the exact
+// Pool identity or lifecycle protection behind the absence fence is gone. No
+// retry can restore it, so it belongs in the journal as NeedsReview rather than
+// in the reconcile log forever.
+func contradictedCleanup(err error) bool {
+	return err != nil && (errors.Is(err, cleanupapi.ErrConflict) || apierrors.IsNotFound(err))
+}
+
+// reviewCleanupJournal records an identity contradiction on the journal itself
+// and reports it. Executor, receipt and absence fence are carried forward
+// unchanged: NeedsReview preserves evidence instead of erasing it. A failed
+// write is returned as itself, so a transient API error is never mistaken for
+// the durable contradiction.
+func (r *Reconciler) reviewCleanupJournal(ctx context.Context, current cleanupapi.Cleanup, reason, message string) error {
+	next := current.Status
+	next.Phase, next.Reason, next.Message, next.LastTransitionTime = cleanupapi.PhaseNeedsReview, reason, message, ""
+	if err := r.Cleanups.UpdateStatus(ctx, current, next); err != nil {
+		return fmt.Errorf("mark cleanup for review after %s: %w", reason, err)
+	}
+	return needsRecoveryCleanupReview("%s: %s", reason, message)
+}
+
+// settleTerminalCleanup drives the unfinished cleanup journal of a terminal
+// Move. Journal settlement is what releases the parent finalizer and closes the
+// operation, so an unfinished journal is finished here instead of being parked
+// for journal GC. A Move that already released its protection finalizer while
+// its journal was mid-flight has that protection re-asserted first, because the
+// journal store only accepts an exact protected parent; updateObjectFinalizer
+// refuses to protect an object that is already deleting.
+//
+// Only a journal that already holds a purge receipt is driven. A terminal Move
+// has released its capacity hold, so an intent that never reached a receipt has
+// no live authority left to execute one: missing intent preserves data.
+func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.Move) error {
+	if r.Cleanups == nil {
+		return fmt.Errorf("cleanup journal store is not configured")
+	}
+	if !slices.Contains(move.Finalizers, volumeapi.MoveProtectionFinalizer) {
+		return r.Repository.AddMoveFinalizer(ctx, move.Name, move.UID)
+	}
+	current, err := r.Cleanups.Get(ctx, moveCleanupAuthority(move))
+	if errors.Is(err, cleanupapi.ErrNoJournal) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !cleanupIntentMatches(move, current.Spec) {
+		return r.reviewCleanupJournal(ctx, current, "CleanupIntentMismatch",
+			fmt.Sprintf("terminal Move carries cleanup operation %q for reason %q", current.Spec.OperationID, current.Spec.Reason))
+	}
+	switch current.Status.Phase {
+	case cleanupapi.PhaseCompleted, cleanupapi.PhaseNeedsReview:
+		return nil
+	case cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence:
+	default:
+		return r.reviewCleanupJournal(ctx, current, "TerminalMoveCleanupIntentUnfinished",
+			fmt.Sprintf("terminal Move carries a cleanup intent still in phase %q with no purge receipt", current.Status.Phase))
+	}
+	if err := r.driveTerminalAbsence(ctx, current); err != nil {
+		if contradictedCleanup(err) {
+			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
+		}
+		return err
+	}
+	return nil
+}
+
+// driveTerminalAbsence finishes a receipt-bearing journal through its Pool
+// fence. It never reaches the executor path, so the terminal arm cannot start
+// destructive work on behalf of a Move that already released its hold. The
+// second pass is the same read-back the ordinary cleanup contract performs.
+func (r *Reconciler) driveTerminalAbsence(ctx context.Context, current cleanupapi.Cleanup) error {
+	next, complete, err := r.Cleanups.ReconcileAbsence(ctx, current)
+	if err != nil || complete {
+		return err
+	}
+	if next.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
+		_, _, err = r.Cleanups.ReconcileAbsence(ctx, next)
+	}
+	return err
+}
+
 func moveCleanupSpec(move volumeapi.Move) (cleanupapi.Spec, error) {
 	if move.Name == "" || move.UID == "" || move.Status.SourceCopy == nil {
 		return cleanupapi.Spec{}, fmt.Errorf("move cleanup identity is incomplete")
@@ -95,7 +214,7 @@ func moveCleanupSpec(move volumeapi.Move) (cleanupapi.Spec, error) {
 		OperationID: volumeapi.MoveCleanupOperationID(move.UID),
 		Target:      *move.Status.SourceCopy,
 		Reason:      "MoveSource",
-		Authority:   cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID},
+		Authority:   moveCleanupAuthority(move),
 	}
 	if err := spec.Validate(); err != nil {
 		return cleanupapi.Spec{}, err

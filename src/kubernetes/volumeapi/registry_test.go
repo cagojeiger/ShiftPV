@@ -787,6 +787,49 @@ func TestRegistryRemovesVolumeAndMoveProtectionFinalizers(t *testing.T) {
 	}
 }
 
+// TestRegistryReassertsMoveProtectionOnlyOnALiveMove pins the boundary that
+// makes re-asserting protection for an unfinished cleanup journal safe: a Move
+// that is already deleting can never gain a finalizer back, and a Move that is
+// gone is reported as missing rather than silently accepted.
+func TestRegistryReassertsMoveProtectionOnlyOnALiveMove(t *testing.T) {
+	ctx := context.Background()
+	volumeID := "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	move := func(name string, metadata map[string]any) *unstructured.Unstructured {
+		metadata["name"], metadata["uid"] = name, name+"-uid"
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
+			"metadata": metadata, "spec": map[string]any{"volumeID": volumeID, "sourceNode": "node-a"},
+		}}
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{MoveResource: "ShiftPVMoveList"},
+		move("live", map[string]any{"finalizers": []any{"example.io/keep"}}),
+		move("deleting", map[string]any{"deletionTimestamp": "2026-09-13T01:00:00Z"}))
+	registry := &Registry{Client: client}
+
+	if err := registry.AddMoveFinalizer(ctx, "live", "live-uid"); err != nil {
+		t.Fatal(err)
+	}
+	object, err := client.Resource(MoveResource).Get(ctx, "live", metav1.GetOptions{})
+	if err != nil || !reflect.DeepEqual(object.GetFinalizers(), []string{"example.io/keep", MoveProtectionFinalizer}) {
+		t.Fatalf("live finalizers=%v err=%v", object.GetFinalizers(), err)
+	}
+	if err := registry.AddMoveFinalizer(ctx, "live", "live-uid"); err != nil {
+		t.Fatalf("idempotent protection re-assertion: %v", err)
+	}
+
+	err = registry.AddMoveFinalizer(ctx, "deleting", "deleting-uid")
+	if !errors.Is(err, ErrStateConflict) || !strings.Contains(err.Error(), "already deleting") {
+		t.Fatalf("protected an already deleting Move: %v", err)
+	}
+	if err := registry.AddMoveFinalizer(ctx, "absent", "absent-uid"); !apierrors.IsNotFound(errors.Unwrap(err)) {
+		t.Fatalf("protecting a missing Move was not reported: %v", err)
+	}
+	if err := registry.AddMoveFinalizer(ctx, "live", "replaced-uid"); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("protected a reincarnated Move: %v", err)
+	}
+}
+
 func TestMoveCapacityHoldPredicates(t *testing.T) {
 	state := State{OwnerNode: "source", ActiveMove: "move-a"}
 	move := Move{

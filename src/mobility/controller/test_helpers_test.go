@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"context"
+	"fmt"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -12,6 +15,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
@@ -35,6 +39,22 @@ func withTestCleanups() func(*Reconciler) {
 		r.Cleanups = newTestCleanupStore()
 		r.CleanupOperator = receiptCleanupOperator{}
 	}
+}
+
+// recordingCleanupOperator counts executor requests without ever fabricating a
+// receipt. A path that must not start destructive work is proven by its zero
+// count, not by an empty Job list the fake would show anyway.
+type recordingCleanupOperator struct{ reclaims int }
+
+func (o *recordingCleanupOperator) Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+	o.reclaims++
+	return cleanupapi.Cleanup{}, fmt.Errorf("cleanup executor was requested")
+}
+
+// withRecordingCleanupOperator replaces the receipt-fabricating stub so a test
+// can assert that no executor was requested at all.
+func withRecordingCleanupOperator(operator *recordingCleanupOperator) func(*Reconciler) {
+	return func(r *Reconciler) { r.CleanupOperator = operator }
 }
 
 // withCleanupsFrom shares one cleanup store across reconcilers, which is how a

@@ -115,6 +115,14 @@ func (r *Registry) DeleteMove(ctx context.Context, name, uid string) error {
 	return nil
 }
 
+// AddMoveFinalizer re-asserts controller protection on a Move whose embedded
+// cleanup journal is still unfinished. The journal store only accepts an exact
+// protected parent, and updateObjectFinalizer refuses to protect an object that
+// is already deleting, so this never resurrects a dying journal.
+func (r *Registry) AddMoveFinalizer(ctx context.Context, name, uid string) error {
+	return r.updateObjectFinalizer(ctx, MoveResource, name, uid, MoveProtectionFinalizer, true)
+}
+
 func (r *Registry) RemoveMoveFinalizer(ctx context.Context, name, uid string) error {
 	return r.updateObjectFinalizer(ctx, MoveResource, name, uid, MoveProtectionFinalizer, false)
 }
