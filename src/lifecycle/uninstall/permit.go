@@ -14,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/cagojeiger/ShiftPV/src/webhook/certificate"
 )
 
 const (
@@ -29,10 +31,13 @@ const (
 	controllerAckDone = "observed"
 )
 
+// The uninstall guard only deletes lifecycle admission resources that the
+// certificate controller produced, so the label vocabulary is borrowed from the
+// producer instead of being restated here.
 const (
-	managedNameLabel      = "app.kubernetes.io/name"
-	managedByLabel        = "app.kubernetes.io/managed-by"
-	managedComponentLabel = "app.kubernetes.io/component"
+	managedNameLabel      = certificate.NameLabel
+	managedByLabel        = certificate.ManagedByLabel
+	managedComponentLabel = certificate.ComponentLabel
 )
 
 type PermitStore struct {
@@ -184,7 +189,7 @@ func (p *PermitStore) DisableValidation(ctx context.Context, configurationName s
 		return fmt.Errorf("read lifecycle validation configuration: %w", err)
 	}
 	labels := configuration.GetLabels()
-	if labels[managedNameLabel] != "shiftpv" || labels[managedByLabel] != "shiftpv-controller" || labels[managedComponentLabel] != "lifecycle-admission" || !permitOwnedBy(configuration, p.CSIDriver, driver.UID) {
+	if labels[managedNameLabel] != certificate.NameValue || labels[managedByLabel] != certificate.ManagedByValue || labels[managedComponentLabel] != certificate.ValidationComponent || !permitOwnedBy(configuration, p.CSIDriver, driver.UID) {
 		return fmt.Errorf("refuse to delete unmanaged lifecycle validation configuration %q", configurationName)
 	}
 	uid := configuration.UID
