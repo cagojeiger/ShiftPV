@@ -30,6 +30,9 @@ type observation struct {
 	CandidateNodes  []string
 	Names           resourceNames
 	SourceCordoned  bool
+	// PendingObsolete marks an unstarted Move whose source is schedulable again.
+	// The reconciler deletes the transaction instead of deciding a next phase.
+	PendingObsolete bool
 }
 
 func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observation, error) {
@@ -90,8 +93,9 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	// cordoned snapshot just after the source was uncordoned. Before any volume
 	// lock or helper action, prefer the current Node observation and let the
 	// reconciler remove that obsolete transaction even if its PVC is disappearing.
-	if move.Status.Phase == string(fsm.PhasePending) && sourceHealthy && !result.SourceCordoned &&
-		state.Phase == volumeapi.PhaseReady && state.ActiveMove == "" && state.OwnerNode == move.Spec.SourceNode {
+	result.PendingObsolete = move.Status.Phase == string(fsm.PhasePending) && sourceHealthy && !result.SourceCordoned &&
+		state.Phase == volumeapi.PhaseReady && state.ActiveMove == "" && state.OwnerNode == move.Spec.SourceNode
+	if result.PendingObsolete {
 		result.FSM.PreflightDeferred = true
 		result.FSM.UnsafeReason = "SourceNotCordoned"
 		return result, nil
@@ -154,8 +158,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	result.Claim = claim
 	// Names can be reused after PVC/namespace deletion while Retain PVs and
 	// ShiftPVVolumes survive. Never associate that old volume with the new Pod.
-	if claim.UID == "" || claimRef.UID != claim.UID || claim.Spec.VolumeName != result.PV.Name ||
-		claim.DeletionTimestamp != nil || result.PV.DeletionTimestamp != nil {
+	if !validBinding(result.PV, claim, move.Spec.VolumeID) {
 		result.FSM.UnsafeReason = "VolumeBindingMismatch"
 		result.FSM.SourceAuthorityInvalid = true
 		return result, nil
@@ -386,6 +389,21 @@ func (r *Reconciler) jobState(ctx context.Context, name string) (complete, faile
 		}
 	}
 	return complete, failed, nil
+}
+
+// validBinding is the single PV/PVC binding rule. Names can be reused after
+// PVC/namespace deletion while Retain PVs and ShiftPVVolumes survive, so the
+// pair must still be alive, still be this driver's volume, and still reference
+// each other by exact UID. Each caller keeps its own diagnosis for a failure.
+func validBinding(pv *corev1.PersistentVolume, claim *corev1.PersistentVolumeClaim, volumeID string) bool {
+	if pv == nil || claim == nil {
+		return false
+	}
+	ref := pv.Spec.ClaimRef
+	return pv.DeletionTimestamp == nil && claim.DeletionTimestamp == nil &&
+		pv.Spec.CSI != nil && pv.Spec.CSI.Driver == admission.DriverName && pv.Spec.CSI.VolumeHandle == volumeID &&
+		ref != nil && ref.Namespace == claim.Namespace && ref.Name == claim.Name &&
+		ref.UID != "" && ref.UID == claim.UID && claim.Spec.VolumeName == pv.Name
 }
 
 func podUsesClaim(pod *corev1.Pod, claimName string) bool {

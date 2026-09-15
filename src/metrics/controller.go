@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
@@ -146,10 +145,9 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 			sample{"pool_inventory_valid", boolValue(inventoryValid), labels},
 			sample{"pool_inventory_truncated", boolValue(inventoryTruncated), labels},
 		)
-		q, err := resource.ParseQuantity(pool.CapacityLimit)
-		limit, exact := q.AsInt64()
+		limit, limitErr := capacity.LimitBytes(pool)
 		reserved, accountingErr := capacity.ReservedBytes(volumes, moves, pool.NodeName)
-		valid := err == nil && exact && limit > 0 && accountingErr == nil
+		valid := limitErr == nil && accountingErr == nil
 		values = append(values, sample{"pool_accounting_valid", boolValue(valid), labels})
 		if !valid {
 			// Keep only this Pool's last good numbers; validity explicitly marks them stale.

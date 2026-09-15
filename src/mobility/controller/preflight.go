@@ -14,6 +14,7 @@ import (
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
+	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 )
 
 // preflight only rejects known constraints. It neither reserves scheduler resources
@@ -205,7 +206,11 @@ func pvcNames(spec corev1.PodSpec) map[string]bool {
 	return names
 }
 
+// preEviction reports whether the Move has not yet disturbed the consumer, so a
+// diagnosis may still defer instead of blocking. fsm.Decide applies a related,
+// deliberately stricter window from its own Observation (no empty phase, and
+// EvictionRequested only matters in Evicting); do not unify them blindly.
 func preEviction(move volumeapi.Move) bool {
-	return !move.Status.EvictionRequested && (move.Status.Phase == "" || move.Status.Phase == "Pending" ||
-		move.Status.Phase == "Locking" || move.Status.Phase == "Evicting")
+	return !move.Status.EvictionRequested && (move.Status.Phase == "" || move.Status.Phase == string(fsm.PhasePending) ||
+		move.Status.Phase == string(fsm.PhaseLocking) || move.Status.Phase == string(fsm.PhaseEvicting))
 }

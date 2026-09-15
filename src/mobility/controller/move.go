@@ -20,7 +20,7 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 	if err != nil {
 		return r.recordMoveError(ctx, &move, previous, "ObservationFailed", "failed to observe Kubernetes state", err)
 	}
-	if pendingMoveObsoleted(move, observed) {
+	if observed.PendingObsolete {
 		klog.Infof("deleting unstarted ShiftPVMove %s because source node %s is schedulable", move.Name, move.Spec.SourceNode)
 		if err := r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID); err != nil {
 			return err
@@ -38,11 +38,4 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 	move.Status.Reason = decision.Reason
 	move.Status.Message = mobilityMessage(decision.Next, decision.Reason)
 	return r.persistMoveStatus(ctx, &move, previous)
-}
-
-func pendingMoveObsoleted(move volumeapi.Move, observed observation) bool {
-	return move.Status.Phase == string(fsm.PhasePending) &&
-		observed.FSM.SourceHealthy && !observed.SourceCordoned &&
-		observed.Volume.Phase == volumeapi.PhaseReady && observed.Volume.ActiveMove == "" &&
-		observed.Volume.OwnerNode == move.Spec.SourceNode
 }
