@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -152,7 +153,7 @@ func poolProtectedMetadataChanged(request *admissionv1.AdmissionRequest) (bool, 
 	if err != nil {
 		return false, fmt.Errorf("read updated Pool lifecycle metadata: %w", err)
 	}
-	finalizerRemoved := contains(oldMetadata.Finalizers, uninstallcheck.PoolProtectionFinalizer) && !contains(newMetadata.Finalizers, uninstallcheck.PoolProtectionFinalizer)
+	finalizerRemoved := slices.Contains(oldMetadata.Finalizers, uninstallcheck.PoolProtectionFinalizer) && !slices.Contains(newMetadata.Finalizers, uninstallcheck.PoolProtectionFinalizer)
 	approvalChanged := oldMetadata.Annotations[uninstallcheck.PoolIdentityReleaseAnnotation] != newMetadata.Annotations[uninstallcheck.PoolIdentityReleaseAnnotation]
 	return finalizerRemoved || approvalChanged, nil
 }
@@ -176,15 +177,6 @@ func objectMetadata(raw []byte) (poolMetadata, error) {
 		return poolMetadata{}, err
 	}
 	return poolMetadata{Finalizers: metadataOnly.Metadata.Finalizers, Annotations: metadataOnly.Metadata.Annotations}, nil
-}
-
-func contains(values []string, expected string) bool {
-	for _, value := range values {
-		if value == expected {
-			return true
-		}
-	}
-	return false
 }
 
 func trustedRuntimeDelete(request *admissionv1.AdmissionRequest, trustedUsername string) bool {

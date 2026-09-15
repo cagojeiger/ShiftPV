@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -20,7 +21,7 @@ import (
 )
 
 const (
-	TopologyKey             = "topology.csi.shiftpv.io/node"
+	TopologyKey             = volume.TopologyKey
 	NodeContextKey          = "shiftpv.io/node"
 	CapacityEnforcementKey  = "shiftpv.io/capacity-enforcement"
 	PVCNameKey              = "csi.storage.k8s.io/pvc/name"
@@ -66,8 +67,8 @@ type Service struct {
 	ProvisioningGate ProvisioningGate
 	Cleanups         *cleanupapi.Store
 	CleanupOperator  cleanupOperator
-	lifecycles       volumeLifecycles
-	poolLifecycles   volumeLifecycles
+	lifecycles       poolcapacity.Locker
+	poolLifecycles   poolcapacity.Locker
 }
 
 func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
@@ -102,7 +103,7 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		}
 		defer leave()
 	}
-	unlock := s.lifecycles.lock(id)
+	unlock := s.lifecycles.Lock(id)
 	defer unlock()
 	if err := s.ensureNoCleanupFence(ctx, id); err != nil {
 		return nil, err
@@ -134,7 +135,7 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	if poolErr != nil {
 		return nil, kubernetesAPIError("list volume topology", poolErr)
 	}
-	if !contains(poolNodes, nodeName) {
+	if !slices.Contains(poolNodes, nodeName) {
 		return nil, status.Errorf(codes.FailedPrecondition, "selected node %q has no registered ShiftPVPool", nodeName)
 	}
 	accessibleNodes, err := s.accessibleNodes(ctx, req.GetParameters(), nodeName, poolNodes)
@@ -183,7 +184,7 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 	if err := s.validate(); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	unlock := s.lifecycles.lock(req.GetVolumeId())
+	unlock := s.lifecycles.Lock(req.GetVolumeId())
 	defer unlock()
 	volumeStateExists := false
 	var volumeState volumeapi.State
@@ -329,15 +330,6 @@ func volumeResponse(id, nodeName string, poolNodes []string, capacity int64) *cs
 		},
 		AccessibleTopology: topologies,
 	}}
-}
-
-func contains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func requestedCapacity(capacityRange *csi.CapacityRange) (int64, error) {

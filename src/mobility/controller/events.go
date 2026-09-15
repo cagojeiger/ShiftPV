@@ -11,6 +11,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
 )
 
 const mobilityEventSelector = "app.kubernetes.io/name=shiftpv,app.kubernetes.io/component=mobility"
@@ -34,7 +35,7 @@ func WatchEvents(ctx context.Context, client kubernetes.Interface, dynamicClient
 			return client.CoreV1().Pods(namespace).Watch(ctx, options(mobilityEventSelector))
 		},
 		"workload-pods": func(ctx context.Context) (watch.Interface, error) {
-			return client.CoreV1().Pods(metav1.NamespaceAll).Watch(ctx, options("shiftpv.io/managed=true"))
+			return client.CoreV1().Pods(metav1.NamespaceAll).Watch(ctx, options(admission.ManagedLabel+"=true"))
 		},
 		"mobility-jobs": func(ctx context.Context) (watch.Interface, error) {
 			return client.BatchV1().Jobs(namespace).Watch(ctx, options(mobilityEventSelector))

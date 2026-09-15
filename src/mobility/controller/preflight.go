@@ -13,6 +13,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
 )
 
 // preflight only rejects known constraints. It neither reserves scheduler resources
@@ -44,7 +45,7 @@ func (r *Reconciler) preflight(ctx context.Context, observed *observation) (stri
 	// A controller's template is the source of the next Pod, not the scheduler's
 	// assigned nodeName on the current Pod. Preserve all other live constraints.
 	live := pod.DeepCopy()
-	if live.Annotations["shiftpv.io/placement"] == "owner" &&
+	if live.Annotations[placementAnnotationKey] == "owner" &&
 		template.Spec.NodeSelector[corev1.LabelHostname] == "" &&
 		live.Spec.NodeSelector[corev1.LabelHostname] == observed.Volume.OwnerNode {
 		delete(live.Spec.NodeSelector, corev1.LabelHostname)
@@ -72,7 +73,7 @@ func (r *Reconciler) preflight(ctx context.Context, observed *observation) (stri
 		if liveErr != nil || templateErr != nil {
 			return "InvalidNodeAffinity", nil
 		}
-		if nodeReady(node) && !node.Spec.Unschedulable && liveMatch && templateMatch &&
+		if admission.NodeReady(node) && !node.Spec.Unschedulable && liveMatch && templateMatch &&
 			(pvAffinity == nil || pvAffinity.Match(node)) && toleratesPlacement(live.Spec, node) && toleratesPlacement(template.Spec, node) {
 			candidates = append(candidates, nodeName)
 		}

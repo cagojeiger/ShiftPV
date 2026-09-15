@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -11,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
@@ -78,7 +80,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		return result, fmt.Errorf("read source Node: %w", err)
 	}
 	sourcePool, sourceReady := readyPoolNodes[move.Spec.SourceNode]
-	sourceHealthy := err == nil && nodeReady(sourceNode) && sourceReady && sourceCopyPresent(sourcePool, state.CurrentCopy)
+	sourceHealthy := err == nil && admission.NodeReady(sourceNode) && sourceReady && sourceCopyPresent(sourcePool, state.CurrentCopy)
 	result.FSM.SourceHealthy = sourceHealthy
 	result.SourceCordoned = sourceNode != nil && sourceNode.Spec.Unschedulable
 	if !sourceHealthy && !result.FSM.OwnerCommitted {
@@ -110,7 +112,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 			}
 			return result, fmt.Errorf("read destination Node %q: %w", nodeName, nodeErr)
 		}
-		if nodeReady(node) && !node.Spec.Unschedulable {
+		if admission.NodeReady(node) && !node.Spec.Unschedulable {
 			result.CandidateNodes = append(result.CandidateNodes, nodeName)
 		}
 	}
@@ -129,7 +131,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	}
 	for index := range persistentVolumes.Items {
 		candidate := &persistentVolumes.Items[index]
-		if candidate.Spec.CSI != nil && candidate.Spec.CSI.Driver == "csi.shiftpv.io" && candidate.Spec.CSI.VolumeHandle == move.Spec.VolumeID {
+		if candidate.Spec.CSI != nil && candidate.Spec.CSI.Driver == admission.DriverName && candidate.Spec.CSI.VolumeHandle == move.Spec.VolumeID {
 			result.PV = candidate.DeepCopy()
 			break
 		}
@@ -239,7 +241,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	result.FSM.VolumeLocked = state.Phase == volumeapi.PhaseMoving && state.ActiveMove == move.Name && state.OwnerNode == move.Spec.SourceNode
 	result.FSM.ConsumerExists = result.Consumer != nil
 	result.FSM.EvictionRequested = move.Status.EvictionRequested
-	result.FSM.PublishedOnSource = contains(state.PublishedNodes, move.Spec.SourceNode)
+	result.FSM.PublishedOnSource = slices.Contains(state.PublishedNodes, move.Spec.SourceNode)
 	result.FSM.CapacityApproved = move.Status.CapacityApproved
 	result.FSM.CapacityBlocked = move.Status.CapacityReason != "" && !move.Status.CapacityApproved
 	if result.FSM.CapacityBlocked {
@@ -249,7 +251,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	result.FSM.ReplacementHeld = result.Replacement != nil && hasPlacementHold(result.Replacement)
 
 	if result.Replacement != nil && !preEviction(move) {
-		if selected := result.Replacement.Spec.NodeSelector["kubernetes.io/hostname"]; selected != "" && !contains(result.CandidateNodes, selected) {
+		if selected := result.Replacement.Spec.NodeSelector["kubernetes.io/hostname"]; selected != "" && !slices.Contains(result.CandidateNodes, selected) {
 			result.FSM.DestinationBlocked = true
 			result.FSM.UnsafeReason = "UnsupportedSchedulingConstraint"
 		}
@@ -286,7 +288,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 			if move.Status.DestinationNode != "" && placement.Spec.NodeName != move.Status.DestinationNode {
 				result.FSM.DestinationBlocked = true
 				result.FSM.UnsafeReason = "InvalidDestination"
-			} else if contains(result.CandidateNodes, placement.Spec.NodeName) {
+			} else if slices.Contains(result.CandidateNodes, placement.Spec.NodeName) {
 				result.DestinationNode = placement.Spec.NodeName
 				result.FSM.DestinationScheduled = true
 			} else {
@@ -315,7 +317,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 		if destinationErr != nil && !apierrors.IsNotFound(destinationErr) {
 			return result, fmt.Errorf("read selected destination Node %q: %w", result.DestinationNode, destinationErr)
 		}
-		result.FSM.DestinationUnavailable = destinationErr != nil || !ready || !nodeReady(destinationNode) || copyConflict
+		result.FSM.DestinationUnavailable = destinationErr != nil || !ready || !admission.NodeReady(destinationNode) || copyConflict
 		if copyConflict {
 			result.FSM.UnsafeReason = "DestinationServingCopyPresent"
 		}
@@ -342,7 +344,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 	}
 	destinationPool, destinationReady := readyPoolNodes[result.DestinationNode]
 	result.FSM.PublishedOnDestination = result.DestinationNode != "" &&
-		contains(state.PublishedNodes, result.DestinationNode) &&
+		slices.Contains(state.PublishedNodes, result.DestinationNode) &&
 		destinationReady &&
 		volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy)
 	if move.Status.Phase == string(fsm.PhaseWaitingForDestinationPublish) || move.Status.Phase == string(fsm.PhaseCleaningSource) {
@@ -386,18 +388,6 @@ func (r *Reconciler) jobState(ctx context.Context, name string) (complete, faile
 	return complete, failed, nil
 }
 
-func nodeReady(node *corev1.Node) bool {
-	if node == nil {
-		return false
-	}
-	for _, condition := range node.Status.Conditions {
-		if condition.Type == corev1.NodeReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-	return false
-}
-
 func podUsesClaim(pod *corev1.Pod, claimName string) bool {
 	for _, volume := range pod.Spec.Volumes {
 		if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claimName {
@@ -414,15 +404,6 @@ func terminalPod(pod *corev1.Pod) bool {
 func hasPlacementHold(pod *corev1.Pod) bool {
 	for _, gate := range pod.Spec.SchedulingGates {
 		if gate.Name == placementHoldName {
-			return true
-		}
-	}
-	return false
-}
-
-func contains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
 			return true
 		}
 	}

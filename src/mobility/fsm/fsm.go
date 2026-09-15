@@ -91,10 +91,10 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		return transition(current, current, ActionWait, "CompletionAuthorityMismatch")
 	}
 	if observation.SourceAuthorityInvalid {
-		return blocked(current, reasonOr(observation.UnsafeReason, "SourceAuthorityInvalid")), nil
+		return blocked(reasonOr(observation.UnsafeReason, "SourceAuthorityInvalid")), nil
 	}
 	if beforeCommit(current) && !observation.OwnerCommitted && !observation.SourceHealthy {
-		return blocked(current, reasonOr(observation.UnsafeReason, "SourceUnavailable")), nil
+		return blocked(reasonOr(observation.UnsafeReason, "SourceUnavailable")), nil
 	}
 	if observation.PreflightDeferred && (current == PhasePending || current == PhaseLocking ||
 		(current == PhaseEvicting && !observation.EvictionRequested)) {
@@ -130,18 +130,18 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "")
 		}
 		if !observation.ReplacementHeld {
-			return blocked(current, reasonOr(observation.UnsafeReason, "PlacementHoldLost")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "PlacementHoldLost")), nil
 		}
 		return transition(current, PhaseWaitingForDestination, ActionEnsurePlacement, "")
 	case PhaseWaitingForDestination:
 		if observation.DestinationBlocked {
-			return blocked(current, reasonOr(observation.UnsafeReason, "DestinationUnavailable")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "DestinationUnavailable")), nil
 		}
 		if !observation.ReplacementExists {
 			return transition(current, current, ActionWait, "")
 		}
 		if !observation.ReplacementHeld {
-			return blocked(current, reasonOr(observation.UnsafeReason, "PlacementHoldLost")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "PlacementHoldLost")), nil
 		}
 		if !observation.DestinationScheduled {
 			return transition(current, current, ActionEnsurePlacement, "")
@@ -155,10 +155,10 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
 		if observation.DestinationBlocked {
-			return blocked(current, reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
 		}
 		if observation.CapacityBlocked {
-			return blocked(current, reasonOr(observation.UnsafeReason, "DestinationCapacityInsufficient")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "DestinationCapacityInsufficient")), nil
 		}
 		if observation.CapacityApproved {
 			return transition(current, PhaseCopying, ActionEnsureCopy, "")
@@ -169,10 +169,10 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
 		if observation.DestinationBlocked {
-			return blocked(current, reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
 		}
 		if observation.CopyFailed {
-			return blocked(current, reasonOr(observation.UnsafeReason, "CopyFailed")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "CopyFailed")), nil
 		}
 		if !observation.PlacementExists || !observation.DestinationScheduled {
 			return transition(current, current, ActionEnsurePlacement, "")
@@ -186,10 +186,10 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
 		if observation.DestinationBlocked {
-			return blocked(current, reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
 		}
 		if observation.PromotionFailed {
-			return blocked(current, reasonOr(observation.UnsafeReason, "PromotionFailed")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "PromotionFailed")), nil
 		}
 		if !observation.PlacementExists || !observation.DestinationScheduled {
 			return transition(current, current, ActionEnsurePlacement, "")
@@ -209,7 +209,7 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
 		if observation.DestinationBlocked {
-			return blocked(current, reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
 		}
 		if !observation.PlacementExists || !observation.DestinationScheduled {
 			return transition(current, current, ActionEnsurePlacement, "")
@@ -228,7 +228,7 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
 	case PhaseWaitingForDestinationPublish:
 		if observation.CleanupFailed {
-			return blocked(current, reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
 		}
 		if observation.DestinationUnavailable {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
@@ -242,7 +242,7 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
 		if observation.CleanupFailed {
-			return blocked(current, reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
+			return blocked(reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
 		}
 		if observation.CleanupComplete {
 			return transition(current, PhaseCompleting, ActionConfirmCleanup, "")
@@ -294,7 +294,7 @@ func transition(from, to Phase, action Action, reason string) (Decision, error) 
 	return Decision{Next: to, Action: action, Reason: reason}, nil
 }
 
-func blocked(from Phase, reason string) Decision {
+func blocked(reason string) Decision {
 	return Decision{Next: PhaseBlocked, Action: ActionMarkBlocked, Reason: reason}
 }
 

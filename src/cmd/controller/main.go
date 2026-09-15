@@ -163,7 +163,6 @@ func main() {
 		}, exporter.ServerOptions()...)
 	}()
 
-	var webhookServer *http.Server
 	certificateManager := &webhookcertificate.Manager{Client: client, ValidationGate: quiesceGate, Config: webhookcertificate.Config{
 		Namespace:                   *namespace,
 		SecretName:                  *webhookSecret,
@@ -212,7 +211,7 @@ func main() {
 		Permit:            &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName},
 		TrustedController: "system:serviceaccount:" + *namespace + ":" + *controllerServiceAccount})
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
-	webhookServer = &http.Server{Addr: *webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}
+	webhookServer := &http.Server{Addr: *webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}
 	go func() {
 		listener, err := net.Listen("tcp", *webhookAddress)
 		if err == nil {
@@ -233,12 +232,10 @@ func main() {
 		}
 		stop()
 	}
-	if webhookServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := webhookServer.Shutdown(shutdownCtx); err != nil {
-			klog.Errorf("shut down mobility webhook: %v", err)
-		}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := webhookServer.Shutdown(shutdownCtx); err != nil {
+		klog.Errorf("shut down mobility webhook: %v", err)
 	}
 }
 

@@ -14,7 +14,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/utils/keymutex"
 
-	controllercsi "github.com/cagojeiger/ShiftPV/src/csi/controller"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	shiftmount "github.com/cagojeiger/ShiftPV/src/node/mount"
 	"github.com/cagojeiger/ShiftPV/src/node/ownership"
@@ -247,7 +246,7 @@ func (s *Service) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.No
 	return &csi.NodeGetInfoResponse{
 		NodeId: s.NodeName,
 		AccessibleTopology: &csi.Topology{Segments: map[string]string{
-			controllercsi.TopologyKey: s.NodeName,
+			volume.TopologyKey: s.NodeName,
 		}},
 	}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
@@ -63,7 +64,7 @@ func (r *Reconciler) settleRecoveryArtifacts(ctx context.Context, move *volumeap
 	case move.Status.DestinationNode:
 		if state.Phase != volumeapi.PhaseReady || state.ActiveMove != move.Name || move.Status.DestinationCopy == nil ||
 			state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.DestinationCopy || state.UID != move.Status.DestinationCopy.VolumeUID ||
-			!contains(state.PublishedNodes, move.Status.DestinationNode) || contains(state.PublishedNodes, move.Spec.SourceNode) {
+			!slices.Contains(state.PublishedNodes, move.Status.DestinationNode) || slices.Contains(state.PublishedNodes, move.Spec.SourceNode) {
 			return false, fmt.Errorf("waiting for exact destination publication before source cleanup")
 		}
 		destinationPool, err := r.Repository.ReadyPoolForNode(ctx, move.Status.DestinationNode)
@@ -125,7 +126,7 @@ func (r *Reconciler) rollbackArtifact(ctx context.Context, move volumeapi.Move) 
 		destination.UID != move.Status.IncomingCopy.PoolUID || destination.UID != move.Status.DestinationCopy.PoolUID {
 		return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination Pool identity changed")
 	}
-	if !contains(destination.Finalizers, volumeapi.PoolProtectionFinalizer) {
+	if !slices.Contains(destination.Finalizers, volumeapi.PoolProtectionFinalizer) {
 		return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination Pool lacks lifecycle protection")
 	}
 

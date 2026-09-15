@@ -120,7 +120,7 @@ func sourceAuthority(client kubernetes.Interface, registry *volumeapi.Registry, 
 			return fmt.Errorf("read source volume state: %w", err)
 		}
 		if state.UID != identity.VolumeUID || state.Phase != volumeapi.PhaseMoving || state.ActiveMove != move.Name ||
-			state.OwnerNode != identity.NodeName || state.CurrentCopy == nil || *state.CurrentCopy != identity || containsString(state.PublishedNodes, identity.NodeName) {
+			state.OwnerNode != identity.NodeName || state.CurrentCopy == nil || *state.CurrentCopy != identity || slices.Contains(state.PublishedNodes, identity.NodeName) {
 			return fmt.Errorf("source volume authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		pod, err := client.CoreV1().Pods(options.namespace).Get(ctx, os.Getenv("POD_NAME"), metav1.GetOptions{})
@@ -381,7 +381,7 @@ func moveAuthority(client kubernetes.Interface, registry *volumeapi.Registry, op
 			return fmt.Errorf("read source volume state: %w", err)
 		}
 		if state.UID != target.VolumeUID || state.Phase != volumeapi.PhaseMoving || state.ActiveMove != move.Name || state.OwnerNode != move.Spec.SourceNode ||
-			state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.SourceCopy || containsString(state.PublishedNodes, move.Spec.SourceNode) {
+			state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.SourceCopy || slices.Contains(state.PublishedNodes, move.Spec.SourceNode) {
 			return fmt.Errorf("source volume authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		return nil
@@ -439,15 +439,6 @@ func ownedMoveJob(ctx context.Context, client kubernetes.Interface, options move
 		}
 	}
 	return nil, fmt.Errorf("move Job is not owned by the exact ShiftPVMove")
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func runCreate(arguments []string) error {
@@ -692,12 +683,12 @@ func verifyMoveCleanupAuthority(ctx context.Context, registry *volumeapi.Registr
 		}
 		normal := (move.Status.Phase == "WaitingForDestinationPublish" || move.Status.Phase == "CleaningSource") &&
 			state.Phase == volumeapi.PhaseReady && state.OwnerNode == move.Status.DestinationNode &&
-			*state.CurrentCopy == *move.Status.DestinationCopy && containsString(state.PublishedNodes, move.Status.DestinationNode) &&
-			!containsString(state.PublishedNodes, move.Spec.SourceNode)
+			*state.CurrentCopy == *move.Status.DestinationCopy && slices.Contains(state.PublishedNodes, move.Status.DestinationNode) &&
+			!slices.Contains(state.PublishedNodes, move.Spec.SourceNode)
 		recovery := move.Status.Phase == "Blocked" && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase == "Retiring" &&
 			move.Status.RecoveryOwner == move.Status.DestinationNode && state.Phase == volumeapi.PhaseReady &&
 			state.OwnerNode == move.Status.DestinationNode && *state.CurrentCopy == *move.Status.DestinationCopy &&
-			containsString(state.PublishedNodes, move.Status.DestinationNode) && !containsString(state.PublishedNodes, move.Spec.SourceNode)
+			slices.Contains(state.PublishedNodes, move.Status.DestinationNode) && !slices.Contains(state.PublishedNodes, move.Spec.SourceNode)
 		if !normal && !recovery {
 			return fmt.Errorf("move source cleanup authority changed: %w", volumeapi.ErrStateConflict)
 		}
@@ -716,7 +707,7 @@ func verifyMoveCleanupAuthority(ctx context.Context, registry *volumeapi.Registr
 			cleanup.Spec.Target.NodeName != move.Status.DestinationNode || cleanup.Spec.Target.PoolUID != move.Status.DestinationPoolUID ||
 			move.Status.Phase != "Blocked" || move.Spec.Recovery != "ResumeOwner" || move.Status.RecoveryPhase != "Retiring" ||
 			move.Status.RecoveryOwner != move.Spec.SourceNode || state.Phase != volumeapi.PhaseBlocked || state.OwnerNode != move.Spec.SourceNode ||
-			*state.CurrentCopy != *move.Status.SourceCopy || containsString(state.PublishedNodes, cleanup.Spec.Target.NodeName) {
+			*state.CurrentCopy != *move.Status.SourceCopy || slices.Contains(state.PublishedNodes, cleanup.Spec.Target.NodeName) {
 			return fmt.Errorf("move rollback cleanup authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		return nil
