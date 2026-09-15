@@ -92,7 +92,7 @@ func moveCleanupSpec(move volumeapi.Move) (cleanupapi.Spec, error) {
 		return cleanupapi.Spec{}, fmt.Errorf("move cleanup identity is incomplete")
 	}
 	spec := cleanupapi.Spec{
-		OperationID: "cleanup-" + move.UID,
+		OperationID: volumeapi.MoveCleanupOperationID(move.UID),
 		Target:      *move.Status.SourceCopy,
 		Reason:      "MoveSource",
 		Authority:   cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID},

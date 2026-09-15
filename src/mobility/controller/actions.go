@@ -270,13 +270,10 @@ func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volume
 	if pool.UID != move.Status.DestinationPoolUID {
 		return fmt.Errorf("destination Pool identity changed")
 	}
-	base := volume.CopyIdentity{
+	incoming, destination := volumeapi.MoveTransactionCopies(move.UID, move.Spec.VolumeID, volumeapi.MoveDestinationAnchor{
 		InstallationID: move.Status.SourceCopy.InstallationID, PoolName: pool.Name, PoolUID: pool.UID,
-		VolumeID: move.Spec.VolumeID, VolumeUID: move.Status.SourceCopy.VolumeUID, NodeName: move.Status.DestinationNode,
-	}
-	incoming, destination := base, base
-	incoming.CopyID, incoming.Role = "move-"+move.UID+"-incoming", volume.RoleIncoming
-	destination.CopyID, destination.Role = "move-"+move.UID+"-serving", volume.RoleServing
+		NodeName: move.Status.DestinationNode, VolumeUID: move.Status.SourceCopy.VolumeUID,
+	})
 	if incoming.Validate() != nil || destination.Validate() != nil {
 		return fmt.Errorf("generated move copy identity is invalid")
 	}
@@ -284,8 +281,8 @@ func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volume
 		return fmt.Errorf("move copy identity changed")
 	}
 	move.Status.IncomingCopy, move.Status.DestinationCopy = &incoming, &destination
-	move.Status.CopyOperationID = "copy-" + move.UID
-	move.Status.PromotionOperationID = "promote-" + move.UID
+	move.Status.CopyOperationID = volumeapi.MoveCopyOperationID(move.UID)
+	move.Status.PromotionOperationID = volumeapi.MovePromotionOperationID(move.UID)
 	return nil
 }
 
