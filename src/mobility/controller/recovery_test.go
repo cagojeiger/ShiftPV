@@ -349,7 +349,7 @@ func rollbackRecoveryFixture(t *testing.T, copies []volumeapi.CopyObservation) (
 			continue
 		}
 		repo.pools[index].Generation = 1
-		repo.pools[index].Finalizers = []string{cleanupapi.PoolProtectionFinalizer}
+		repo.pools[index].Finalizers = []string{volumeapi.PoolProtectionFinalizer}
 		repo.pools[index].Status = volumeapi.PoolStatus{
 			ObservedGeneration: 1,
 			LastProbeTime:      metav1.NewTime(observedAt),
@@ -427,7 +427,7 @@ func TestRecoveryRollbackAcceptsOnlyFreshExactAbsence(t *testing.T) {
 		if repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason != recoveryCapacitySettled {
 			t.Fatalf("fresh absence did not settle capacity: %+v", repo.moves[0].Status)
 		}
-		if _, err := r.Cleanups.Get(context.Background(), cleanupapiAuthority(move)); !apierrors.IsNotFound(err) {
+		if _, err := r.Cleanups.Get(context.Background(), cleanupapiAuthority(move)); !errors.Is(err, cleanupapi.ErrNoJournal) {
 			t.Fatalf("already-absent rollback invented a cleanup receipt: %v", err)
 		}
 	})
@@ -471,7 +471,7 @@ func TestRecoveryRollbackPreservesAmbiguousArtifactsForReview(t *testing.T) {
 			if !repo.moves[0].Status.CapacityApproved {
 				t.Fatal("ambiguous artifact released the capacity hold")
 			}
-			if _, err := r.Cleanups.Get(context.Background(), cleanupapiAuthority(move)); !apierrors.IsNotFound(err) {
+			if _, err := r.Cleanups.Get(context.Background(), cleanupapiAuthority(move)); !errors.Is(err, cleanupapi.ErrNoJournal) {
 				t.Fatalf("ambiguous target created a destructive intent: %v", err)
 			}
 		})
@@ -494,7 +494,7 @@ func TestPostcommitRecoveryWaitsForActualDestinationPublicationBeforeSourceClean
 	if !repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason == recoveryCapacitySettled {
 		t.Fatalf("unpublished destination released source hold: %+v", repo.moves[0].Status)
 	}
-	if _, err := r.Cleanups.Get(context.Background(), cleanupapiAuthority(move)); !apierrors.IsNotFound(err) {
+	if _, err := r.Cleanups.Get(context.Background(), cleanupapiAuthority(move)); !errors.Is(err, cleanupapi.ErrNoJournal) {
 		t.Fatalf("unpublished destination created cleanup intent: %v", err)
 	}
 

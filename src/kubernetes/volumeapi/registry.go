@@ -958,6 +958,19 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 	}, nil
 }
 
+// PoolInventoryFrom decodes status.inventory from a ShiftPVPool object.
+func PoolInventoryFrom(pool *unstructured.Unstructured) (PoolInventory, bool, error) {
+	value, found, err := unstructured.NestedMap(pool.Object, "status", "inventory")
+	if err != nil || !found {
+		return PoolInventory{}, found, err
+	}
+	var inventory PoolInventory
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(value, &inventory); err != nil {
+		return PoolInventory{}, true, fmt.Errorf("decode Pool inventory: %w", err)
+	}
+	return inventory, true, nil
+}
+
 func (r *Registry) CreateMove(ctx context.Context, generateName string, spec MoveSpec) (Move, error) {
 	if err := r.validate(); err != nil {
 		return Move{}, err

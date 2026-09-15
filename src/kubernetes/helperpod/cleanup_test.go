@@ -503,14 +503,14 @@ func cleanupFixture(t *testing.T) (*cleanupapi.Store, cleanupapi.Cleanup) {
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
 		"metadata": map[string]any{
 			"name": target.VolumeID, "uid": target.VolumeUID, "resourceVersion": "1", "generation": int64(1),
-			"finalizers": []any{cleanupapi.VolumeProtectionFinalizer},
+			"finalizers": []any{volumeapi.VolumeProtectionFinalizer},
 		},
 		"spec": map[string]any{},
 	}}
 	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		cleanupapi.VolumeResource: "ShiftPVVolumeList",
-		cleanupapi.MoveResource:   "ShiftPVMoveList",
-		cleanupapi.PoolResource:   "ShiftPVPoolList",
+		volumeapi.VolumeResource: "ShiftPVVolumeList",
+		volumeapi.MoveResource:   "ShiftPVMoveList",
+		volumeapi.PoolResource:   "ShiftPVPoolList",
 	}, parent)
 	store := &cleanupapi.Store{Client: dynamicClient}
 	cleanup, err := store.Ensure(context.Background(), cleanupapi.Spec{

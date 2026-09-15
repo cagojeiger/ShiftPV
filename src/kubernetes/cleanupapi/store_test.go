@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/dynamic/fake"
 	ktesting "k8s.io/client-go/testing"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -22,7 +23,7 @@ const (
 )
 
 func TestEnsureEmbedsJournalOnExactParent(t *testing.T) {
-	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", VolumeProtectionFinalizer)
+	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", volumeapi.VolumeProtectionFinalizer)
 	parent.Object["status"] = map[string]any{"ownerNode": "worker-a"}
 	store, client := testStore(parent)
 	spec := testSpec("ShiftPVVolume", testVolumeID, "volume-uid", "VolumeDelete")
@@ -34,7 +35,7 @@ func TestEnsureEmbedsJournalOnExactParent(t *testing.T) {
 	if created.Name != cleanupName(spec.Target) || created.UID != spec.Authority.UID || created.Status.Phase != PhasePending {
 		t.Fatalf("created=%#v", created)
 	}
-	object, err := client.Resource(VolumeResource).Get(context.Background(), testVolumeID, metav1.GetOptions{})
+	object, err := client.Resource(volumeapi.VolumeResource).Get(context.Background(), testVolumeID, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestEnsureEmbedsJournalOnExactParent(t *testing.T) {
 }
 
 func TestJournalRequiresExactProtectedParentEvenWhileTerminating(t *testing.T) {
-	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", VolumeProtectionFinalizer)
+	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", volumeapi.VolumeProtectionFinalizer)
 	now := metav1.NewTime(time.Unix(1_700_000_000, 0).UTC())
 	parent.SetDeletionTimestamp(&now)
 	store, client := testStore(parent)
@@ -68,12 +69,12 @@ func TestJournalRequiresExactProtectedParentEvenWhileTerminating(t *testing.T) {
 	if _, err := store.Get(context.Background(), Authority{Kind: "ShiftPVVolume", Name: testVolumeID, UID: "recreated-uid"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("recreated parent error=%v", err)
 	}
-	object, err := client.Resource(VolumeResource).Get(context.Background(), testVolumeID, metav1.GetOptions{})
+	object, err := client.Resource(volumeapi.VolumeResource).Get(context.Background(), testVolumeID, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	object.SetFinalizers(nil)
-	if _, err := client.Resource(VolumeResource).Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+	if _, err := client.Resource(volumeapi.VolumeResource).Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Get(context.Background(), created.Spec.Authority); !errors.Is(err, ErrConflict) {
@@ -82,7 +83,7 @@ func TestJournalRequiresExactProtectedParentEvenWhileTerminating(t *testing.T) {
 }
 
 func TestTransitionRequiresReceiptThenFreshAbsence(t *testing.T) {
-	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", VolumeProtectionFinalizer)
+	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", volumeapi.VolumeProtectionFinalizer)
 	store, _ := testStore(parent)
 	cleanup, err := store.Ensure(context.Background(), testSpec("ShiftPVVolume", testVolumeID, "volume-uid", "VolumeDelete"))
 	if err != nil {
@@ -155,7 +156,7 @@ func TestTransitionRequiresReceiptThenFreshAbsence(t *testing.T) {
 }
 
 func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
-	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", VolumeProtectionFinalizer)
+	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", volumeapi.VolumeProtectionFinalizer)
 	pool := testPool(3, 3, true, false, "", []any{copyObservationMap(testCopy(), true)})
 	store, client := testStore(parent, pool)
 	client.PrependReactor("update", "shiftpvpools", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -187,7 +188,7 @@ func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
 	if _, complete, err = store.ReconcileAbsence(context.Background(), confirming); err != nil || complete {
 		t.Fatalf("stale observation completed=%v err=%v", complete, err)
 	}
-	currentPool, err := client.Resource(PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
+	currentPool, err := client.Resource(volumeapi.PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
 	if err := unstructured.SetNestedSlice(currentPool.Object, []any{copyObservationMap(testCopy(), true)}, "status", "inventory", "copies"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Resource(PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
+	if _, err := client.Resource(volumeapi.PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, complete, err = store.ReconcileAbsence(context.Background(), confirming); err != nil || complete {
@@ -218,14 +219,14 @@ func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
 		}()},
 	} {
 		t.Run(name, func(t *testing.T) {
-			currentPool, err := client.Resource(PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
+			currentPool, err := client.Resource(volumeapi.PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := unstructured.SetNestedSlice(currentPool.Object, observations, "status", "inventory", "copies"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := client.Resource(PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
+			if _, err := client.Resource(volumeapi.PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
 				t.Fatal(err)
 			}
 			if _, complete, err := store.ReconcileAbsence(context.Background(), confirming); err != nil || complete {
@@ -233,11 +234,11 @@ func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
 			}
 		})
 	}
-	currentPool, _ = client.Resource(PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
+	currentPool, _ = client.Resource(volumeapi.PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
 	if err := unstructured.SetNestedSlice(currentPool.Object, []any{copyObservationMap(testCopy(), false)}, "status", "inventory", "copies"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Resource(PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
+	if _, err := client.Resource(volumeapi.PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	settled, complete, err := store.ReconcileAbsence(context.Background(), confirming)
@@ -247,7 +248,7 @@ func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
 }
 
 func TestReconcileAbsenceRejectsLegacyVerifyingWithoutPodBinding(t *testing.T) {
-	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", VolumeProtectionFinalizer)
+	parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", volumeapi.VolumeProtectionFinalizer)
 	store, client := testStore(parent)
 	cleanup, err := store.Ensure(context.Background(), testSpec("ShiftPVVolume", testVolumeID, "volume-uid", "VolumeDelete"))
 	if err != nil {
@@ -257,7 +258,7 @@ func TestReconcileAbsenceRejectsLegacyVerifyingWithoutPodBinding(t *testing.T) {
 	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseRunning, Executor: executor}); err != nil {
 		t.Fatal(err)
 	}
-	object, err := client.Resource(VolumeResource).Get(context.Background(), testVolumeID, metav1.GetOptions{})
+	object, err := client.Resource(volumeapi.VolumeResource).Get(context.Background(), testVolumeID, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +275,7 @@ func TestReconcileAbsenceRejectsLegacyVerifyingWithoutPodBinding(t *testing.T) {
 	if err := unstructured.SetNestedMap(object.Object, stored, "status", "cleanup"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Resource(VolumeResource).UpdateStatus(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+	if _, err := client.Resource(volumeapi.VolumeResource).UpdateStatus(context.Background(), object, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	legacy, err := store.Get(context.Background(), cleanup.Spec.Authority)
@@ -291,8 +292,8 @@ func TestReconcileAbsenceRejectsLegacyVerifyingWithoutPodBinding(t *testing.T) {
 }
 
 func TestListScansVolumeAndMoveParents(t *testing.T) {
-	volumeParent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", VolumeProtectionFinalizer)
-	moveParent := testParent("ShiftPVMove", "move-a", "move-uid", MoveProtectionFinalizer)
+	volumeParent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", volumeapi.VolumeProtectionFinalizer)
+	moveParent := testParent("ShiftPVMove", "move-a", "move-uid", volumeapi.MoveProtectionFinalizer)
 	store, _ := testStore(volumeParent, moveParent)
 	volumeCleanup, err := store.Ensure(context.Background(), testSpec("ShiftPVVolume", testVolumeID, "volume-uid", "VolumeDelete"))
 	if err != nil {
@@ -337,9 +338,9 @@ func TestSpecAcceptsMoveRollbackOnlyOnMoveParent(t *testing.T) {
 
 func testStore(objects ...runtime.Object) (*Store, *fake.FakeDynamicClient) {
 	listKinds := map[schema.GroupVersionResource]string{
-		VolumeResource: "ShiftPVVolumeList",
-		MoveResource:   "ShiftPVMoveList",
-		PoolResource:   "ShiftPVPoolList",
+		volumeapi.VolumeResource: "ShiftPVVolumeList",
+		volumeapi.MoveResource:   "ShiftPVMoveList",
+		volumeapi.PoolResource:   "ShiftPVPoolList",
 	}
 	client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, objects...)
 	return &Store{Client: client, Now: func() time.Time { return time.Unix(1_700_000_100, 0).UTC() }}, client
@@ -361,7 +362,7 @@ func testPool(generation, observedGeneration int64, valid, truncated bool, messa
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool",
 		"metadata": map[string]any{
-			"name": "pool-a", "uid": "pool-uid", "resourceVersion": "1", "generation": generation, "finalizers": []any{PoolProtectionFinalizer},
+			"name": "pool-a", "uid": "pool-uid", "resourceVersion": "1", "generation": generation, "finalizers": []any{volumeapi.PoolProtectionFinalizer},
 		},
 		"spec": map[string]any{"nodeName": "worker-a", "scanEpoch": int64(1)},
 		"status": map[string]any{

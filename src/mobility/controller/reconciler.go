@@ -13,6 +13,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
@@ -54,7 +55,7 @@ type Reconciler struct {
 	ServiceAccountName string
 	Cleanups           *cleanupapi.Store
 	CleanupOperator    interface {
-		Reclaim(context.Context, cleanupapi.Cleanup, *cleanupapi.Store) (cleanupapi.Cleanup, error)
+		Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error)
 	}
 	Interval                time.Duration
 	MoveJournalRetention    time.Duration

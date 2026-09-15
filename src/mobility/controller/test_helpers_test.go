@@ -11,6 +11,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -49,7 +50,7 @@ func newTestCleanupStore() *cleanupapi.Store {
 			"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
 			"metadata": map[string]any{
 				"name": name, "uid": uid, "resourceVersion": "1", "generation": int64(1),
-				"finalizers": []any{cleanupapi.MoveProtectionFinalizer},
+				"finalizers": []any{volumeapi.MoveProtectionFinalizer},
 			},
 			"spec": map[string]any{},
 		}}
@@ -59,7 +60,7 @@ func newTestCleanupStore() *cleanupapi.Store {
 			"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool",
 			"metadata": map[string]any{
 				"name": name, "uid": uid, "resourceVersion": "1", "generation": int64(1),
-				"finalizers": []any{cleanupapi.PoolProtectionFinalizer},
+				"finalizers": []any{volumeapi.PoolProtectionFinalizer},
 			},
 			"spec": map[string]any{"nodeName": node, "scanEpoch": int64(0)},
 			"status": map[string]any{
@@ -69,9 +70,9 @@ func newTestCleanupStore() *cleanupapi.Store {
 		}}
 	}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		cleanupapi.VolumeResource: "ShiftPVVolumeList",
-		cleanupapi.MoveResource:   "ShiftPVMoveList",
-		cleanupapi.PoolResource:   "ShiftPVPoolList",
+		volumeapi.VolumeResource: "ShiftPVVolumeList",
+		volumeapi.MoveResource:   "ShiftPVMoveList",
+		volumeapi.PoolResource:   "ShiftPVPoolList",
 	}, parent("move-test", "move-uid"), parent("move-cleanup", "move-cleanup-uid"),
 		pool("source-pool", "source-pool-uid", "source"), pool("source", "source-pool-uid", "source"),
 		pool("destination-pool", "destination-pool-uid", "destination"))

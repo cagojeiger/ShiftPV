@@ -15,6 +15,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 )
@@ -52,7 +53,7 @@ func cleanupMoveFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 
 type failingCleanupOperator struct{}
 
-func (failingCleanupOperator) Reclaim(context.Context, cleanupapi.Cleanup, *cleanupapi.Store) (cleanupapi.Cleanup, error) {
+func (failingCleanupOperator) Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
 	return cleanupapi.Cleanup{}, errors.New("cleanup API unavailable")
 }
 

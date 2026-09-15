@@ -2,9 +2,8 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
-
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
@@ -16,7 +15,7 @@ func (r *Reconciler) cleanupState(ctx context.Context, move volumeapi.Move) (com
 		return false, false, nil
 	}
 	request, err := r.Cleanups.Get(ctx, spec.Authority)
-	if apierrors.IsNotFound(err) {
+	if errors.Is(err, cleanupapi.ErrNoJournal) {
 		return false, false, nil
 	}
 	if err != nil {

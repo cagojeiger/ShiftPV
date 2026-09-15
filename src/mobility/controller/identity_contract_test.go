@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
@@ -193,7 +194,7 @@ func TestMoveJobsUseIdentityHelperAndRejectReplacement(t *testing.T) {
 
 type receiptCleanupOperator struct{}
 
-func (receiptCleanupOperator) Reclaim(ctx context.Context, request cleanupapi.Cleanup, store *cleanupapi.Store) (cleanupapi.Cleanup, error) {
+func (receiptCleanupOperator) Reclaim(ctx context.Context, request cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
 	executor := &cleanupapi.Executor{JobName: request.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: request.Spec.Target.NodeName}
 	if err := store.UpdateStatus(ctx, request, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 		return cleanupapi.Cleanup{}, err
