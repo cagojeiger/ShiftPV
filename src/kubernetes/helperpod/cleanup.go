@@ -118,9 +118,10 @@ func (r *Runner) approvedPool(ctx context.Context, store CleanupJournal, cleanup
 }
 
 // cleanupPoolReady defers an effect that has not started yet while its Pool is
-// not currently usable. The instant and staleness budget are resolved the same
-// way volumeapi.Registry.readiness() resolves them for placement decisions; that
-// helper is unexported, so the defaulting is repeated here.
+// not currently usable. The staleness budget follows the same rule
+// volumeapi.Registry.readiness() applies to placement decisions and
+// volumeapi.PoolReadinessStaleAfterArgument applies to the executor argument: a
+// non-positive value means DefaultPoolReadinessStaleAfter.
 func (r *Runner) cleanupPoolReady(pool volumeapi.Pool) error {
 	staleAfter := r.PoolReadinessStaleAfter
 	if staleAfter <= 0 {
@@ -402,6 +403,7 @@ func (r *Runner) cleanupJob(cleanup cleanupapi.Cleanup, poolRoot string) *batchv
 							"cleanup", "--authority-kind=" + cleanup.Spec.Authority.Kind,
 							"--authority-name=" + cleanup.Spec.Authority.Name, "--authority-uid=" + cleanup.Spec.Authority.UID,
 							"--operation-id=" + cleanup.Spec.OperationID, "--namespace=" + r.Namespace,
+							volumeapi.PoolReadinessStaleAfterArgument(r.PoolReadinessStaleAfter),
 						},
 						Env:       []corev1.EnvVar{{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}}},
 						Resources: r.Resources,

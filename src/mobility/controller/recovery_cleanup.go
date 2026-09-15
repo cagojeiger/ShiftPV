@@ -104,9 +104,14 @@ func (r *Reconciler) settleDestinationCleanup(ctx context.Context, move *volumea
 		!slices.Contains(state.PublishedNodes, move.Status.DestinationNode) || slices.Contains(state.PublishedNodes, move.Spec.SourceNode) {
 		return false, fmt.Errorf("waiting for exact destination publication before source cleanup")
 	}
+	// The read failure and the ordinary not-yet-published wait are separate
+	// facts. Only the first one carries a cause, so only the first one wraps.
 	destinationPool, err := r.Repository.ReadyPoolForNode(ctx, move.Status.DestinationNode)
-	if err != nil || !volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy) {
+	if err != nil {
 		return false, fmt.Errorf("waiting for exact destination scanner publication before source cleanup: %w", err)
+	}
+	if !volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy) {
+		return false, fmt.Errorf("waiting for exact destination scanner publication before source cleanup")
 	}
 	spec, err := moveCleanupSpec(*move)
 	if err != nil {
