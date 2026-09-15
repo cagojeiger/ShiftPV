@@ -48,7 +48,11 @@ apply_real_node_defaults() {
 report_error() {
 	local result_code=$?
 	trap - ERR
-	printf 'FAIL line=%s exit=%d command=%s\n' "${BASH_LINENO[0]}" "${result_code}" "${BASH_COMMAND}" |
+	# BASH_SOURCE[1] and BASH_LINENO[0] name the frame that was executing when
+	# the error was raised: usually the stage script, but lib.sh itself when a
+	# lib.sh function fails internally.
+	printf 'FAIL line=%s exit=%d command=%s file=%s\n' \
+		"${BASH_LINENO[0]}" "${result_code}" "${BASH_COMMAND}" "${BASH_SOURCE[1]}" |
 		tee -a "${ARTIFACT_DIR}/failure.txt" >&2
 	exit "${result_code}"
 }
@@ -65,6 +69,9 @@ capture_evidence() {
 	k get events -A --sort-by=.metadata.creationTimestamp >"${ARTIFACT_DIR}/${label}-events.txt" 2>&1 || true
 	k -n "${SYSTEM_NAMESPACE}" logs deployment/shiftpv-controller --all-containers --tail=-1 >"${ARTIFACT_DIR}/${label}-controller.log" 2>&1 || true
 	if [[ "${extra}" == source-kubelite ]]; then
+		# Only stages that define ssh_source (service-interruption.sh) may ask for
+		# the source-kubelite journal; soak.sh never passes this flag.
+		declare -F ssh_source >/dev/null || { echo "capture_evidence source-kubelite requires ssh_source" >&2; return 1; }
 		ssh_source sudo journalctl -u snap.microk8s.daemon-kubelite --since '-1 hour' --no-pager >"${ARTIFACT_DIR}/${label}-${SOURCE_NODE}-kubelite.log" 2>&1 || true
 	fi
 }
@@ -74,12 +81,22 @@ capture_evidence() {
 # run does not own must be byte-identical before and after.
 snapshot_non_shiftpv_specs() {
 	local label=$1 match=$2 value=$3 autoscaled_workloads
+	case "${match}" in
+	prefix | exact) ;;
+	*)
+		echo "snapshot_non_shiftpv_specs: unknown match mode: ${match}; expected prefix or exact" >&2
+		return 1
+		;;
+	esac
 	autoscaled_workloads=$(k get horizontalpodautoscalers.autoscaling -A -o json | jq -c '
 		[.items[] | {namespace: .metadata.namespace, kind: .spec.scaleTargetRef.kind, name: .spec.scaleTargetRef.name}]')
 	k get deployments.apps,statefulsets.apps -A -o json | jq -S \
 		--arg system "${SYSTEM_NAMESPACE}" --arg match "${match}" --arg value "${value}" \
 		--argjson autoscaled "${autoscaled_workloads}" '
-		def is_test_ns($ns): if $match == "prefix" then ($ns | startswith($value)) else $ns == $value end;
+		def is_test_ns($ns):
+			if $match == "prefix" then ($ns | startswith($value))
+			elif $match == "exact" then ($ns == $value)
+			else error("unknown match mode: \($match)") end;
 		[.items[]
 		 | select(.metadata.namespace != $system)
 		 | select(is_test_ns(.metadata.namespace) | not)
@@ -93,13 +110,19 @@ snapshot_non_shiftpv_specs() {
 		    else $workload.spec end)}]
 		| sort_by(.apiVersion, .kind, .metadata.namespace, .metadata.name)' >"${ARTIFACT_DIR}/${label}-non-shiftpv-workloads.json"
 	k get pvc -A -o json | jq -S --arg match "${match}" --arg value "${value}" '
-		def is_test_ns($ns): if $match == "prefix" then ($ns | startswith($value)) else $ns == $value end;
+		def is_test_ns($ns):
+			if $match == "prefix" then ($ns | startswith($value))
+			elif $match == "exact" then ($ns == $value)
+			else error("unknown match mode: \($match)") end;
 		[.items[]
 		 | select(is_test_ns(.metadata.namespace) | not)
 		 | {metadata: {namespace: .metadata.namespace, name: .metadata.name, uid: .metadata.uid}, spec}]
 		| sort_by(.metadata.namespace, .metadata.name)' >"${ARTIFACT_DIR}/${label}-existing-pvcs.json"
 	k get pv -o json | jq -S --arg match "${match}" --arg value "${value}" '
-		def is_test_ns($ns): if $match == "prefix" then ($ns | startswith($value)) else $ns == $value end;
+		def is_test_ns($ns):
+			if $match == "prefix" then ($ns | startswith($value))
+			elif $match == "exact" then ($ns == $value)
+			else error("unknown match mode: \($match)") end;
 		[.items[]
 		 | select(is_test_ns(.spec.claimRef.namespace // "") | not)
 		 | {metadata: {name: .metadata.name, uid: .metadata.uid}, spec}]
