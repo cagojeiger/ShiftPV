@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +190,87 @@ func TestMoveJobsUseIdentityHelperAndRejectReplacement(t *testing.T) {
 	}
 	if err := reconciler.ensureCopyJob(ctx, move, names); err == nil || !strings.Contains(err.Error(), "identity changed") {
 		t.Fatalf("replacement copy Job accepted: %v", err)
+	}
+}
+
+// TestMoveHelperContainersOmitPoolReadinessBudget pins the blast radius of the
+// forwarded probe staleness budget. Only the cleanup helper consumes it: its
+// publication proof calls ReadyPoolForNode, while serve-source, copy, promote
+// and verify-owner recheck authority through PoolForNode and never judge probe
+// freshness. Keeping the argument out of these four containers keeps
+// sameSourcePod and sameOperationJob stable, so re-tuning
+// poolReadiness.staleAfter cannot strand an in-flight Move.
+func TestMoveHelperContainersOmitPoolReadinessBudget(t *testing.T) {
+	ctx := context.Background()
+	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
+	source := volume.CopyIdentity{InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "source-copy", NodeName: "source", Role: volume.RoleServing}
+	incoming := volume.CopyIdentity{InstallationID: "installation", PoolName: "destination-pool", PoolUID: "destination-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "incoming-copy", NodeName: "destination", Role: volume.RoleIncoming}
+	destination := incoming
+	destination.CopyID, destination.Role = "destination-copy", volume.RoleServing
+	move := volumeapi.Move{
+		Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{
+			DestinationNode: "destination", DestinationPoolUID: destination.PoolUID, SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
+			CopyOperationID: "copy-operation", PromotionOperationID: "promote-operation",
+		},
+	}
+	names := namesFor(move.Name)
+	move.Status.CopyJobName, move.Status.PromotionJobName = names.CopyJob, names.PromotionJob
+	client := fake.NewSimpleClientset()
+	assignJobUIDs(client)
+	reconciler := &Reconciler{
+		Client: client, Namespace: "system", ServiceAccountName: "shiftpv-controller", HelperImage: "helper:test",
+		PoolReadinessStaleAfter: 7 * time.Minute,
+		Repository: &memoryRepository{pools: []volumeapi.Pool{
+			{Name: source.PoolName, UID: source.PoolUID, NodeName: source.NodeName, MountPath: "/source"},
+			{Name: incoming.PoolName, UID: incoming.PoolUID, NodeName: incoming.NodeName, MountPath: "/destination"},
+		}},
+	}
+	unwanted := volumeapi.PoolReadinessStaleAfterArgument(7 * time.Minute)
+	if unwanted != "--pool-readiness-stale-after=7m0s" {
+		t.Fatalf("forwarded argument = %q", unwanted)
+	}
+	for _, ensure := range []func() error{
+		func() error { return reconciler.ensureSourcePod(ctx, move, names) },
+		func() error { return reconciler.ensureCopyJob(ctx, move, names) },
+		func() error { return reconciler.ensurePromotionJob(ctx, move, names) },
+	} {
+		if err := ensure(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourcePod, err := client.CoreV1().Pods("system").Get(ctx, names.SourcePod, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyJob, err := client.BatchV1().Jobs("system").Get(ctx, names.CopyJob, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotionJob, err := client.BatchV1().Jobs("system").Get(ctx, names.PromotionJob, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryNames := recoveryNames(move)
+	recoveryJob, err := reconciler.verifyOwnerJob(ctx, move, recoveryNames, recoveryNames.Base+"-verify", move.Spec.SourceNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := map[string][]string{
+		"serve-source": sourcePod.Spec.Containers[0].Args,
+		"copy":         copyJob.Spec.Template.Spec.Containers[0].Args,
+		"promote":      promotionJob.Spec.Template.Spec.Containers[0].Args,
+		"verify-owner": recoveryJob.Spec.Template.Spec.Containers[0].Args,
+	}
+	for action, args := range built {
+		if slices.Contains(args, unwanted) {
+			t.Fatalf("%s helper carries a budget it never consumes: %v", action, args)
+		}
+		for _, argument := range args {
+			if strings.Contains(argument, volumeapi.PoolReadinessStaleAfterFlag) {
+				t.Fatalf("%s helper carries a budget it never consumes: %v", action, args)
+			}
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package helperpod
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,30 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	}
 	if second, err := runner.Reclaim(ctx, result, cleanups); err != nil || second.Status.Phase != cleanupapi.PhaseVerifying {
 		t.Fatalf("retry=%#v err=%v", second, err)
+	}
+}
+
+// TestCleanupJobForwardsPoolReadinessBudget pins that the cleanup executor Job
+// carries the controller's configured probe staleness budget. The cleanup
+// helper re-proves destination publication against a Ready Pool before it
+// purges the source copy, so a helper on the package default could accept a
+// probe this Runner already treats as stale.
+func TestCleanupJobForwardsPoolReadinessBudget(t *testing.T) {
+	_, cleanup := cleanupFixture(t)
+	runner := validRunner(fake.NewClientset())
+	runner.PoolReadinessStaleAfter = 7 * time.Minute
+	args := runner.cleanupJob(cleanup, "/mnt/shiftpv").Spec.Template.Spec.Containers[0].Args
+	want := volumeapi.PoolReadinessStaleAfterArgument(7 * time.Minute)
+	if want != "--pool-readiness-stale-after=7m0s" {
+		t.Fatalf("forwarded argument = %q", want)
+	}
+	if !slices.Contains(args, want) {
+		t.Fatalf("cleanup helper does not receive the Runner budget: %v", args)
+	}
+	unset := validRunner(fake.NewClientset())
+	defaulted := unset.cleanupJob(cleanup, "/mnt/shiftpv").Spec.Template.Spec.Containers[0].Args
+	if !slices.Contains(defaulted, volumeapi.PoolReadinessStaleAfterArgument(volumeapi.DefaultPoolReadinessStaleAfter)) {
+		t.Fatalf("unset budget did not resolve to the default: %v", defaulted)
 	}
 }
 

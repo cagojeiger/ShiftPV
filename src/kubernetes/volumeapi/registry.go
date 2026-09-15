@@ -50,6 +50,26 @@ const (
 	PhaseBlocked  = "Blocked"
 )
 
+// PoolReadinessStaleAfterFlag is the one spelling of the probe staleness budget
+// shared by every process that judges Pool readiness. Among the node-bound
+// helpers only the cleanup helper does: its move source publication proof calls
+// ReadyPoolForNode, so the parent controller forwards its own configured value
+// there instead of letting the child silently fall back to
+// DefaultPoolReadinessStaleAfter. The other helper subcommands recheck
+// authority through PoolForNode and accept the flag only for forward
+// compatibility.
+const PoolReadinessStaleAfterFlag = "pool-readiness-stale-after"
+
+// PoolReadinessStaleAfterArgument renders the helper container flag for a
+// configured staleness budget, resolving a non-positive value to the default
+// exactly as Registry.readiness() resolves it.
+func PoolReadinessStaleAfterArgument(staleAfter time.Duration) string {
+	if staleAfter <= 0 {
+		staleAfter = DefaultPoolReadinessStaleAfter
+	}
+	return "--" + PoolReadinessStaleAfterFlag + "=" + staleAfter.String()
+}
+
 type Registry struct {
 	Client                  dynamic.Interface
 	PoolReadinessStaleAfter time.Duration

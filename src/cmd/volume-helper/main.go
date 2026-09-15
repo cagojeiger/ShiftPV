@@ -62,7 +62,7 @@ func runServeSource(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	registry := &volumeapi.Registry{Client: dynamicClient}
+	registry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: options.poolReadinessStaleAfter}
 	move, err := registry.GetMove(context.Background(), options.MoveName)
 	if err != nil {
 		return fmt.Errorf("read source service Move: %w", err)
@@ -89,9 +89,24 @@ func runServeSource(arguments []string) error {
 	return command.Run()
 }
 
+// helperPoolReadinessFlag registers the probe staleness budget a node-bound
+// helper judges Pool readiness with. Only the cleanup helper consumes it today,
+// through the move source publication proof in helperauth; every other
+// subcommand rechecks authority through PoolForNode and accepts the flag only
+// so a controller may forward it without version-skewing the CLI. The name and
+// default are shared with the controller so parent and child agree.
+func helperPoolReadinessFlag(flags *flag.FlagSet, staleAfter *time.Duration) {
+	flags.DurationVar(staleAfter, volumeapi.PoolReadinessStaleAfterFlag,
+		volumeapi.DefaultPoolReadinessStaleAfter, "maximum age of a successful node Pool readiness probe")
+}
+
 type moveOptions struct {
 	helperauth.MoveOptions
 	sourceService, passwordFile, root string
+	// poolReadinessStaleAfter is accepted for forward compatibility. No move
+	// subcommand judges probe freshness today: each rechecks authority through
+	// PoolForNode, which never consults the budget.
+	poolReadinessStaleAfter time.Duration
 }
 
 func parseMoveOptions(action string, arguments []string, copyAction bool) (moveOptions, error) {
@@ -102,6 +117,7 @@ func parseMoveOptions(action string, arguments []string, copyAction bool) (moveO
 	flags.StringVar(&options.OperationID, "operation-id", "", "move operation identity")
 	flags.StringVar(&options.Namespace, "namespace", "", "helper Pod namespace")
 	flags.StringVar(&options.root, "pool-root", "/pool", "mounted Pool root")
+	helperPoolReadinessFlag(flags, &options.poolReadinessStaleAfter)
 	if copyAction {
 		flags.StringVar(&options.sourceService, "source-service", "", "rsync source Service")
 		flags.StringVar(&options.passwordFile, "password-file", "", "rsync password file")
@@ -128,7 +144,7 @@ func runMoveCopy(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	registry := &volumeapi.Registry{Client: dynamicClient}
+	registry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: options.poolReadinessStaleAfter}
 	move, err := registry.GetMove(context.Background(), options.MoveName)
 	if err != nil {
 		return fmt.Errorf("read copy Move: %w", err)
@@ -188,7 +204,7 @@ func runMovePromote(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	registry := &volumeapi.Registry{Client: dynamicClient}
+	registry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: options.poolReadinessStaleAfter}
 	move, err := registry.GetMove(context.Background(), options.MoveName)
 	if err != nil {
 		return fmt.Errorf("read promotion Move: %w", err)
@@ -211,7 +227,7 @@ func runVerifyOwner(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	registry := &volumeapi.Registry{Client: dynamicClient}
+	registry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: options.poolReadinessStaleAfter}
 	move, err := registry.GetMove(context.Background(), options.MoveName)
 	if err != nil {
 		return fmt.Errorf("read recovery Move: %w", err)
@@ -323,22 +339,42 @@ func runCreate(arguments []string) error {
 	return ownership.PrepareServing(ctx, *root, identity, authority)
 }
 
-func runCleanup(arguments []string) error {
+type cleanupOptions struct {
+	authority                             cleanupapi.Authority
+	operationID, namespace, podName, root string
+	// poolReadinessStaleAfter mirrors the parent controller's budget so the
+	// move source publication proof in helperauth resolves Pool readiness with
+	// the operator's value instead of the compiled default.
+	poolReadinessStaleAfter time.Duration
+}
+
+func parseCleanupOptions(arguments []string) (cleanupOptions, error) {
 	flags := flag.NewFlagSet("cleanup", flag.ContinueOnError)
 	authorityKind := flags.String("authority-kind", "", "cleanup parent kind")
 	authorityName := flags.String("authority-name", "", "cleanup parent name")
 	authorityUID := flags.String("authority-uid", "", "cleanup parent UID")
-	operationID := flags.String("operation-id", "", "cleanup operation identity")
-	namespace := flags.String("namespace", "", "helper Pod namespace")
-	root := flags.String("pool-root", "/pool", "mounted Pool root")
+	var options cleanupOptions
+	flags.StringVar(&options.operationID, "operation-id", "", "cleanup operation identity")
+	flags.StringVar(&options.namespace, "namespace", "", "helper Pod namespace")
+	flags.StringVar(&options.root, "pool-root", "/pool", "mounted Pool root")
+	helperPoolReadinessFlag(flags, &options.poolReadinessStaleAfter)
 	if err := flags.Parse(arguments); err != nil {
+		return cleanupOptions{}, err
+	}
+	options.podName = os.Getenv("POD_NAME")
+	options.authority = cleanupapi.Authority{Kind: *authorityKind, Name: *authorityName, UID: *authorityUID}
+	if options.authority.Validate() != nil || !volume.ValidIdentityToken(options.operationID) || options.namespace == "" || options.podName == "" {
+		return cleanupOptions{}, fmt.Errorf("cleanup helper identity is incomplete")
+	}
+	return options, nil
+}
+
+func runCleanup(arguments []string) error {
+	options, err := parseCleanupOptions(arguments)
+	if err != nil {
 		return err
 	}
-	podName := os.Getenv("POD_NAME")
-	authorityIdentity := cleanupapi.Authority{Kind: *authorityKind, Name: *authorityName, UID: *authorityUID}
-	if authorityIdentity.Validate() != nil || !volume.ValidIdentityToken(*operationID) || *namespace == "" || podName == "" {
-		return fmt.Errorf("cleanup helper identity is incomplete")
-	}
+	authorityIdentity, podName := options.authority, options.podName
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return fmt.Errorf("load in-cluster configuration: %w", err)
@@ -352,17 +388,17 @@ func runCleanup(arguments []string) error {
 		return fmt.Errorf("create Kubernetes client: %w", err)
 	}
 	cleanups := &cleanupapi.Store{Client: dynamicClient}
-	registry := &volumeapi.Registry{Client: dynamicClient}
+	registry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: options.poolReadinessStaleAfter}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	approved, err := cleanups.Get(ctx, authorityIdentity)
 	if err != nil {
 		return fmt.Errorf("read cleanup intent: %w", err)
 	}
-	if approved.UID != authorityIdentity.UID || approved.Spec.Authority != authorityIdentity || approved.Spec.OperationID != *operationID {
+	if approved.UID != authorityIdentity.UID || approved.Spec.Authority != authorityIdentity || approved.Spec.OperationID != options.operationID {
 		return fmt.Errorf("cleanup intent identity changed: %w", cleanupapi.ErrConflict)
 	}
-	pod, err := client.CoreV1().Pods(*namespace).Get(ctx, podName, metav1.GetOptions{})
+	pod, err := client.CoreV1().Pods(options.namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("read cleanup executor Pod: %w", err)
 	}
@@ -378,7 +414,7 @@ func runCleanup(arguments []string) error {
 		approved.Status.Executor.NodeName != approved.Spec.Target.NodeName || pod.Spec.NodeName != approved.Spec.Target.NodeName {
 		return fmt.Errorf("cleanup executor is not authorized")
 	}
-	job, err := client.BatchV1().Jobs(*namespace).Get(ctx, jobName, metav1.GetOptions{})
+	job, err := client.BatchV1().Jobs(options.namespace).Get(ctx, jobName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("read cleanup executor Job: %w", err)
 	}
@@ -405,7 +441,7 @@ func runCleanup(arguments []string) error {
 	authority := helperauth.CleanupAuthority(cleanups, registry, helperauth.CleanupOptions{
 		Authority: authorityIdentity, Approved: approved, JobName: jobName, JobUID: jobUID, Pod: pod,
 	})
-	localReceipt, digest, err := ownership.ReclaimWithResume(ctx, *root, approved.Spec.Target, approved.Spec.OperationID, authority)
+	localReceipt, digest, err := ownership.ReclaimWithResume(ctx, options.root, approved.Spec.Target, approved.Spec.OperationID, authority)
 	if err != nil {
 		return err
 	}

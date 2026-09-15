@@ -517,6 +517,48 @@ func TestPostcommitRecoveryWaitsForActualDestinationPublicationBeforeSourceClean
 	}
 }
 
+// TestPostcommitScannerPublicationWaitCarriesNoNilCause pins the operator-facing
+// text of the ordinary wait where the destination Pool reads back fine but the
+// scanner has not published the copy yet. That branch has no cause to report,
+// so wrapping a nil error there would surface %!w(<nil>) in the durable
+// recovery message that operators read and grep.
+func TestPostcommitScannerPublicationWaitCarriesNoNilCause(t *testing.T) {
+	r, repo, _ := recoveryFixture(t, "destination")
+	move := repo.moves[0]
+	move.Status.RecoveryOwner, move.Status.RecoveryPhase = "destination", recoveryRetiring
+	repo.moves[0] = move
+	state := repo.volumes[move.Spec.VolumeID]
+	state.Phase = volumeapi.PhaseReady
+	state.PublishedNodes = []string{"destination"}
+	repo.volumes[move.Spec.VolumeID] = state
+
+	destination := *move.Status.DestinationCopy
+	repo.readyPoolsConfigured = true
+	repo.readyPools = []volumeapi.Pool{{
+		Name: destination.PoolName, UID: destination.PoolUID, NodeName: destination.NodeName, MountPath: "/destination",
+		Status: volumeapi.PoolStatus{Inventory: &volumeapi.PoolInventory{
+			Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: false}},
+		}},
+	}}
+
+	err := r.reconcileRecovery(context.Background(), repo.moves[0])
+	if err == nil {
+		t.Fatal("source cleanup started before destination scanner publication proof")
+	}
+	message := repo.moves[0].Status.RecoveryMessage
+	for name, text := range map[string]string{"returned error": err.Error(), "recovery message": message} {
+		if strings.Contains(text, "%!w") || strings.Contains(text, "<nil>") {
+			t.Fatalf("%s formats a nil cause: %q", name, text)
+		}
+		if !strings.Contains(text, "waiting for exact destination scanner publication before source cleanup") {
+			t.Fatalf("%s lost the operator-visible wait prefix: %q", name, text)
+		}
+	}
+	if strings.HasSuffix(message, ":") || strings.HasSuffix(message, ": ") {
+		t.Fatalf("recovery message keeps a dangling cause separator: %q", message)
+	}
+}
+
 func TestRecoveredMoveReleasesFinalizerOnlyAfterCapacitySettlement(t *testing.T) {
 	r, repo, _ := recoveryFixture(t, "source")
 	move := repo.moves[0]
