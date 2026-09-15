@@ -32,16 +32,6 @@ mkdir -p "${ARTIFACT_DIR}"
 
 trap report_error ERR
 
-ssh_node() {
-	local node=$1
-	shift
-	case "${node}" in
-	"${SOURCE_NODE}") ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${SOURCE_SSH_TARGET}" "$@" ;;
-	"${DESTINATION_NODE}") ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${DESTINATION_SSH_TARGET}" "$@" ;;
-	*) echo "unknown soak node: ${node}" >&2; return 1 ;;
-	esac
-}
-
 restore_environment() {
 	local result_code=$? restore_failed=0
 	trap - ERR EXIT INT TERM
@@ -158,7 +148,7 @@ delete_cleanup_pod() {
 }
 
 assert_iteration() {
-	local iteration=$1 move=$2 expected_node=$3 old_node=$4 pod checksum cleanup_phase finalizers old_pool expected_pool
+	local iteration=$1 move=$2 expected_node=$3 old_node=$4 pod checksum cleanup_phase finalizers old_pool expected_pool old_role expected_role
 	k -n "${TEST_NAMESPACE}" rollout status deployment/writer --timeout=600s
 	pod=$(k -n "${TEST_NAMESPACE}" get pod -l app=shiftpv-real-node-soak -o json | jq -r --arg node "${expected_node}" '
 		[.items[]
@@ -185,14 +175,18 @@ assert_iteration() {
 		.status.cleanup.status.executor.jobUID == .status.cleanup.status.receipt.executorUID and
 		(.status.cleanup.status.receipt.localReceiptDigest | test("^[0-9a-f]{64}$"))' >/dev/null
 	if [[ "${old_node}" == "${SOURCE_NODE}" ]]; then
+		old_role=source
+		expected_role=destination
 		old_pool=${SOURCE_POOL}
 		expected_pool=${DESTINATION_POOL}
 	else
+		old_role=destination
+		expected_role=source
 		old_pool=${DESTINATION_POOL}
 		expected_pool=${SOURCE_POOL}
 	fi
-	ssh_node "${old_node}" sudo test ! -e "${old_pool}/volumes/${VOLUME_ID}"
-	ssh_node "${expected_node}" sudo test -f "${expected_pool}/volumes/${VOLUME_ID}/payload"
+	ssh_node "${old_role}" sudo test ! -e "${old_pool}/volumes/${VOLUME_ID}"
+	ssh_node "${expected_role}" sudo test -f "${expected_pool}/volumes/${VOLUME_ID}/payload"
 	k wait shiftpvpool --all --for=condition=Ready --timeout=300s >/dev/null
 	wait_for_pools_current
 	printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -217,65 +211,7 @@ snapshot_non_shiftpv_specs before exact "${TEST_NAMESPACE}"
 capture_evidence before
 
 k cordon "${DESTINATION_NODE}" >/dev/null
-k apply -f - <<EOF
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ${TEST_NAMESPACE}
-  labels:
-    shiftpv.io/admission: enabled
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: data
-  namespace: ${TEST_NAMESPACE}
-spec:
-  accessModes: [ReadWriteOnce]
-  volumeMode: Filesystem
-  storageClassName: ${STORAGE_CLASS}
-  resources:
-    requests:
-      storage: 128Mi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: writer
-  namespace: ${TEST_NAMESPACE}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: shiftpv-real-node-soak
-  template:
-    metadata:
-      labels:
-        app: shiftpv-real-node-soak
-    spec:
-      containers:
-        - name: writer
-          image: ${WORKLOAD_IMAGE}
-          command: [sh, -ec]
-          args:
-            - |
-              if [ ! -f /data/payload ]; then
-                dd if=/dev/zero of=/data/payload bs=1M count=64
-                printf '%s\\n' 'ShiftPV real-node alternating soak' >>/data/payload
-                sync
-              fi
-              sleep 86400
-          readinessProbe:
-            exec:
-              command: [test, -f, /data/payload]
-          volumeMounts:
-            - name: data
-              mountPath: /data
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: data
-EOF
+create_test_workload "${TEST_NAMESPACE}" shiftpv-real-node-soak 128Mi 64 'ShiftPV real-node alternating soak'
 k -n "${TEST_NAMESPACE}" rollout status deployment/writer --timeout=600s
 k -n "${TEST_NAMESPACE}" wait pvc/data --for=jsonpath='{.status.phase}'=Bound --timeout=180s
 pod=$(k -n "${TEST_NAMESPACE}" get pod -l app=shiftpv-real-node-soak -o jsonpath='{.items[0].metadata.name}')

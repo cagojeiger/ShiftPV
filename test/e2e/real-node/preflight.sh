@@ -25,6 +25,9 @@ Optional environment:
   MAX_INVENTORY_AGE_SECONDS=120
   SSH_CONNECT_TIMEOUT=5
   EXPECTED_NON_DAEMONSET_PODS_SHA256=
+  NODE_RUNTIME_STOP_CMD                 used by the fault stages that run this
+  NODE_RUNTIME_START_CMD                preflight; default to the MicroK8s
+  NODE_RUNTIME_JOURNAL_UNIT             runtime, kubelite, and journal unit
 
 The script does not cordon, drain, restart, reboot, power off, create, patch, or
 delete anything. By default it requires a fault node without non-DaemonSet

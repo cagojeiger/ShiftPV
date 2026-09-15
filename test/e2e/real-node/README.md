@@ -67,6 +67,24 @@ journals remain as durable evidence: `Succeeded` requires cleanup `Completed`,
 and recovered `Blocked` requires `RecoverySettled`; both must have no finalizer.
 They do not block later qualification runs.
 
+The MicroK8s commands are defaults, not assumptions baked into the stage. A host
+running another distribution can keep the same fault boundary by overriding the
+optional environment below; the defaults reproduce exactly the commands above.
+
+| Optional environment | Default |
+| --- | --- |
+| `NODE_RUNTIME_STOP_CMD` | `sudo systemctl stop snap.microk8s.daemon-containerd.service snap.microk8s.daemon-kubelite.service` |
+| `NODE_RUNTIME_START_CMD` | `sudo snap start microk8s` |
+| `NODE_RUNTIME_JOURNAL_UNIT` | `snap.microk8s.daemon-kubelite` |
+
+Each value is a command line, not a single argument: it is split on whitespace
+without shell quoting, and glob characters expand on the operator's machine
+before the words are sent over SSH as the reviewed source identity, so keep the
+values to plain words. `NODE_RUNTIME_STOP_CMD` must
+stop the container runtime and the kubelet together, `NODE_RUNTIME_START_CMD`
+must restore both, and `NODE_RUNTIME_JOURNAL_UNIT` names the unit whose journal
+is archived with every evidence capture.
+
 The script never drains the shared node and never edits non-ShiftPV workload
 specs. Those workloads still experience downtime while MicroK8s is stopped. It
 records their UID and specs plus all existing PVCs, PVs, and StorageClasses
