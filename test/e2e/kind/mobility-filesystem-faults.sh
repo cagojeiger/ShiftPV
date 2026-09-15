@@ -6,6 +6,8 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 # shellcheck source=test/e2e/kind/cleanup-journal.sh
 source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
+# shellcheck source=test/e2e/kind/mobility/controller.sh
+source "${ROOT_DIR}/test/e2e/kind/mobility/controller.sh"
 : "${CLUSTER_NAME:?CLUSTER_NAME is required}"
 : "${WORK_DIR:?WORK_DIR is required}"
 : "${WORKER_A_POOL:?WORKER_A_POOL is required}"
@@ -34,24 +36,6 @@ restore_destination_mount() {
 }
 trap restore_destination_mount EXIT
 
-controller_down() {
-	kubectl -n shiftpv-system scale deployment/shiftpv-controller --replicas=0
-	local deadline=$((SECONDS + 120))
-	while ((SECONDS < deadline)); do
-		if [[ -z "$(kubectl -n shiftpv-system get pod -l app.kubernetes.io/component=controller -o name 2>/dev/null)" ]]; then
-			return
-		fi
-		sleep 1
-	done
-	echo 'controller Pod did not stop' >&2
-	return 1
-}
-
-controller_up() {
-	kubectl -n shiftpv-system scale deployment/shiftpv-controller --replicas=1
-	kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=180s
-}
-
 render_workload() {
 	local namespace=$1 payload=$2
 	sed \
@@ -75,7 +59,7 @@ create_source_workload() {
 	VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 	SOURCE_POD=$(kubectl -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
 	test "$(kubectl -n "${namespace}" get "pod/${SOURCE_POD}" -o jsonpath='{.spec.nodeName}')" = "${SOURCE_NODE}"
-	SOURCE_CHECKSUM=$(kubectl -n "${namespace}" exec "${SOURCE_POD}" -- sha256sum /data/payload | awk '{print $1}')
+	SOURCE_CHECKSUM=$(pod_sha256 "${namespace}" "${SOURCE_POD}" /data/payload)
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
 	kubectl uncordon "${DESTINATION_NODE}"
 }
@@ -141,7 +125,7 @@ wait_for_success() {
 	local pod checksum
 	pod=$(kubectl -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
 	test "$(kubectl -n "${namespace}" get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${DESTINATION_NODE}"
-	checksum=$(kubectl -n "${namespace}" exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')
+	checksum=$(pod_sha256 "${namespace}" "${pod}" /data/payload)
 	test "${checksum}" = "${SOURCE_CHECKSUM}"
 	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(kubectl -n "${namespace}" get pvc/data -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"

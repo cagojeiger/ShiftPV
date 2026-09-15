@@ -9,6 +9,9 @@ NODE_IMAGE ?= shiftpv-node:$(NODE_VERSION)
 IMAGE ?= shiftpv:dev
 COVERAGE_MIN ?= 80
 COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/lifecycle/... ./src/metrics/... ./src/mobility/... ./src/node/... ./src/pool/... ./src/volume/... ./src/webhook/... ./test/...
+# Every shell script under build/ and test/ is linted; shellcheck picks each
+# file's dialect from its own shebang.
+SHELL_SCRIPTS := $(shell find build test -type f -name '*.sh' | LC_ALL=C sort)
 
 verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template v04-model
 
@@ -73,8 +76,8 @@ release-workflow-test:
 	./test/release/validate-artifact-lock.sh
 
 shellcheck:
-	shellcheck build/ci/wait-for-chart-images.sh test/release/fixtures/fake-docker.sh test/release/wait-for-chart-images.sh test/release/validate-artifact-lock.sh test/e2e/kind/node-path.sh test/e2e/kind/run.sh test/e2e/kind/directory-pool.sh test/e2e/kind/pool-capacity.sh test/e2e/kind/filesystem-faults.sh test/e2e/kind/cleanup-journal.sh test/e2e/kind/orphan-cleanup.sh test/e2e/kind/volume-delete-cleanup.sh test/e2e/kind/cleanup-job-retry.sh test/e2e/kind/mobility-filesystem-faults.sh test/e2e/kind/mobility-node-restarts.sh test/e2e/kind/mobility/run.sh test/e2e/kind/mobility/recovery.sh test/e2e/kind/mobility/fault-helper.sh test/e2e/kind/mobility/preflight.sh test/e2e/kind/mobility/cleanup-lifecycle.sh test/e2e/kind/mobility/completion.sh test/e2e/kind/mobility/terminal-journal-gc.sh test/e2e/kind/metrics/check.sh test/e2e/kind/artifact/run.sh test/e2e/kind/artifact/validate-lock.sh test/e2e/kind/argocd/run.sh test/e2e/real-node/preflight.sh test/e2e/real-node/service-interruption.sh test/e2e/real-node/soak.sh test/helm/dashboard/run.sh test/integration/linux-mount/run.sh
-	shellcheck test/model/kubernetes-primitives.sh test/model/filesystem-primitives.sh
+	@test -n "$(SHELL_SCRIPTS)" || { echo 'no shell scripts were discovered under build/ or test/'; exit 1; }
+	shellcheck $(SHELL_SCRIPTS)
 
 actionlint:
 	@if command -v actionlint >/dev/null 2>&1; then \

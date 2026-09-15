@@ -39,6 +39,10 @@ if [[ ${1:-} == --help || ${1:-} == -h ]]; then
 	exit 0
 fi
 
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# shellcheck source=test/e2e/real-node/lib.sh
+source "${ROOT_DIR}/test/e2e/real-node/lib.sh"
+
 SYSTEM_NAMESPACE=${SYSTEM_NAMESPACE:-shiftpv-system}
 CONTROLLER_DEPLOYMENT=${CONTROLLER_DEPLOYMENT:-shiftpv-controller}
 NODE_DAEMONSET=${NODE_DAEMONSET:-shiftpv-node}
@@ -92,10 +96,6 @@ case ${EXPECTED_NODE_IMAGE} in
 *@sha256:*) pass 'node image expectation is immutable' ;;
 *) block 'EXPECTED_NODE_IMAGE must contain @sha256:' ;;
 esac
-
-k() {
-	kubectl --context "${KUBECTL_CONTEXT}" --request-timeout=30s "$@"
-}
 
 if ! cluster_json=$(k get nodes -o json 2>/dev/null); then
 	block "cannot read nodes through context ${KUBECTL_CONTEXT}"

@@ -43,3 +43,10 @@ node_sha256() {
 	local node=$1 path=$2
 	docker exec "${node}" sha256sum "${path}" | awk '{print $1}'
 }
+
+# The workload-side counterpart of node_sha256: read the payload through the
+# consumer Pod so the assertion exercises the published mount.
+pod_sha256() {
+	local namespace=$1 pod=$2 path=$3
+	kubectl -n "${namespace}" exec "${pod}" -- sha256sum "${path}" | awk '{print $1}'
+}

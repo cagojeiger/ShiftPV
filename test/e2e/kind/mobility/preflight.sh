@@ -25,7 +25,7 @@ assert_preflight_preserves_consumer() {
 		test -z "$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${volume}')].metadata.name}")"
 		sleep 2
 	done
-	test "$(kubectl -n shiftpv-mobility-blocked exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${checksum}"
+	test "$(pod_sha256 shiftpv-mobility-blocked "${pod}" /data/payload)" = "${checksum}"
 	kubectl -n shiftpv-mobility-blocked exec "${pod}" -- sh -ec 'printf "preflight still writable\n" > /data/probe; test -s /data/probe'
 	echo "preflight ${scenario} passed: same Pod UID=${uid}, Ready volume=${volume}, no move, data writable"
 }
@@ -83,7 +83,7 @@ test_preflight() {
 		uid=$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath='{.metadata.uid}')
 		pv=$(kubectl -n shiftpv-mobility-blocked get pvc/source-only -o jsonpath='{.spec.volumeName}')
 		volume=$(kubectl get "pv/${pv}" -o jsonpath='{.spec.csi.volumeHandle}')
-		checksum=$(kubectl -n shiftpv-mobility-blocked exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')
+		checksum=$(pod_sha256 shiftpv-mobility-blocked "${pod}" /data/payload)
 		kubectl uncordon "${CLUSTER_NAME}-worker2"
 		kubectl cordon "${CLUSTER_NAME}-worker"
 		assert_preflight_preserves_consumer "${scenario}" "${pod}" "${uid}" "${volume}" "${checksum}"
@@ -107,7 +107,7 @@ test_preflight() {
 			assert_move_diagnostics "${move}" Succeeded '' MobilitySucceeded
 			kubectl -n shiftpv-mobility-blocked rollout status deployment/source-only --timeout=180s
 			pod=$(kubectl -n shiftpv-mobility-blocked get pod -l app=shiftpv-mobility-source-only -o jsonpath='{.items[0].metadata.name}')
-			test "$(kubectl -n shiftpv-mobility-blocked exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${checksum}"
+			test "$(pod_sha256 shiftpv-mobility-blocked "${pod}" /data/payload)" = "${checksum}"
 			test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.ownerNode}')" = "${CLUSTER_NAME}-worker2"
 			echo 'preflight PDB removal passed: deferred volume migrated automatically with same data'
 		fi

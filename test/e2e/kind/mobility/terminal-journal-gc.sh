@@ -31,7 +31,7 @@ verify_terminal_move_journal_gc() {
 	test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.phase}')" = Ready
 	test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.ownerNode}')" = "${owner_node}"
 	test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.activeMove}')" = ""
-	test "$(kubectl -n shiftpv-mobility-test exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')" = "${expected_checksum}"
+	test "$(pod_sha256 shiftpv-mobility-test "${pod}" /data/payload)" = "${expected_checksum}"
 	assert_node_file "${owner_node}" "${owner_root}/volumes/${volume}/payload"
 	echo "terminal Move journal GC passed: metadata ${move}/${move_uid} deleted; serving copy and checksum retained"
 }

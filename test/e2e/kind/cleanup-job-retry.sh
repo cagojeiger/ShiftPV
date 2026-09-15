@@ -121,7 +121,7 @@ kubectl -n "${NAMESPACE}" exec "${SOURCE_POD}" -- sh -ec '
 	done
 	sync
 '
-SOURCE_CHECKSUM=$(kubectl -n "${NAMESPACE}" exec "${SOURCE_POD}" -- sha256sum /data/payload | awk '{print $1}')
+SOURCE_CHECKSUM=$(pod_sha256 "${NAMESPACE}" "${SOURCE_POD}" /data/payload)
 
 kubectl uncordon "${DESTINATION_NODE}"
 kubectl cordon "${SOURCE_NODE}"
@@ -195,7 +195,7 @@ DESTINATION_POD=$(kubectl -n "${NAMESPACE}" get pod -l "app=${NAMESPACE}" \
 	--field-selector "spec.nodeName=${DESTINATION_NODE}" -o jsonpath='{.items[0].metadata.name}')
 test -n "${DESTINATION_POD}"
 kubectl -n "${NAMESPACE}" wait --for=condition=Ready "pod/${DESTINATION_POD}" --timeout=120s
-test "$(kubectl -n "${NAMESPACE}" exec "${DESTINATION_POD}" -- sha256sum /data/payload | awk '{print $1}')" = "${SOURCE_CHECKSUM}"
+test "$(pod_sha256 "${NAMESPACE}" "${DESTINATION_POD}" /data/payload)" = "${SOURCE_CHECKSUM}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${DESTINATION_NODE}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
 assert_node_absent "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}"
