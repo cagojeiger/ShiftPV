@@ -29,58 +29,18 @@ func (r *Reconciler) settleRecoveryArtifacts(ctx context.Context, move *volumeap
 		}
 		return true, nil
 	}
+	var settled bool
+	var err error
 	switch state.OwnerNode {
 	case move.Spec.SourceNode:
-		if state.Phase != volumeapi.PhaseBlocked || state.ActiveMove != move.Name || state.CurrentCopy == nil ||
-			state.CurrentCopy.Validate() != nil || state.CurrentCopy.Role != volume.RoleServing ||
-			state.CurrentCopy.NodeName != move.Spec.SourceNode || state.CurrentCopy.VolumeID != move.Spec.VolumeID || state.CurrentCopy.VolumeUID != state.UID {
-			return false, needsRecoveryCleanupReview("precommit source authority is incomplete")
-		}
-		if noDestinationEffectIntent(*move) {
-			if move.Status.CapacityApproved {
-				return false, needsRecoveryCleanupReview("approved destination hold has no exact artifact identities")
-			}
-			break
-		}
-		if move.Status.SourceCopy == nil || *state.CurrentCopy != *move.Status.SourceCopy {
-			return false, needsRecoveryCleanupReview("recorded source identity differs from current authority")
-		}
-		target, present, err := r.rollbackArtifact(ctx, *move)
-		if err != nil {
-			return false, err
-		}
-		if present {
-			spec := cleanupapi.Spec{
-				OperationID: volumeapi.MoveRollbackOperationID(move.UID),
-				Target:      target,
-				Reason:      "MoveRollback",
-				Authority:   cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID},
-			}
-			complete, err := r.ensureRecoveryCleanup(ctx, *move, spec)
-			if err != nil || !complete {
-				return false, err
-			}
-		}
+		settled, err = r.settleSourceRollback(ctx, move, state)
 	case move.Status.DestinationNode:
-		if state.Phase != volumeapi.PhaseReady || state.ActiveMove != move.Name || move.Status.DestinationCopy == nil ||
-			state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.DestinationCopy || state.UID != move.Status.DestinationCopy.VolumeUID ||
-			!slices.Contains(state.PublishedNodes, move.Status.DestinationNode) || slices.Contains(state.PublishedNodes, move.Spec.SourceNode) {
-			return false, fmt.Errorf("waiting for exact destination publication before source cleanup")
-		}
-		destinationPool, err := r.Repository.ReadyPoolForNode(ctx, move.Status.DestinationNode)
-		if err != nil || !volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy) {
-			return false, fmt.Errorf("waiting for exact destination scanner publication before source cleanup: %w", err)
-		}
-		spec, err := moveCleanupSpec(*move)
-		if err != nil {
-			return false, needsRecoveryCleanupReview("postcommit cleanup identity is incomplete: %v", err)
-		}
-		complete, err := r.ensureRecoveryCleanup(ctx, *move, spec)
-		if err != nil || !complete {
-			return false, err
-		}
+		settled, err = r.settleDestinationCleanup(ctx, move, state)
 	default:
 		return false, needsRecoveryCleanupReview("authoritative owner is neither the source nor recorded destination")
+	}
+	if err != nil || !settled {
+		return false, err
 	}
 
 	previous := move.Status
@@ -94,22 +54,99 @@ func (r *Reconciler) settleRecoveryArtifacts(ctx context.Context, move *volumeap
 	return false, nil
 }
 
+// settleSourceRollback settles precommit recovery, where the source is still
+// authoritative. It proves the exact source authority the abort returns to and
+// then rolls back the one destination transaction artifact, if any was ever
+// written. It reports whether the hold may now be released.
+func (r *Reconciler) settleSourceRollback(ctx context.Context, move *volumeapi.Move, state volumeapi.State) (bool, error) {
+	if state.Phase != volumeapi.PhaseBlocked || state.ActiveMove != move.Name || state.CurrentCopy == nil ||
+		state.CurrentCopy.Validate() != nil || state.CurrentCopy.Role != volume.RoleServing ||
+		state.CurrentCopy.NodeName != move.Spec.SourceNode || state.CurrentCopy.VolumeID != move.Spec.VolumeID || state.CurrentCopy.VolumeUID != state.UID {
+		return false, needsRecoveryCleanupReview("precommit source authority is incomplete")
+	}
+	if noDestinationEffectIntent(*move) {
+		if move.Status.CapacityApproved {
+			return false, needsRecoveryCleanupReview("approved destination hold has no exact artifact identities")
+		}
+		return true, nil
+	}
+	if move.Status.SourceCopy == nil || *state.CurrentCopy != *move.Status.SourceCopy {
+		return false, needsRecoveryCleanupReview("recorded source identity differs from current authority")
+	}
+	target, present, err := r.rollbackArtifact(ctx, *move)
+	if err != nil {
+		return false, err
+	}
+	if !present {
+		return true, nil
+	}
+	spec := cleanupapi.Spec{
+		OperationID: volumeapi.MoveRollbackOperationID(move.UID),
+		Target:      target,
+		Reason:      "MoveRollback",
+		Authority:   cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID},
+	}
+	complete, err := r.ensureRecoveryCleanup(ctx, *move, spec)
+	if err != nil || !complete {
+		return false, err
+	}
+	return true, nil
+}
+
+// settleDestinationCleanup settles postcommit recovery, where the destination
+// is authoritative and recovery only converges forward. Actual destination
+// publication must be proven by both the Volume state and a Ready Pool scan
+// before the ordinary retained-source cleanup may run. It reports whether the
+// hold may now be released.
+func (r *Reconciler) settleDestinationCleanup(ctx context.Context, move *volumeapi.Move, state volumeapi.State) (bool, error) {
+	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != move.Name || move.Status.DestinationCopy == nil ||
+		state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.DestinationCopy || state.UID != move.Status.DestinationCopy.VolumeUID ||
+		!slices.Contains(state.PublishedNodes, move.Status.DestinationNode) || slices.Contains(state.PublishedNodes, move.Spec.SourceNode) {
+		return false, fmt.Errorf("waiting for exact destination publication before source cleanup")
+	}
+	destinationPool, err := r.Repository.ReadyPoolForNode(ctx, move.Status.DestinationNode)
+	if err != nil || !volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy) {
+		return false, fmt.Errorf("waiting for exact destination scanner publication before source cleanup: %w", err)
+	}
+	spec, err := moveCleanupSpec(*move)
+	if err != nil {
+		return false, needsRecoveryCleanupReview("postcommit cleanup identity is incomplete: %v", err)
+	}
+	complete, err := r.ensureRecoveryCleanup(ctx, *move, spec)
+	if err != nil || !complete {
+		return false, err
+	}
+	return true, nil
+}
+
 // rollbackArtifact returns the only exact destination transaction artifact
 // visible in an inventory collected strictly after entry into Retiring. A
 // valid, complete inventory containing neither identity proves that no cleanup
 // effect is required. Any conflicting or problem observation stays untouched.
 func (r *Reconciler) rollbackArtifact(ctx context.Context, move volumeapi.Move) (volume.CopyIdentity, bool, error) {
+	destination, err := r.rollbackInventoryPool(ctx, move)
+	if err != nil {
+		return volume.CopyIdentity{}, false, err
+	}
+	return rollbackPresentArtifact(move, destination)
+}
+
+// rollbackInventoryPool resolves the one registered destination Pool whose
+// identity still matches the approved hold and whose inventory is a fresh,
+// complete observation collected strictly after entry into Retiring. Nothing
+// here inspects copies: it only decides which observation may be trusted.
+func (r *Reconciler) rollbackInventoryPool(ctx context.Context, move volumeapi.Move) (*volumeapi.Pool, error) {
 	if err := validRollbackIntent(move); err != nil {
-		return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination cleanup intent is incomplete: %v", err)
+		return nil, needsRecoveryCleanupReview("destination cleanup intent is incomplete: %v", err)
 	}
 
 	transitionedAt, err := time.Parse(time.RFC3339Nano, move.Status.LastTransitionTime)
 	if err != nil {
-		return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("Retiring transition time is invalid")
+		return nil, needsRecoveryCleanupReview("Retiring transition time is invalid")
 	}
 	pools, err := r.Repository.Pools(ctx)
 	if err != nil {
-		return volume.CopyIdentity{}, false, err
+		return nil, err
 	}
 	var destination *volumeapi.Pool
 	for index := range pools {
@@ -118,16 +155,16 @@ func (r *Reconciler) rollbackArtifact(ctx context.Context, move volumeapi.Move) 
 			continue
 		}
 		if destination != nil {
-			return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("multiple destination Pools are registered")
+			return nil, needsRecoveryCleanupReview("multiple destination Pools are registered")
 		}
 		destination = pool
 	}
 	if destination == nil || destination.Name != move.Status.IncomingCopy.PoolName || destination.UID != move.Status.DestinationPoolUID ||
 		destination.UID != move.Status.IncomingCopy.PoolUID || destination.UID != move.Status.DestinationCopy.PoolUID {
-		return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination Pool identity changed")
+		return nil, needsRecoveryCleanupReview("destination Pool identity changed")
 	}
 	if !slices.Contains(destination.Finalizers, volumeapi.PoolProtectionFinalizer) {
-		return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination Pool lacks lifecycle protection")
+		return nil, needsRecoveryCleanupReview("destination Pool lacks lifecycle protection")
 	}
 
 	now := r.now()
@@ -136,14 +173,21 @@ func (r *Reconciler) rollbackArtifact(ctx context.Context, move volumeapi.Move) 
 		staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 	}
 	if ready, reason := destination.CleanupReadyAt(now, staleAfter); !ready {
-		return volume.CopyIdentity{}, false, fmt.Errorf("destination Pool is not cleanup-ready: %s", reason)
+		return nil, fmt.Errorf("destination Pool is not cleanup-ready: %s", reason)
 	}
 	inventory := destination.Status.Inventory
 	if inventory == nil || !inventory.Valid || inventory.Truncated || inventory.Message != "" ||
 		inventory.ObservedAt.IsZero() || !inventory.ObservedAt.Time.After(transitionedAt) || now.Before(inventory.ObservedAt.Time) || now.Sub(inventory.ObservedAt.Time) > staleAfter {
-		return volume.CopyIdentity{}, false, fmt.Errorf("waiting for a fresh complete destination inventory collected after Retiring")
+		return nil, fmt.Errorf("waiting for a fresh complete destination inventory collected after Retiring")
 	}
+	return destination, nil
+}
 
+// rollbackPresentArtifact decides which exact transaction artifact, if any, the
+// trusted inventory still shows on the destination. Anything ambiguous,
+// conflicting, or already published keeps its data and goes to review instead.
+func rollbackPresentArtifact(move volumeapi.Move, destination *volumeapi.Pool) (volume.CopyIdentity, bool, error) {
+	inventory := destination.Status.Inventory
 	incomingPresent, destinationPresent := false, false
 	for _, observed := range inventory.Copies {
 		if observed.Problem != "" {
