@@ -1,8 +1,8 @@
 # ShiftPV 0.4 Contracts
 
-이 디렉터리는 0.4 구현과 운영 승인에 사용하는 normative contract다. 현재 checkout의 구현 후보가 이
-계약을 따르고 실제 node의 unclean OS reboot와 100회·12시간 soak를 통과했지만, 별도 release 전에는
-released runtime이 아니다.
+이 디렉터리는 0.4 구현과 운영 승인에 사용하는 normative contract다. 0.4.0 runtime은 이 계약을 따르고
+실제 node의 unclean OS reboot와 100회·12시간 soak를 통과했으며, 아래의 명시된 product boundary 안에서
+사용한다.
 
 | 문서 | 단일 책임 |
 |---|---|

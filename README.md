@@ -3,8 +3,8 @@
 ShiftPV는 기존 Linux filesystem 위의 node-local directory를 Kubernetes RWO PVC로 제공하고,
 계획된 cold move를 통해 살아 있는 두 node 사이에서 owner를 옮기는 CSI driver다.
 
-> **0.4 contract status:** 이 checkout에는 repository gate, 실제 node의 unclean OS reboot 경계 시험,
-> 100회·12시간 soak를 통과한 0.4 구현 후보가 들어 있다. 별도 release 전에는 released runtime이 아니다.
+> **0.4 contract status:** 0.4.0 runtime은 repository gate, 실제 node의 unclean OS reboot 경계 시험,
+> 100회·12시간 soak를 통과했으며 아래의 명시된 product boundary 안에서 사용한다.
 
 ## Architecture
 
