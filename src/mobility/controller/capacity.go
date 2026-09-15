@@ -2,10 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
-
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
@@ -63,13 +62,12 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 
 func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current volumeapi.Move, pool volumeapi.Pool) (requested, logicalReserved, physicalPending, limit int64, err error) {
 	destination := pool.NodeName
-	quantity, err := resource.ParseQuantity(pool.CapacityLimit)
+	limit, err = poolcapacity.LimitBytes(pool)
 	if err != nil {
+		if errors.Is(err, poolcapacity.ErrLimitInexact) || errors.Is(err, poolcapacity.ErrLimitNotPositive) {
+			return 0, 0, 0, 0, fmt.Errorf("destination Pool capacity limit must be positive bytes")
+		}
 		return 0, 0, 0, 0, fmt.Errorf("parse destination Pool capacity limit: %w", err)
-	}
-	limit, exact := quantity.AsInt64()
-	if !exact || limit <= 0 {
-		return 0, 0, 0, 0, fmt.Errorf("destination Pool capacity limit must be positive bytes")
 	}
 
 	volumes, err := r.Repository.ListVolumes(ctx)

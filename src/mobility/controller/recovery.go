@@ -166,8 +166,7 @@ func (r *Reconciler) recoveryClaim(ctx context.Context, move volumeapi.Move) (*c
 	if err != nil {
 		return nil, err
 	}
-	ref := pv.Spec.ClaimRef
-	if pv.DeletionTimestamp != nil || claim.DeletionTimestamp != nil || pv.Spec.CSI == nil || pv.Spec.CSI.Driver != admission.DriverName || pv.Spec.CSI.VolumeHandle != move.Spec.VolumeID || ref == nil || ref.Namespace != claim.Namespace || ref.Name != claim.Name || ref.UID == "" || ref.UID != claim.UID || claim.Spec.VolumeName != pv.Name {
+	if !validBinding(pv, claim, move.Spec.VolumeID) {
 		return nil, fmt.Errorf("PV/PVC binding or volume handle changed")
 	}
 	namespace, err := r.Client.CoreV1().Namespaces().Get(ctx, claim.Namespace, metav1.GetOptions{})

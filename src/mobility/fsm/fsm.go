@@ -91,11 +91,14 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		return transition(current, current, ActionWait, "CompletionAuthorityMismatch")
 	}
 	if observation.SourceAuthorityInvalid {
-		return blocked(reasonOr(observation.UnsafeReason, "SourceAuthorityInvalid")), nil
+		return blockedWith(observation, "SourceAuthorityInvalid"), nil
 	}
 	if beforeCommit(current) && !observation.OwnerCommitted && !observation.SourceHealthy {
-		return blocked(reasonOr(observation.UnsafeReason, "SourceUnavailable")), nil
+		return blockedWith(observation, "SourceUnavailable"), nil
 	}
+	// A related but looser pre-eviction window is derived from Move status by
+	// preEviction in src/mobility/controller/preflight.go; they are not the same
+	// predicate, so do not unify them blindly.
 	if observation.PreflightDeferred && (current == PhasePending || current == PhaseLocking ||
 		(current == PhaseEvicting && !observation.EvictionRequested)) {
 		return transition(current, current, ActionWait, observation.UnsafeReason)
@@ -130,18 +133,21 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "")
 		}
 		if !observation.ReplacementHeld {
-			return blocked(reasonOr(observation.UnsafeReason, "PlacementHoldLost")), nil
+			return blockedWith(observation, "PlacementHoldLost"), nil
 		}
 		return transition(current, PhaseWaitingForDestination, ActionEnsurePlacement, "")
 	case PhaseWaitingForDestination:
+		// Intentionally not destinationGuard: no placement exists yet, so an
+		// unavailable destination is not a wait condition here and a blocked one
+		// reports DestinationUnavailable rather than InvalidDestination.
 		if observation.DestinationBlocked {
-			return blocked(reasonOr(observation.UnsafeReason, "DestinationUnavailable")), nil
+			return blockedWith(observation, "DestinationUnavailable"), nil
 		}
 		if !observation.ReplacementExists {
 			return transition(current, current, ActionWait, "")
 		}
 		if !observation.ReplacementHeld {
-			return blocked(reasonOr(observation.UnsafeReason, "PlacementHoldLost")), nil
+			return blockedWith(observation, "PlacementHoldLost"), nil
 		}
 		if !observation.DestinationScheduled {
 			return transition(current, current, ActionEnsurePlacement, "")
@@ -151,48 +157,39 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		}
 		return transition(current, PhaseWaitingForCapacity, ActionEnsureCapacity, "")
 	case PhaseWaitingForCapacity:
-		if observation.DestinationUnavailable {
-			return transition(current, current, ActionWait, "DestinationUnavailable")
-		}
-		if observation.DestinationBlocked {
-			return blocked(reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+		if decision, guarded, err := destinationGuard(current, observation); guarded {
+			return decision, err
 		}
 		if observation.CapacityBlocked {
-			return blocked(reasonOr(observation.UnsafeReason, "DestinationCapacityInsufficient")), nil
+			return blockedWith(observation, "DestinationCapacityInsufficient"), nil
 		}
 		if observation.CapacityApproved {
 			return transition(current, PhaseCopying, ActionEnsureCopy, "")
 		}
 		return transition(current, current, ActionEnsureCapacity, "")
 	case PhaseCopying:
-		if observation.DestinationUnavailable {
-			return transition(current, current, ActionWait, "DestinationUnavailable")
-		}
-		if observation.DestinationBlocked {
-			return blocked(reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+		if decision, guarded, err := destinationGuard(current, observation); guarded {
+			return decision, err
 		}
 		if observation.CopyFailed {
-			return blocked(reasonOr(observation.UnsafeReason, "CopyFailed")), nil
+			return blockedWith(observation, "CopyFailed"), nil
 		}
-		if !observation.PlacementExists || !observation.DestinationScheduled {
-			return transition(current, current, ActionEnsurePlacement, "")
+		if decision, guarded, err := placementGuard(current, observation); guarded {
+			return decision, err
 		}
 		if observation.CopyComplete {
 			return transition(current, PhasePromoting, ActionEnsurePromotion, "")
 		}
 		return transition(current, current, ActionEnsureCopy, "")
 	case PhasePromoting:
-		if observation.DestinationUnavailable {
-			return transition(current, current, ActionWait, "DestinationUnavailable")
-		}
-		if observation.DestinationBlocked {
-			return blocked(reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
+		if decision, guarded, err := destinationGuard(current, observation); guarded {
+			return decision, err
 		}
 		if observation.PromotionFailed {
-			return blocked(reasonOr(observation.UnsafeReason, "PromotionFailed")), nil
+			return blockedWith(observation, "PromotionFailed"), nil
 		}
-		if !observation.PlacementExists || !observation.DestinationScheduled {
-			return transition(current, current, ActionEnsurePlacement, "")
+		if decision, guarded, err := placementGuard(current, observation); guarded {
+			return decision, err
 		}
 		if observation.PromotionComplete {
 			return transition(current, PhaseCommitting, ActionCommitOwner, "")
@@ -200,19 +197,18 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		return transition(current, current, ActionEnsurePromotion, "")
 	case PhaseCommitting:
 		if observation.OwnerCommitted {
+			// Authority already moved, so a blocked destination can no longer
+			// invalidate it; only an unavailable one delays releasing the hold.
 			if observation.DestinationUnavailable {
 				return transition(current, current, ActionWait, "DestinationUnavailable")
 			}
 			return transition(current, PhaseReleasingDestination, ActionDeletePlacement, "")
 		}
-		if observation.DestinationUnavailable {
-			return transition(current, current, ActionWait, "DestinationUnavailable")
+		if decision, guarded, err := destinationGuard(current, observation); guarded {
+			return decision, err
 		}
-		if observation.DestinationBlocked {
-			return blocked(reasonOr(observation.UnsafeReason, "InvalidDestination")), nil
-		}
-		if !observation.PlacementExists || !observation.DestinationScheduled {
-			return transition(current, current, ActionEnsurePlacement, "")
+		if decision, guarded, err := placementGuard(current, observation); guarded {
+			return decision, err
 		}
 		return transition(current, current, ActionCommitOwner, "")
 	case PhaseReleasingDestination:
@@ -228,7 +224,7 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 		return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
 	case PhaseWaitingForDestinationPublish:
 		if observation.CleanupFailed {
-			return blocked(reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
+			return blockedWith(observation, "CleanupFailed"), nil
 		}
 		if observation.DestinationUnavailable {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
@@ -242,7 +238,7 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 			return transition(current, current, ActionWait, "DestinationUnavailable")
 		}
 		if observation.CleanupFailed {
-			return blocked(reasonOr(observation.UnsafeReason, "CleanupFailed")), nil
+			return blockedWith(observation, "CleanupFailed"), nil
 		}
 		if observation.CleanupComplete {
 			return transition(current, PhaseCompleting, ActionConfirmCleanup, "")
@@ -294,8 +290,39 @@ func transition(from, to Phase, action Action, reason string) (Decision, error) 
 	return Decision{Next: to, Action: action, Reason: reason}, nil
 }
 
+// destinationGuard is the prelude shared by every phase that still depends on a
+// live destination while source authority is unchanged: an unavailable
+// destination only pauses the transaction, a blocked one fails it closed. It
+// reports whether it owns the decision so callers keep their phase-specific
+// checks in their original order around it.
+func destinationGuard(current Phase, observation Observation) (Decision, bool, error) {
+	if observation.DestinationUnavailable {
+		decision, err := transition(current, current, ActionWait, "DestinationUnavailable")
+		return decision, true, err
+	}
+	if observation.DestinationBlocked {
+		return blockedWith(observation, "InvalidDestination"), true, nil
+	}
+	return Decision{}, false, nil
+}
+
+// placementGuard re-drives the reservation Pod whenever a phase that needs a
+// scheduled destination has lost it.
+func placementGuard(current Phase, observation Observation) (Decision, bool, error) {
+	if !observation.PlacementExists || !observation.DestinationScheduled {
+		decision, err := transition(current, current, ActionEnsurePlacement, "")
+		return decision, true, err
+	}
+	return Decision{}, false, nil
+}
+
 func blocked(reason string) Decision {
 	return Decision{Next: PhaseBlocked, Action: ActionMarkBlocked, Reason: reason}
+}
+
+// blockedWith prefers the observation's own diagnosis over the phase fallback.
+func blockedWith(observation Observation, fallback string) Decision {
+	return blocked(reasonOr(observation.UnsafeReason, fallback))
 }
 
 func known(phase Phase) bool {

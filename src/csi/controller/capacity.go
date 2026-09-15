@@ -8,7 +8,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
@@ -115,18 +114,7 @@ func poolLimitBytes(pool volumeapi.Pool) (int64, error) {
 	if pool.CapacityLimit == "" {
 		return 0, fmt.Errorf("spec.capacity.limit is required")
 	}
-	quantity, err := resource.ParseQuantity(pool.CapacityLimit)
-	if err != nil {
-		return 0, err
-	}
-	value, exact := quantity.AsInt64()
-	if !exact {
-		return 0, fmt.Errorf("value cannot be represented as bytes")
-	}
-	if value <= 0 {
-		return 0, fmt.Errorf("value must be greater than zero")
-	}
-	return value, nil
+	return poolcapacity.LimitBytes(pool)
 }
 
 func validateCreateIntent(existing volumeapi.State, requestName, nodeName string, capacityBytes int64) error {
