@@ -27,7 +27,11 @@ func main() {
 	timeout := flag.Duration("timeout", 90*time.Second, "maximum Kubernetes inspection time")
 	retry := flag.Bool("retry", false, "keep retrying quiesced inspection until teardown is safe")
 	retryInterval := flag.Duration("retry-interval", 5*time.Second, "delay between retry attempts")
+	poolReadinessStaleAfter := flag.Duration("pool-readiness-stale-after", volumeapi.DefaultPoolReadinessStaleAfter, "maximum age of a successful node Pool readiness probe")
 	flag.Parse()
+	if *poolReadinessStaleAfter <= 0 {
+		deny("parse flags", fmt.Errorf("pool readiness stale duration must be positive"))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -47,10 +51,11 @@ func main() {
 
 	checker := &uninstallcheck.Checker{
 		Client:           client,
-		Volumes:          &volumeapi.Registry{Client: dynamicClient},
+		Volumes:          &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter},
 		Cleanups:         &cleanupapi.Store{Client: dynamicClient},
 		StorageClassName: *storageClassName,
 		Namespace:        *permitNamespace,
+		InventoryMaxAge:  *poolReadinessStaleAfter,
 	}
 	permit := &uninstallcheck.PermitStore{Client: client, Namespace: *permitNamespace, Name: *permitName, CSIDriver: uninstallcheck.DriverName}
 	var runErr error

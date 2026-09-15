@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -67,8 +66,11 @@ func runServeSource(arguments []string) error {
 	}
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	move, err := registry.GetMove(context.Background(), options.moveName)
-	if err != nil || move.UID != options.moveUID || move.Status.SourceCopy == nil || move.Status.CopyOperationID != options.operationID {
-		return fmt.Errorf("source service intent identity changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	if err != nil {
+		return fmt.Errorf("read source service Move: %w", err)
+	}
+	if move.UID != options.moveUID || move.Status.SourceCopy == nil || move.Status.CopyOperationID != options.operationID {
+		return fmt.Errorf("source service intent identity changed: %w", volumeapi.ErrStateConflict)
 	}
 	identity := *move.Status.SourceCopy
 	authority := sourceAuthority(client, registry, options, identity)
@@ -92,26 +94,41 @@ func runServeSource(arguments []string) error {
 func sourceAuthority(client kubernetes.Interface, registry *volumeapi.Registry, options moveOptions, identity volume.CopyIdentity) func(context.Context) error {
 	return func(ctx context.Context) error {
 		move, err := registry.GetMove(ctx, options.moveName)
-		if err != nil || move.UID != options.moveUID || move.Status.SourceCopy == nil || *move.Status.SourceCopy != identity ||
+		if err != nil {
+			return fmt.Errorf("read source service Move: %w", err)
+		}
+		if move.UID != options.moveUID || move.Status.SourceCopy == nil || *move.Status.SourceCopy != identity ||
 			move.Status.CopyOperationID != options.operationID || (move.Status.Phase != "WaitingForCapacity" && move.Status.Phase != "Copying") {
-			return fmt.Errorf("source service authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+			return fmt.Errorf("source service authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		installationID, err := registry.InstallationID(ctx)
-		if err != nil || installationID != identity.InstallationID {
-			return fmt.Errorf("source installation authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read source installation identity: %w", err)
+		}
+		if installationID != identity.InstallationID {
+			return fmt.Errorf("source installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		pool, err := registry.PoolForNode(ctx, identity.NodeName)
-		if err != nil || pool.Name != identity.PoolName || pool.UID != identity.PoolUID {
-			return fmt.Errorf("source Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read source Pool: %w", err)
+		}
+		if pool.Name != identity.PoolName || pool.UID != identity.PoolUID {
+			return fmt.Errorf("source Pool authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		state, err := registry.Get(ctx, identity.VolumeID)
-		if err != nil || state.UID != identity.VolumeUID || state.Phase != volumeapi.PhaseMoving || state.ActiveMove != move.Name ||
+		if err != nil {
+			return fmt.Errorf("read source volume state: %w", err)
+		}
+		if state.UID != identity.VolumeUID || state.Phase != volumeapi.PhaseMoving || state.ActiveMove != move.Name ||
 			state.OwnerNode != identity.NodeName || state.CurrentCopy == nil || *state.CurrentCopy != identity || containsString(state.PublishedNodes, identity.NodeName) {
-			return fmt.Errorf("source volume authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+			return fmt.Errorf("source volume authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		pod, err := client.CoreV1().Pods(options.namespace).Get(ctx, os.Getenv("POD_NAME"), metav1.GetOptions{})
-		if err != nil || pod.UID == "" || pod.DeletionTimestamp != nil || pod.Spec.NodeName != identity.NodeName || pod.Labels["shiftpv.io/move-uid"] != move.UID {
-			return fmt.Errorf("source executor authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read source executor Pod: %w", err)
+		}
+		if pod.UID == "" || pod.DeletionTimestamp != nil || pod.Spec.NodeName != identity.NodeName || pod.Labels["shiftpv.io/move-uid"] != move.UID {
+			return fmt.Errorf("source executor authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		for _, owner := range pod.OwnerReferences {
 			if owner.Controller != nil && *owner.Controller && owner.APIVersion == "shiftpv.io/v1alpha1" && owner.Kind == "ShiftPVMove" && owner.Name == move.Name && string(owner.UID) == move.UID {
@@ -161,8 +178,11 @@ func runMoveCopy(arguments []string) error {
 	}
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	move, err := registry.GetMove(context.Background(), options.moveName)
-	if err != nil || move.UID != options.moveUID || move.Status.IncomingCopy == nil || move.Status.CopyOperationID != options.operationID {
-		return fmt.Errorf("copy intent identity changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	if err != nil {
+		return fmt.Errorf("read copy Move: %w", err)
+	}
+	if move.UID != options.moveUID || move.Status.IncomingCopy == nil || move.Status.CopyOperationID != options.operationID {
+		return fmt.Errorf("copy intent identity changed: %w", volumeapi.ErrStateConflict)
 	}
 	identity := *move.Status.IncomingCopy
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -218,8 +238,11 @@ func runMovePromote(arguments []string) error {
 	}
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	move, err := registry.GetMove(context.Background(), options.moveName)
-	if err != nil || move.UID != options.moveUID || move.Status.IncomingCopy == nil || move.Status.DestinationCopy == nil || move.Status.PromotionOperationID != options.operationID {
-		return fmt.Errorf("promotion intent identity changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	if err != nil {
+		return fmt.Errorf("read promotion Move: %w", err)
+	}
+	if move.UID != options.moveUID || move.Status.IncomingCopy == nil || move.Status.DestinationCopy == nil || move.Status.PromotionOperationID != options.operationID {
+		return fmt.Errorf("promotion intent identity changed: %w", volumeapi.ErrStateConflict)
 	}
 	incoming, destination := *move.Status.IncomingCopy, *move.Status.DestinationCopy
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -238,24 +261,36 @@ func runVerifyOwner(arguments []string) error {
 	}
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	move, err := registry.GetMove(context.Background(), options.moveName)
-	if err != nil || move.UID != options.moveUID {
-		return fmt.Errorf("recovery intent identity changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	if err != nil {
+		return fmt.Errorf("read recovery Move: %w", err)
+	}
+	if move.UID != options.moveUID {
+		return fmt.Errorf("recovery intent identity changed: %w", volumeapi.ErrStateConflict)
 	}
 	state, err := registry.Get(context.Background(), move.Spec.VolumeID)
-	if err != nil || state.CurrentCopy == nil {
-		return fmt.Errorf("recovery owner identity is unavailable: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	if err != nil {
+		return fmt.Errorf("read recovery owner volume state: %w", err)
+	}
+	if state.CurrentCopy == nil {
+		return fmt.Errorf("recovery owner identity is unavailable: %w", volumeapi.ErrStateConflict)
 	}
 	identity := *state.CurrentCopy
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	authority := func(checkCtx context.Context) error {
 		currentMove, err := registry.GetMove(checkCtx, options.moveName)
-		if err != nil || currentMove.UID != options.moveUID || currentMove.Status.Phase != "Blocked" || currentMove.Status.RecoveryPhase != "Verifying" || currentMove.Status.RecoveryOwner != identity.NodeName {
-			return fmt.Errorf("recovery authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read recovery Move: %w", err)
+		}
+		if currentMove.UID != options.moveUID || currentMove.Status.Phase != "Blocked" || currentMove.Status.RecoveryPhase != "Verifying" || currentMove.Status.RecoveryOwner != identity.NodeName {
+			return fmt.Errorf("recovery authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		current, err := registry.Get(checkCtx, currentMove.Spec.VolumeID)
-		if err != nil || current.UID != identity.VolumeUID || current.Phase != volumeapi.PhaseBlocked || current.ActiveMove != currentMove.Name || current.OwnerNode != identity.NodeName || current.CurrentCopy == nil || *current.CurrentCopy != identity {
-			return fmt.Errorf("recovery volume authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read recovery volume state: %w", err)
+		}
+		if current.UID != identity.VolumeUID || current.Phase != volumeapi.PhaseBlocked || current.ActiveMove != currentMove.Name || current.OwnerNode != identity.NodeName || current.CurrentCopy == nil || *current.CurrentCopy != identity {
+			return fmt.Errorf("recovery volume authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		for _, node := range current.PublishedNodes {
 			if node != current.OwnerNode {
@@ -266,12 +301,18 @@ func runVerifyOwner(arguments []string) error {
 			return err
 		}
 		installationID, err := registry.InstallationID(checkCtx)
-		if err != nil || installationID != identity.InstallationID {
-			return fmt.Errorf("recovery installation authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read recovery installation identity: %w", err)
+		}
+		if installationID != identity.InstallationID {
+			return fmt.Errorf("recovery installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		pool, err := registry.PoolForNode(checkCtx, identity.NodeName)
-		if err != nil || pool.Name != identity.PoolName || pool.UID != identity.PoolUID {
-			return fmt.Errorf("recovery Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read recovery Pool: %w", err)
+		}
+		if pool.Name != identity.PoolName || pool.UID != identity.PoolUID {
+			return fmt.Errorf("recovery Pool authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		return nil
 	}
@@ -305,8 +346,11 @@ func inClusterClients() (dynamic.Interface, kubernetes.Interface, error) {
 func moveAuthority(client kubernetes.Interface, registry *volumeapi.Registry, options moveOptions, action string, target volume.CopyIdentity) func(context.Context) error {
 	return func(ctx context.Context) error {
 		move, err := registry.GetMove(ctx, options.moveName)
-		if err != nil || move.UID != options.moveUID || move.Status.SourceCopy == nil || move.Status.IncomingCopy == nil {
-			return fmt.Errorf("move authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read Move: %w", err)
+		}
+		if move.UID != options.moveUID || move.Status.SourceCopy == nil || move.Status.IncomingCopy == nil {
+			return fmt.Errorf("move authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		allowedPhase := (action == "copy" && (move.Status.Phase == "WaitingForCapacity" || move.Status.Phase == "Copying")) ||
 			(action == "promote" && (move.Status.Phase == "Copying" || move.Status.Phase == "Promoting"))
@@ -319,17 +363,26 @@ func moveAuthority(client kubernetes.Interface, registry *volumeapi.Registry, op
 			return err
 		}
 		installationID, err := registry.InstallationID(ctx)
-		if err != nil || installationID != target.InstallationID {
-			return fmt.Errorf("installation authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read installation identity: %w", err)
+		}
+		if installationID != target.InstallationID {
+			return fmt.Errorf("installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		pool, err := registry.PoolForNode(ctx, target.NodeName)
-		if err != nil || pool.Name != target.PoolName || pool.UID != target.PoolUID {
-			return fmt.Errorf("Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read target Pool: %w", err)
+		}
+		if pool.Name != target.PoolName || pool.UID != target.PoolUID {
+			return fmt.Errorf("Pool authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		state, err := registry.Get(ctx, move.Spec.VolumeID)
-		if err != nil || state.UID != target.VolumeUID || state.Phase != volumeapi.PhaseMoving || state.ActiveMove != move.Name || state.OwnerNode != move.Spec.SourceNode ||
+		if err != nil {
+			return fmt.Errorf("read source volume state: %w", err)
+		}
+		if state.UID != target.VolumeUID || state.Phase != volumeapi.PhaseMoving || state.ActiveMove != move.Name || state.OwnerNode != move.Spec.SourceNode ||
 			state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.SourceCopy || containsString(state.PublishedNodes, move.Spec.SourceNode) {
-			return fmt.Errorf("source volume authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+			return fmt.Errorf("source volume authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		return nil
 	}
@@ -357,8 +410,14 @@ func verifyOwnedMoveJob(ctx context.Context, client kubernetes.Interface, option
 
 func ownedMoveJob(ctx context.Context, client kubernetes.Interface, options moveOptions, move volumeapi.Move, nodeName string) (*batchv1.Job, error) {
 	pod, err := client.CoreV1().Pods(options.namespace).Get(ctx, os.Getenv("POD_NAME"), metav1.GetOptions{})
-	if err != nil || pod.DeletionTimestamp != nil || pod.Spec.NodeName != nodeName {
+	if err != nil {
 		return nil, fmt.Errorf("read move executor Pod: %w", err)
+	}
+	if pod.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("move executor Pod is terminating: %w", volumeapi.ErrStateConflict)
+	}
+	if pod.Spec.NodeName != nodeName {
+		return nil, fmt.Errorf("move executor Pod runs on a different node: %w", volumeapi.ErrStateConflict)
 	}
 	jobName, jobUID := "", ""
 	for _, owner := range pod.OwnerReferences {
@@ -368,8 +427,11 @@ func ownedMoveJob(ctx context.Context, client kubernetes.Interface, options move
 		}
 	}
 	job, err := client.BatchV1().Jobs(options.namespace).Get(ctx, jobName, metav1.GetOptions{})
-	if err != nil || jobUID == "" || string(job.UID) != jobUID || job.DeletionTimestamp != nil || job.Labels["shiftpv.io/move-uid"] != move.UID {
-		return nil, fmt.Errorf("move executor is not authorized: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	if err != nil {
+		return nil, fmt.Errorf("read move executor Job: %w", err)
+	}
+	if jobUID == "" || string(job.UID) != jobUID || job.DeletionTimestamp != nil || job.Labels["shiftpv.io/move-uid"] != move.UID {
+		return nil, fmt.Errorf("move executor is not authorized: %w", volumeapi.ErrStateConflict)
 	}
 	for _, owner := range job.OwnerReferences {
 		if owner.Controller != nil && *owner.Controller && owner.Kind == "ShiftPVMove" && owner.Name == move.Name && string(owner.UID) == move.UID {
@@ -427,18 +489,27 @@ func runCreate(arguments []string) error {
 	defer stop()
 	authority := func(checkCtx context.Context) error {
 		installationID, err := registry.InstallationID(checkCtx)
-		if err != nil || installationID != identity.InstallationID {
-			return fmt.Errorf("installation authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read installation identity: %w", err)
+		}
+		if installationID != identity.InstallationID {
+			return fmt.Errorf("installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		pool, err := registry.PoolForNode(checkCtx, identity.NodeName)
-		if err != nil || pool.Name != identity.PoolName || pool.UID != identity.PoolUID {
-			return fmt.Errorf("Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read Pool: %w", err)
+		}
+		if pool.Name != identity.PoolName || pool.UID != identity.PoolUID {
+			return fmt.Errorf("Pool authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		state, err := registry.Get(checkCtx, identity.VolumeID)
-		if err != nil || state.UID != identity.VolumeUID || state.CurrentCopy == nil || *state.CurrentCopy != identity ||
+		if err != nil {
+			return fmt.Errorf("read volume state: %w", err)
+		}
+		if state.UID != identity.VolumeUID || state.CurrentCopy == nil || *state.CurrentCopy != identity ||
 			state.CreationOperationID != *operationID ||
 			(state.Phase != volumeapi.PhasePending && state.Phase != volumeapi.PhaseReady) {
-			return fmt.Errorf("volume creation authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+			return fmt.Errorf("volume creation authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		return nil
 	}
@@ -477,8 +548,11 @@ func runCleanup(arguments []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	approved, err := cleanups.Get(ctx, authorityIdentity)
-	if err != nil || approved.UID != authorityIdentity.UID || approved.Spec.Authority != authorityIdentity || approved.Spec.OperationID != *operationID {
-		return fmt.Errorf("cleanup intent identity changed: %w", errors.Join(err, cleanupapi.ErrConflict))
+	if err != nil {
+		return fmt.Errorf("read cleanup intent: %w", err)
+	}
+	if approved.UID != authorityIdentity.UID || approved.Spec.Authority != authorityIdentity || approved.Spec.OperationID != *operationID {
+		return fmt.Errorf("cleanup intent identity changed: %w", cleanupapi.ErrConflict)
 	}
 	pod, err := client.CoreV1().Pods(*namespace).Get(ctx, os.Getenv("POD_NAME"), metav1.GetOptions{})
 	if err != nil {
@@ -497,8 +571,11 @@ func runCleanup(arguments []string) error {
 		return fmt.Errorf("cleanup executor is not authorized")
 	}
 	job, err := client.BatchV1().Jobs(*namespace).Get(ctx, jobName, metav1.GetOptions{})
-	if err != nil || string(job.UID) != jobUID || job.DeletionTimestamp != nil || !ownedByCleanupParent(job.OwnerReferences, authorityIdentity) {
-		return fmt.Errorf("cleanup Job is not owned by the exact parent: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	if err != nil {
+		return fmt.Errorf("read cleanup executor Job: %w", err)
+	}
+	if string(job.UID) != jobUID || job.DeletionTimestamp != nil || !ownedByCleanupParent(job.OwnerReferences, authorityIdentity) {
+		return fmt.Errorf("cleanup Job is not owned by the exact parent: %w", volumeapi.ErrStateConflict)
 	}
 	if pod.UID == "" {
 		return fmt.Errorf("cleanup executor Pod has no UID")
@@ -517,22 +594,31 @@ func runCleanup(arguments []string) error {
 	if !matchesCleanupExecutor(approved.Status.Executor, jobName, jobUID, pod) {
 		return fmt.Errorf("cleanup executor does not match the exact running Pod")
 	}
-	authority := func(checkCtx context.Context, effectStarted bool) error {
+	authority := func(checkCtx context.Context, _ bool) error {
 		current, err := cleanups.Get(checkCtx, authorityIdentity)
-		if err != nil || current.UID != approved.UID || current.Spec != approved.Spec || current.Status.Phase != cleanupapi.PhaseRunning ||
+		if err != nil {
+			return fmt.Errorf("read cleanup intent: %w", err)
+		}
+		if current.UID != approved.UID || current.Spec != approved.Spec || current.Status.Phase != cleanupapi.PhaseRunning ||
 			!matchesCleanupExecutor(current.Status.Executor, jobName, jobUID, pod) {
-			return fmt.Errorf("cleanup intent changed: %w", errors.Join(err, cleanupapi.ErrConflict))
+			return fmt.Errorf("cleanup intent changed: %w", cleanupapi.ErrConflict)
 		}
 		installationID, err := registry.InstallationID(checkCtx)
-		if err != nil || installationID != approved.Spec.Target.InstallationID {
-			return fmt.Errorf("installation authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read installation identity: %w", err)
+		}
+		if installationID != approved.Spec.Target.InstallationID {
+			return fmt.Errorf("installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		pool, err := registry.PoolForIdentity(checkCtx, approved.Spec.Target.PoolName, approved.Spec.Target.PoolUID, approved.Spec.Target.NodeName)
-		if err != nil || pool.Name != approved.Spec.Target.PoolName || pool.UID != approved.Spec.Target.PoolUID ||
-			!slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) {
-			return fmt.Errorf("Pool authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("read cleanup target Pool: %w", err)
 		}
-		return verifyCleanupAuthority(checkCtx, registry, approved, effectStarted)
+		if pool.Name != approved.Spec.Target.PoolName || pool.UID != approved.Spec.Target.PoolUID ||
+			!slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) {
+			return fmt.Errorf("Pool authority changed: %w", volumeapi.ErrStateConflict)
+		}
+		return verifyCleanupAuthority(checkCtx, registry, approved)
 	}
 	localReceipt, digest, err := ownership.ReclaimWithResume(ctx, *root, approved.Spec.Target, approved.Spec.OperationID, authority)
 	if err != nil {
@@ -564,13 +650,16 @@ func ownedByCleanupParent(references []metav1.OwnerReference, authority cleanupa
 	return false
 }
 
-func verifyCleanupAuthority(ctx context.Context, registry *volumeapi.Registry, cleanup cleanupapi.Cleanup, _ bool) error {
+func verifyCleanupAuthority(ctx context.Context, registry *volumeapi.Registry, cleanup cleanupapi.Cleanup) error {
 	switch cleanup.Spec.Authority.Kind {
 	case "ShiftPVVolume":
 		state, err := registry.Get(ctx, cleanup.Spec.Authority.Name)
-		if err != nil || state.UID != cleanup.Spec.Authority.UID || state.CurrentCopy == nil || *state.CurrentCopy != cleanup.Spec.Target ||
+		if err != nil {
+			return fmt.Errorf("read volume cleanup state: %w", err)
+		}
+		if state.UID != cleanup.Spec.Authority.UID || state.CurrentCopy == nil || *state.CurrentCopy != cleanup.Spec.Target ||
 			state.Phase != volumeapi.PhaseDeleting || state.DeletionOperationID != cleanup.Spec.OperationID || state.ActiveMove != "" || len(state.PublishedNodes) != 0 {
-			return fmt.Errorf("volume cleanup authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+			return fmt.Errorf("volume cleanup authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		return nil
 	case "ShiftPVMove":
@@ -582,13 +671,19 @@ func verifyCleanupAuthority(ctx context.Context, registry *volumeapi.Registry, c
 
 func verifyMoveCleanupAuthority(ctx context.Context, registry *volumeapi.Registry, cleanup cleanupapi.Cleanup) error {
 	move, err := registry.GetMove(ctx, cleanup.Spec.Authority.Name)
-	if err != nil || move.UID != cleanup.Spec.Authority.UID || move.Spec.VolumeID != cleanup.Spec.Target.VolumeID ||
+	if err != nil {
+		return fmt.Errorf("read move cleanup Move: %w", err)
+	}
+	if move.UID != cleanup.Spec.Authority.UID || move.Spec.VolumeID != cleanup.Spec.Target.VolumeID ||
 		move.Status.SourceCopy == nil || move.Status.SourceCopy.NodeName != move.Spec.SourceNode {
-		return fmt.Errorf("move cleanup authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		return fmt.Errorf("move cleanup authority changed: %w", volumeapi.ErrStateConflict)
 	}
 	state, err := registry.Get(ctx, move.Spec.VolumeID)
-	if err != nil || state.UID != cleanup.Spec.Target.VolumeUID || state.ActiveMove != move.Name || state.CurrentCopy == nil {
-		return fmt.Errorf("move cleanup volume authority changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+	if err != nil {
+		return fmt.Errorf("read move cleanup volume state: %w", err)
+	}
+	if state.UID != cleanup.Spec.Target.VolumeUID || state.ActiveMove != move.Name || state.CurrentCopy == nil {
+		return fmt.Errorf("move cleanup volume authority changed: %w", volumeapi.ErrStateConflict)
 	}
 	switch cleanup.Spec.Reason {
 	case "MoveSource":
@@ -607,8 +702,11 @@ func verifyMoveCleanupAuthority(ctx context.Context, registry *volumeapi.Registr
 			return fmt.Errorf("move source cleanup authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		destinationPool, err := registry.ReadyPoolForNode(ctx, move.Status.DestinationNode)
-		if err != nil || !volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy) {
-			return fmt.Errorf("move source cleanup publication proof changed: %w", errors.Join(err, volumeapi.ErrStateConflict))
+		if err != nil {
+			return fmt.Errorf("destination Pool publication proof unavailable: %w", err)
+		}
+		if !volumeapi.PoolHasPublishedCopy(destinationPool, move.Status.DestinationCopy) {
+			return fmt.Errorf("move source cleanup publication proof changed: %w", volumeapi.ErrStateConflict)
 		}
 		return nil
 	case "MoveRollback":
