@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
@@ -12,7 +12,8 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 : "${DESTINATION_SSH_TARGET:?DESTINATION_SSH_TARGET is required}"
 : "${EXPECTED_CONTROLLER_IMAGE:?EXPECTED_CONTROLLER_IMAGE is required}"
 : "${EXPECTED_NODE_IMAGE:?EXPECTED_NODE_IMAGE is required}"
-: "${EXPECTED_NON_DAEMONSET_PODS_SHA256:?EXPECTED_NON_DAEMONSET_PODS_SHA256 is required}"
+EXPECTED_NON_DAEMONSET_PODS_SHA256=${EXPECTED_NON_DAEMONSET_PODS_SHA256:-}
+export EXPECTED_NON_DAEMONSET_PODS_SHA256
 
 SYSTEM_NAMESPACE=${SYSTEM_NAMESPACE:-shiftpv-system}
 STORAGE_CLASS=${STORAGE_CLASS:-shiftpv}
@@ -51,6 +52,15 @@ for command in kubectl jq ssh diff tee; do
 done
 
 mkdir -p "${ARTIFACT_DIR}"
+
+report_error() {
+	local result_code=$?
+	trap - ERR
+	printf 'FAIL line=%s exit=%d command=%s\n' "${BASH_LINENO[0]}" "${result_code}" "${BASH_COMMAND}" |
+		tee -a "${ARTIFACT_DIR}/failure.txt" >&2
+	exit "${result_code}"
+}
+trap report_error ERR
 
 k() {
 	kubectl --context "${KUBECTL_CONTEXT}" --request-timeout=30s "$@"
@@ -109,23 +119,53 @@ snapshot_non_shiftpv_specs() {
 		| sort_by(.metadata.name)' >"${ARTIFACT_DIR}/${label}-storageclasses.json"
 }
 
+warn_uncordon_needed() {
+	local node=$1 reason=$2
+	{
+		printf '\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n'
+		printf 'WARNING: %s\n' "${reason}"
+		printf 'Node %s was left cordoned. Run this once resolved:\n' "${node}"
+		printf '  kubectl --context %s uncordon %s\n' "${KUBECTL_CONTEXT}" "${node}"
+		printf '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n'
+	} | tee -a "${ARTIFACT_DIR}/failure.txt" >&2
+}
+
 restore_environment() {
-	local result_code=$? deadline
-	trap - EXIT INT TERM
+	local result_code=$? deadline source_ready=1 restore_failed=0
+	trap - ERR EXIT INT TERM
 	set +e
 	if [[ "${FAULT_MODE}" == reboot ]]; then
+		source_ready=0
 		deadline=$((SECONDS + NODE_TIMEOUT_SECONDS))
 		while ((SECONDS < deadline)); do
-			ssh_source true >/dev/null 2>&1 && break
+			if ssh_source true >/dev/null 2>&1; then
+				source_ready=1
+				break
+			fi
 			sleep 2
 		done
 	fi
 	ssh_source sudo snap start microk8s >/dev/null 2>&1
-	k uncordon "${SOURCE_NODE}" >/dev/null 2>&1
-	k uncordon "${DESTINATION_NODE}" >/dev/null 2>&1
+	if ((source_ready)); then
+		if ! k uncordon "${SOURCE_NODE}" >/dev/null 2>&1; then
+			restore_failed=1
+			warn_uncordon_needed "${SOURCE_NODE}" "uncordon failed for ${SOURCE_NODE}"
+		fi
+	else
+		restore_failed=1
+		warn_uncordon_needed "${SOURCE_NODE}" \
+			"${SOURCE_NODE} did not become reachable within ${NODE_TIMEOUT_SECONDS}s after reboot; it was deliberately left cordoned"
+	fi
+	if ! k uncordon "${DESTINATION_NODE}" >/dev/null 2>&1; then
+		restore_failed=1
+		warn_uncordon_needed "${DESTINATION_NODE}" "uncordon failed for ${DESTINATION_NODE}"
+	fi
 	capture_evidence final
 	if ((result_code != 0)); then
 		echo "qualification failed; test resources were preserved for diagnosis in ${ARTIFACT_DIR}" >&2
+	fi
+	if ((result_code == 0 && restore_failed)); then
+		result_code=1
 	fi
 	exit "${result_code}"
 }

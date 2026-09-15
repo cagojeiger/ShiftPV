@@ -11,6 +11,8 @@ Required environment:
   DESTINATION_NODE
   FAULT_NODE
   FAULT_SSH_TARGET
+  SOURCE_SSH_TARGET           required by the fault stages that run this preflight
+  DESTINATION_SSH_TARGET      required by the fault stages that run this preflight
   EXPECTED_CONTROLLER_IMAGE   immutable image reference containing @sha256:
   EXPECTED_NODE_IMAGE         immutable image reference containing @sha256:
 
@@ -64,6 +66,7 @@ done
 
 for variable in \
 	KUBECTL_CONTEXT SOURCE_NODE DESTINATION_NODE FAULT_NODE FAULT_SSH_TARGET \
+	SOURCE_SSH_TARGET DESTINATION_SSH_TARGET \
 	EXPECTED_CONTROLLER_IMAGE EXPECTED_NODE_IMAGE; do
 	if [[ -z ${!variable:-} ]]; then
 		block "required environment is empty: ${variable}"
