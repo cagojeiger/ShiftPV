@@ -10,10 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-
+	"github.com/cagojeiger/ShiftPV/src/cmd/internal/wiring"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
@@ -36,28 +33,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		deny("load in-cluster configuration", err)
-	}
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		deny("create Kubernetes client", err)
-	}
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		deny("create dynamic Kubernetes client", err)
-	}
+	clients := wiring.InCluster(deny)
 
 	checker := &uninstallcheck.Checker{
-		Client:           client,
-		Volumes:          &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter},
-		Cleanups:         &cleanupapi.Store{Client: dynamicClient},
+		Client:           clients.Typed,
+		Volumes:          &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: *poolReadinessStaleAfter},
+		Cleanups:         &cleanupapi.Store{Client: clients.Dynamic},
 		StorageClassName: *storageClassName,
 		Namespace:        *permitNamespace,
 		InventoryMaxAge:  *poolReadinessStaleAfter,
 	}
-	permit := &uninstallcheck.PermitStore{Client: client, Namespace: *permitNamespace, Name: *permitName, CSIDriver: uninstallcheck.DriverName}
+	permit := &uninstallcheck.PermitStore{Client: clients.Typed, Namespace: *permitNamespace, Name: *permitName, CSIDriver: uninstallcheck.DriverName}
 	var runErr error
 	if *retry {
 		runErr = runWithRetry(ctx, checker, permit, *validationWebhook, *timeout, *retryInterval)

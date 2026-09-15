@@ -4,9 +4,11 @@ import (
 	"context"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
-const DriverName = "csi.shiftpv.io"
+const DriverName = volume.DriverName
 
 type Service struct {
 	csi.UnimplementedIdentityServer

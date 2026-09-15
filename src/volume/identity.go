@@ -5,6 +5,11 @@ import (
 	"strings"
 )
 
+// DriverName is the one CSI driver name this installation answers to. It is
+// declared here, with the pure identity rules, so the CSI adapter, the
+// admission boundary and the uninstall guard cannot drift apart.
+const DriverName = "csi.shiftpv.io"
+
 const (
 	RoleServing  = "Serving"
 	RoleIncoming = "Incoming"

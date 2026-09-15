@@ -17,14 +17,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
+	"github.com/cagojeiger/ShiftPV/src/cmd/internal/wiring"
 	controllercsi "github.com/cagojeiger/ShiftPV/src/csi/controller"
 	"github.com/cagojeiger/ShiftPV/src/csi/identity"
 	csiserver "github.com/cagojeiger/ShiftPV/src/csi/server"
@@ -79,29 +77,13 @@ func main() {
 		klog.Fatalf("move journal retention must be at least one hour")
 	}
 
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		klog.Fatalf("load in-cluster configuration: %v", err)
-	}
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		klog.Fatalf("create Kubernetes client: %v", err)
-	}
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		klog.Fatalf("create dynamic Kubernetes client: %v", err)
-	}
+	clients := wiring.InCluster(fatal)
+	config, client, dynamicClient := clients.Config, clients.Typed, clients.Dynamic
 	admissionConfig := rest.CopyConfig(config)
 	admissionConfig.QPS = 50
 	admissionConfig.Burst = 100
-	admissionClient, err := kubernetes.NewForConfig(admissionConfig)
-	if err != nil {
-		klog.Fatalf("create lifecycle admission Kubernetes client: %v", err)
-	}
-	admissionDynamicClient, err := dynamic.NewForConfig(admissionConfig)
-	if err != nil {
-		klog.Fatalf("create lifecycle admission dynamic Kubernetes client: %v", err)
-	}
+	admissionClients := wiring.ForConfig(admissionConfig, "lifecycle admission", fatal)
+	admissionClient, admissionDynamicClient := admissionClients.Typed, admissionClients.Dynamic
 	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter}
 	cleanupStore := &cleanupapi.Store{Client: dynamicClient}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -119,13 +101,7 @@ func main() {
 	}
 	permitStore := &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}
 	quiesceGate := &uninstallcheck.QuiesceGate{Store: permitStore, Interval: 200 * time.Millisecond}
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
-		if gateErr := quiesceGate.Bootstrap(ctx); gateErr != nil {
-			klog.V(2).Infof("waiting for uninstall quiesce state: %v", gateErr)
-			return false, nil
-		}
-		return true, nil
-	}); err != nil {
+	if err := wiring.BootstrapWithRetry(ctx, "uninstall quiesce state", quiesceGate.Bootstrap); err != nil {
 		klog.Fatalf("bootstrap uninstall quiesce gate: %v", err)
 	}
 	operator := &helperpod.Runner{
@@ -178,13 +154,7 @@ func main() {
 		CARenewBefore:               365 * 24 * time.Hour,
 		Now:                         time.Now,
 	}}
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
-		if reconcileErr := certificateManager.Bootstrap(ctx); reconcileErr != nil {
-			klog.V(2).Infof("waiting for mobility webhook certificate prerequisites: %v", reconcileErr)
-			return false, nil
-		}
-		return true, nil
-	}); err != nil {
+	if err := wiring.BootstrapWithRetry(ctx, "mobility webhook certificate prerequisites", certificateManager.Bootstrap); err != nil {
 		klog.Fatalf("bootstrap mobility webhook certificate: %v", err)
 	}
 	go func() { errCh <- certificateManager.Run(ctx) }()
@@ -238,6 +208,8 @@ func main() {
 		klog.Errorf("shut down mobility webhook: %v", err)
 	}
 }
+
+func fatal(step string, err error) { klog.Fatalf("%s: %v", step, err) }
 
 func mustQuantity(name, value string) resource.Quantity {
 	quantity, err := resource.ParseQuantity(value)

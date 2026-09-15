@@ -14,10 +14,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
 const (
-	DriverName             = "csi.shiftpv.io"
+	DriverName             = volume.DriverName
 	HostnameLabel          = "kubernetes.io/hostname"
 	PlacementHold          = "shiftpv.io/placement-hold"
 	PlacementKey           = "shiftpv.io/placement"
