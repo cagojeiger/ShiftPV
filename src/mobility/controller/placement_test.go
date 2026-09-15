@@ -142,7 +142,7 @@ func TestOwnerCommitRequiresLiveReservationOnDestination(t *testing.T) {
 	repository := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
 		Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name,
 	}}}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(), repository)
 	observed := observation{Volume: identifiedTestState(volumeID, repository.volumes[volumeID], repository.pools), DestinationNode: "destination"}
 	if err := reconciler.commitOwner(ctx, &move, observed); err == nil {
 		t.Fatal("owner commit succeeded without a placement reservation")

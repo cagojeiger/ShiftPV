@@ -49,11 +49,10 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 				moves: []volumeapi.Move{move},
 			}
 			client := fake.NewSimpleClientset()
-			reconciler := &Reconciler{
-				Client: client, Repository: repository, Namespace: "system", HelperImage: "helper",
-				CapacityProbe: fakeMoveCapacityProbe{usage: test.usage, stats: poolcapacity.Filesystem{AvailableBytes: test.available}},
-				PoolLocks:     &poolcapacity.Locker{},
-			}
+			reconciler := newTestReconciler(client, repository, func(r *Reconciler) {
+				r.CapacityProbe = fakeMoveCapacityProbe{usage: test.usage, stats: poolcapacity.Filesystem{AvailableBytes: test.available}}
+				r.PoolLocks = &poolcapacity.Locker{}
+			})
 			if err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err != nil {
 				t.Fatal(err)
 			}
@@ -85,11 +84,10 @@ func TestEnsureCapacityRejectsNonPositiveSourceUsage(t *testing.T) {
 		},
 		moves: []volumeapi.Move{move},
 	}
-	reconciler := &Reconciler{
-		Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", HelperImage: "helper",
-		CapacityProbe: fakeMoveCapacityProbe{usage: 0, stats: poolcapacity.Filesystem{AvailableBytes: 64 << 20}},
-		PoolLocks:     &poolcapacity.Locker{},
-	}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(), repository, func(r *Reconciler) {
+		r.CapacityProbe = fakeMoveCapacityProbe{usage: 0, stats: poolcapacity.Filesystem{AvailableBytes: 64 << 20}}
+		r.PoolLocks = &poolcapacity.Locker{}
+	})
 	err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"})
 	if err == nil {
 		t.Fatal("unmeasured source usage was approved")

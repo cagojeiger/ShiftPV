@@ -83,9 +83,9 @@ func TestMoveDiagnosticsRecordAndClearTransientObservationFailure(t *testing.T) 
 	client.PrependReactor("get", "replicasets", func(ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("API timeout")
 	})
-	r := &Reconciler{Client: client, Repository: repo, Namespace: "system", HelperImage: "helper", Now: func() time.Time {
-		return time.Date(2026, 9, 4, 2, 0, 0, 0, time.UTC)
-	}}
+	r := newTestReconciler(client, repo, func(r *Reconciler) {
+		r.Now = func() time.Time { return time.Date(2026, 9, 4, 2, 0, 0, 0, time.UTC) }
+	})
 	if err := r.ReconcileAll(ctx); err == nil {
 		t.Fatal("observation failure was hidden")
 	}
@@ -122,7 +122,7 @@ func TestMoveDiagnosticsRecordAndClearTransientActionFailure(t *testing.T) {
 		}
 		return true, nil, fmt.Errorf("API timeout")
 	})
-	r := &Reconciler{Client: client, Repository: repo, Namespace: "system", HelperImage: "helper"}
+	r := newTestReconciler(client, repo)
 	if err := r.ReconcileAll(ctx); err == nil {
 		t.Fatal("action failure was hidden")
 	}

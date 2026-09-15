@@ -69,7 +69,7 @@ func TestMoveDiscoveryConvergesAfterCreateResponseLost(t *testing.T) {
 		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
 	}
 	repository := &lostResponseRepository{memoryRepository: inner, createMoveResponses: 1}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(mobilityObjects(volumeID)...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(mobilityObjects(volumeID)...), repository)
 
 	if err := reconciler.discoverMoves(ctx); err == nil {
 		t.Fatal("lost create response was hidden")
@@ -100,7 +100,7 @@ func TestPendingMoveCancellationConvergesAfterDeleteResponseLost(t *testing.T) {
 	}
 	repository := &lostResponseRepository{memoryRepository: inner, deleteMoveResponses: 1}
 	client := fake.NewSimpleClientset(readyNode("source", false), readyNode("destination", false))
-	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(client, repository)
 
 	if err := reconciler.ReconcileAll(ctx); err == nil {
 		t.Fatal("lost obsolete Move delete response was hidden")
@@ -140,7 +140,7 @@ func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testin
 		},
 	}
 	client := fake.NewSimpleClientset(replacement)
-	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(client, repository)
 	observed := observation{
 		DestinationNode: "destination",
 		Replacement:     replacement,
@@ -192,7 +192,7 @@ func TestCopyResourcesConvergeAfterCreateResponseLost(t *testing.T) {
 				{Name: "source", NodeName: "source", MountPath: "/source-pool"},
 				{Name: "destination", NodeName: "destination", MountPath: "/destination-pool"},
 			}}
-			reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+			reconciler := newTestReconciler(client, repository)
 
 			if err := reconciler.ensureCopyResources(ctx, move, names); err == nil {
 				t.Fatal("lost transfer resource create response was hidden")
@@ -231,7 +231,7 @@ func TestMobilityJobsConvergeAfterCreateResponseLost(t *testing.T) {
 				{Name: "source", NodeName: "source", MountPath: "/source-pool"},
 				{Name: "destination", NodeName: "destination", MountPath: "/destination-pool"},
 			}}
-			reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+			reconciler := newTestReconciler(client, repository)
 
 			if err := test.ensure(reconciler); err == nil {
 				t.Fatal("lost Job create response was hidden")

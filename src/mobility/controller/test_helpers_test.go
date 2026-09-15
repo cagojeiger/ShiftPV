@@ -7,6 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 
@@ -14,6 +15,36 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
+
+// newTestReconciler builds the Reconciler configuration the mobility tests
+// share. Anything beyond it is an explicit option so each test still reads as
+// the exact configuration it exercises.
+func newTestReconciler(client kubernetes.Interface, repository Repository, options ...func(*Reconciler)) *Reconciler {
+	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	for _, option := range options {
+		option(reconciler)
+	}
+	return reconciler
+}
+
+// withTestCleanups gives the reconciler its own cleanup store and the service
+// account the helper jobs project.
+func withTestCleanups() func(*Reconciler) {
+	return func(r *Reconciler) {
+		r.ServiceAccountName = "shiftpv-controller"
+		r.Cleanups = newTestCleanupStore()
+		r.CleanupOperator = receiptCleanupOperator{}
+	}
+}
+
+// withCleanupsFrom shares one cleanup store across reconcilers, which is how a
+// restart test keeps the persisted cleanup intents it already wrote.
+func withCleanupsFrom(other *Reconciler) func(*Reconciler) {
+	return func(r *Reconciler) {
+		r.Cleanups = other.Cleanups
+		r.CleanupOperator = other.CleanupOperator
+	}
+}
 
 func assignJobUIDs(client *fake.Clientset) {
 	for _, resource := range []string{"jobs", "pods", "services", "configmaps", "secrets"} {

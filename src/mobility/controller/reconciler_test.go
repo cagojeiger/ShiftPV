@@ -232,10 +232,7 @@ func TestDiscoverMovesCreatesOneMoveForHealthyCordon(t *testing.T) {
 		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
 	}
 	client := fake.NewSimpleClientset(mobilityObjects(volumeID)...)
-	reconciler := &Reconciler{
-		Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", ServiceAccountName: "shiftpv-controller",
-		Cleanups: newTestCleanupStore(), CleanupOperator: receiptCleanupOperator{},
-	}
+	reconciler := newTestReconciler(client, repository, withTestCleanups())
 	if err := reconciler.discoverMoves(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +255,7 @@ func TestDiscoverMovesSkipsPoolThatIsNotReady(t *testing.T) {
 		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"}}},
 		pools:   []volumeapi.Pool{source, destination}, readyPools: []volumeapi.Pool{source}, readyPoolsConfigured: true,
 	}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(mobilityObjects(volumeID)...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(mobilityObjects(volumeID)...), repository)
 	if err := reconciler.discoverMoves(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +278,7 @@ func TestDiscoverMovesSkipsDestinationContainingServingCopy(t *testing.T) {
 		readyPools: []volumeapi.Pool{source, destination}, readyPoolsConfigured: true,
 	}
 	client := fake.NewSimpleClientset(mobilityObjects(volumeID)...)
-	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(client, repository)
 	if err := reconciler.discoverMoves(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -293,21 +290,18 @@ func TestDiscoverMovesSkipsDestinationContainingServingCopy(t *testing.T) {
 
 func TestDiscoverMovesSkipsIneligibleVolumes(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	for name, mutate := range map[string]func([]runtime.Object, *memoryRepository) []runtime.Object{
-		"namespace not opted in": func(objects []runtime.Object, _ *memoryRepository) []runtime.Object {
-			objects[0].(*corev1.Namespace).Labels = nil
-			return objects
+	for name, mutate := range map[string]func(*mobilityFixture, *memoryRepository){
+		"namespace not opted in": func(fixture *mobilityFixture, _ *memoryRepository) {
+			fixture.Namespace.Labels = nil
 		},
-		"consumer missing": func(objects []runtime.Object, _ *memoryRepository) []runtime.Object {
-			return objects[:len(objects)-1]
+		"consumer missing": func(fixture *mobilityFixture, _ *memoryRepository) {
+			fixture.Consumer = nil
 		},
-		"bare pod": func(objects []runtime.Object, _ *memoryRepository) []runtime.Object {
-			objects[len(objects)-1].(*corev1.Pod).OwnerReferences = nil
-			return objects
+		"bare pod": func(fixture *mobilityFixture, _ *memoryRepository) {
+			fixture.Consumer.OwnerReferences = nil
 		},
-		"destination missing": func(objects []runtime.Object, repository *memoryRepository) []runtime.Object {
+		"destination missing": func(_ *mobilityFixture, repository *memoryRepository) {
 			repository.pools = repository.pools[:1]
-			return objects
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -315,8 +309,9 @@ func TestDiscoverMovesSkipsIneligibleVolumes(t *testing.T) {
 				volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"}}},
 				pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
 			}
-			objects := mutate(mobilityObjects(volumeID), repository)
-			reconciler := &Reconciler{Client: fake.NewSimpleClientset(objects...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+			fixture := newMobilityFixture(volumeID)
+			mutate(fixture, repository)
+			reconciler := newTestReconciler(fake.NewSimpleClientset(fixture.Objects()...), repository)
 			if err := reconciler.discoverMoves(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -336,7 +331,7 @@ func TestBindingLossAfterLockBlocksWithoutPanic(t *testing.T) {
 		moves:   []volumeapi.Move{move},
 	}
 	client := fake.NewSimpleClientset(readyNode("source", true), readyNode("destination", false))
-	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(client, repository)
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +360,7 @@ func TestPendingMoveIsCancelledWhenSourceWasUncordonedBeforeLock(t *testing.T) {
 	// is now schedulable and no lock was taken, this is an obsolete discovery
 	// transaction rather than a VolumeBindingMissing safety failure.
 	client := fake.NewSimpleClientset(readyNode("source", false), readyNode("destination", false))
-	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(client, repository)
 
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
@@ -405,10 +400,7 @@ func TestReconcileAllReleasesOnlySettledMoveFinalizer(t *testing.T) {
 					Status:     test.status,
 				}},
 			}
-			reconciler := &Reconciler{
-				Client: fake.NewSimpleClientset(), Repository: repository,
-				Namespace: "system", HelperImage: "helper",
-			}
+			reconciler := newTestReconciler(fake.NewSimpleClientset(), repository)
 			err := reconciler.ReconcileAll(context.Background())
 			if (err != nil) != test.wantError {
 				t.Fatalf("ReconcileAll error = %v, wantError=%t", err, test.wantError)
@@ -478,10 +470,9 @@ func TestReconcileAllGarbageCollectsOnlyExpiredSettledMoveJournals(t *testing.T)
 			if test.volume != nil {
 				repository.volumes[volumeID] = *test.volume
 			}
-			reconciler := &Reconciler{
-				Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", HelperImage: "helper",
-				MoveJournalRetention: retention, Now: func() time.Time { return now },
-			}
+			reconciler := newTestReconciler(fake.NewSimpleClientset(), repository, func(r *Reconciler) {
+				r.MoveJournalRetention, r.Now = retention, func() time.Time { return now }
+			})
 			err := reconciler.ReconcileAll(context.Background())
 			if (err != nil) != test.wantError {
 				t.Fatalf("ReconcileAll error = %v, wantError=%t", err, test.wantError)
@@ -503,7 +494,7 @@ func TestReconcileAllSeparatesFinalizerReleaseFromJournalDeletion(t *testing.T) 
 			LastTransitionTime: now.Add(-DefaultMoveJournalRetention).Format(time.RFC3339Nano),
 		},
 	}}}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(), Repository: repository, Namespace: "system", HelperImage: "helper", Now: func() time.Time { return now }}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(), repository, func(r *Reconciler) { r.Now = func() time.Time { return now } })
 
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
@@ -531,7 +522,7 @@ func TestObserveRecognizesOwnerCommitBeforeMovePhasePersistence(t *testing.T) {
 		pools:   []volumeapi.Pool{{Name: "source", UID: "source-pool-uid", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination-pool"}},
 		moves:   []volumeapi.Move{move},
 	}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(mobilityObjects(volumeID)...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(mobilityObjects(volumeID)...), repository)
 	observed, err := reconciler.observe(context.Background(), move)
 	if err != nil {
 		t.Fatal(err)
@@ -578,8 +569,7 @@ func TestObserveMarksSelectedNotReadyDestinationUnavailable(t *testing.T) {
 		pools:   []volumeapi.Pool{source, destination}, readyPools: []volumeapi.Pool{source}, readyPoolsConfigured: true,
 		moves: []volumeapi.Move{move},
 	}
-	objects := mobilityObjects(volumeID)
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(objects...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(mobilityObjects(volumeID)...), repository)
 	observed, err := reconciler.observe(context.Background(), move)
 	if err != nil {
 		t.Fatal(err)
@@ -639,11 +629,11 @@ func TestObserveAllowsOnlyActiveMoveToRepairDestinationCrashWindow(t *testing.T)
 				}},
 				pools: []volumeapi.Pool{source, destination}, readyPools: []volumeapi.Pool{source}, readyPoolsConfigured: true, moves: []volumeapi.Move{move},
 			}
-			objects := mobilityObjects(volumeID)
-			replacement := objects[len(objects)-1].(*corev1.Pod)
+			fixture := newMobilityFixture(volumeID)
+			replacement := fixture.Consumer
 			replacement.Spec.NodeName = "destination"
 			replacement.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: placementHoldName}}
-			reconciler := &Reconciler{Client: fake.NewSimpleClientset(objects...), Repository: repository, Namespace: "system", HelperImage: "helper", Now: func() time.Time { return now }}
+			reconciler := newTestReconciler(fake.NewSimpleClientset(fixture.Objects()...), repository, func(r *Reconciler) { r.Now = func() time.Time { return now } })
 			placement := reconciler.placementPod(move, replacement, namesFor(move.Name))
 			placement.UID = "placement-uid"
 			placement.Spec.NodeName = "destination"
@@ -696,7 +686,7 @@ func TestObserveRejectsForeignServingCopyButAllowsCurrentDestinationCopy(t *test
 		pools: []volumeapi.Pool{source, destination}, readyPools: []volumeapi.Pool{source, destination}, readyPoolsConfigured: true,
 		moves: []volumeapi.Move{move},
 	}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(mobilityObjects(volumeID)...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(mobilityObjects(volumeID)...), repository)
 
 	observed, err := reconciler.observe(context.Background(), move)
 	if err != nil {
@@ -736,7 +726,7 @@ func TestObserveBlocksApprovedDestinationAfterPoolRecreation(t *testing.T) {
 		pools:   []volumeapi.Pool{source, recreated},
 		moves:   []volumeapi.Move{move},
 	}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(mobilityObjects(volumeID)...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(mobilityObjects(volumeID)...), repository)
 	observed, err := reconciler.observe(context.Background(), move)
 	if err != nil {
 		t.Fatal(err)
@@ -768,11 +758,11 @@ func TestObserveKeepsTerminatingPlacementReservedUntilNotFound(t *testing.T) {
 		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
 		moves:   []volumeapi.Move{move},
 	}
-	objects := mobilityObjects(volumeID)
-	replacement := objects[len(objects)-1].(*corev1.Pod)
+	fixture := newMobilityFixture(volumeID)
+	replacement := fixture.Consumer
 	replacement.Spec.NodeName = ""
 	replacement.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: placementHoldName}}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(objects...), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(fixture.Objects()...), repository)
 	placement := reconciler.placementPod(move, replacement, namesFor(move.Name))
 	placement.UID = "placement-uid"
 	placement.Spec.NodeName = "destination"
@@ -810,10 +800,7 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset(mobilityObjects(volumeID)...)
 	assignJobUIDs(client)
-	reconciler := &Reconciler{
-		Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", ServiceAccountName: "shiftpv-controller",
-		Cleanups: newTestCleanupStore(), CleanupOperator: receiptCleanupOperator{},
-	}
+	reconciler := newTestReconciler(client, repository, withTestCleanups())
 
 	observed, err := reconciler.observe(ctx, move)
 	if err != nil {
@@ -944,7 +931,7 @@ func TestJobStateAndBlockedVolume(t *testing.T) {
 	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}
 	repository := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name}}}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "complete", Namespace: "system"}, Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(job), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(job), repository)
 	complete, failed, err := reconciler.jobState(ctx, "complete")
 	if err != nil || !complete || failed {
 		t.Fatalf("job state complete=%v failed=%v err=%v", complete, failed, err)
@@ -963,7 +950,7 @@ func TestBlockedBeforeLockClosesRediscovery(t *testing.T) {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}
 	repository := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source"}}, moves: []volumeapi.Move{move}}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(readyNode("source", true)), Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(readyNode("source", true)), repository)
 	observed := observation{Volume: identifiedTestState(volumeID, repository.volumes[volumeID], repository.pools)}
 	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionMarkBlocked, Reason: "ControlledConsumerMissing"}); err != nil {
 		t.Fatal(err)
@@ -993,7 +980,7 @@ func TestReconcileAllAndCanceledRun(t *testing.T) {
 		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
 		moves:   []volumeapi.Move{move},
 	}
-	reconciler := &Reconciler{Client: fake.NewSimpleClientset(mobilityObjects(volumeID)...), Repository: repository, Namespace: "system", HelperImage: "helper", Interval: 1}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(mobilityObjects(volumeID)...), repository, func(r *Reconciler) { r.Interval = 1 })
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1014,10 +1001,9 @@ func TestReconcileAllAndCanceledRun(t *testing.T) {
 func TestRunReconcilesImmediatelyOnWake(t *testing.T) {
 	repository := &countingRepository{memoryRepository: memoryRepository{volumes: map[string]volumeapi.State{}}}
 	wake := make(chan struct{}, 1)
-	reconciler := &Reconciler{
-		Client: fake.NewSimpleClientset(), Repository: repository,
-		Namespace: "system", HelperImage: "helper", Interval: time.Hour, Wake: wake,
-	}
+	reconciler := newTestReconciler(fake.NewSimpleClientset(), repository, func(r *Reconciler) {
+		r.Interval, r.Wake = time.Hour, wake
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- reconciler.Run(ctx) }()
@@ -1049,19 +1035,64 @@ func TestRunReconcilesImmediatelyOnWake(t *testing.T) {
 	}
 }
 
-func mobilityObjects(volumeID string) []runtime.Object {
+// mobilityFixture names every object the mobility tests seed into the fake
+// clientset so a test mutates one by field instead of by list position.
+type mobilityFixture struct {
+	Namespace       *corev1.Namespace
+	SourceNode      *corev1.Node
+	DestinationNode *corev1.Node
+	PV              *corev1.PersistentVolume
+	Claim           *corev1.PersistentVolumeClaim
+	ReplicaSet      *appsv1.ReplicaSet
+	Consumer        *corev1.Pod
+}
+
+func newMobilityFixture(volumeID string) *mobilityFixture {
 	controller := true
-	return []runtime.Object{
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "workload", Labels: map[string]string{admissionNamespaceLabel: "enabled"}}},
-		readyNode("source", true), readyNode("destination", false),
-		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}, Spec: corev1.PersistentVolumeSpec{
+	return &mobilityFixture{
+		Namespace:       &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "workload", Labels: map[string]string{admissionNamespaceLabel: "enabled"}}},
+		SourceNode:      readyNode("source", true),
+		DestinationNode: readyNode("destination", false),
+		PV: &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}, Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "csi.shiftpv.io", VolumeHandle: volumeID}},
 			ClaimRef:               &corev1.ObjectReference{Name: "claim", Namespace: "workload", UID: "claim-uid"},
 		}},
-		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "workload", UID: "claim-uid"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
-		&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "rs", Namespace: "workload", UID: "rs"}, Spec: appsv1.ReplicaSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: claimVolumes()}}}},
-		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: "workload", UID: "consumer-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: types.UID("rs"), Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: "source", Volumes: claimVolumes()}},
+		Claim:      &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "workload", UID: "claim-uid"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
+		ReplicaSet: &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "rs", Namespace: "workload", UID: "rs"}, Spec: appsv1.ReplicaSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: claimVolumes()}}}},
+		Consumer:   &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: "workload", UID: "consumer-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: types.UID("rs"), Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: "source", Volumes: claimVolumes()}},
 	}
+}
+
+// Objects returns the seed set in clientset order. A field a test cleared is
+// omitted, which is how a test removes one object without disturbing the rest.
+func (f *mobilityFixture) Objects() []runtime.Object {
+	objects := make([]runtime.Object, 0, 7)
+	if f.Namespace != nil {
+		objects = append(objects, f.Namespace)
+	}
+	if f.SourceNode != nil {
+		objects = append(objects, f.SourceNode)
+	}
+	if f.DestinationNode != nil {
+		objects = append(objects, f.DestinationNode)
+	}
+	if f.PV != nil {
+		objects = append(objects, f.PV)
+	}
+	if f.Claim != nil {
+		objects = append(objects, f.Claim)
+	}
+	if f.ReplicaSet != nil {
+		objects = append(objects, f.ReplicaSet)
+	}
+	if f.Consumer != nil {
+		objects = append(objects, f.Consumer)
+	}
+	return objects
+}
+
+func mobilityObjects(volumeID string) []runtime.Object {
+	return newMobilityFixture(volumeID).Objects()
 }
 
 func readyNode(name string, cordoned bool) *corev1.Node {
