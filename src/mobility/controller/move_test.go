@@ -45,10 +45,7 @@ func cleanupMoveFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 	}
 	client := fake.NewClientset(mobilityObjects(move.Spec.VolumeID)...)
 	assignJobUIDs(client)
-	return &Reconciler{
-		Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", ServiceAccountName: "shiftpv-controller",
-		Cleanups: newTestCleanupStore(), CleanupOperator: receiptCleanupOperator{},
-	}, repository, client
+	return newTestReconciler(client, repository, withTestCleanups()), repository, client
 }
 
 type failingCleanupOperator struct{}
@@ -135,10 +132,7 @@ func TestMoveActionSurvivesJournalFailureAndControllerRestart(t *testing.T) {
 		t.Fatalf("cleanup intent did not precede journal write: %+v, %v", cleanups, err)
 	}
 
-	restarted := &Reconciler{
-		Client: client, Repository: repository, Namespace: "system", HelperImage: "helper",
-		Cleanups: reconciler.Cleanups, CleanupOperator: reconciler.CleanupOperator,
-	}
+	restarted := newTestReconciler(client, repository, withCleanupsFrom(reconciler))
 	if err := restarted.reconcileMove(ctx, repository.moves[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -230,10 +224,7 @@ func TestMoveCompletionJournalFailureRecoversAfterRestart(t *testing.T) {
 	if repository.moves[0].Status.Phase != "Completing" {
 		t.Fatal("rejected completion journal unexpectedly persisted")
 	}
-	restarted := &Reconciler{
-		Client: client, Repository: repository, Namespace: "system", HelperImage: "helper",
-		Cleanups: reconciler.Cleanups, CleanupOperator: reconciler.CleanupOperator,
-	}
+	restarted := newTestReconciler(client, repository, withCleanupsFrom(reconciler))
 	if err := restarted.reconcileMove(ctx, repository.moves[0]); err != nil {
 		t.Fatalf("completion did not recover after restart: %v", err)
 	}
@@ -338,7 +329,7 @@ func TestCompletionRecoversAcrossAPIFailureBoundaries(t *testing.T) {
 			metadata := moveObjectMeta(move, names.SourcePod, "system", sourceLabels(names, move))
 			metadata.UID = "source-pod-uid"
 			client := fake.NewClientset(&corev1.Pod{ObjectMeta: metadata})
-			reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", Cleanups: base.Cleanups, CleanupOperator: base.CleanupOperator}
+			reconciler := newTestReconciler(client, repository, withCleanupsFrom(base))
 			var rejected *rejectedStatusRepository
 			switch fault {
 			case "unlock response lost":
@@ -362,7 +353,7 @@ func TestCompletionRecoversAcrossAPIFailureBoundaries(t *testing.T) {
 					}
 				}
 			}
-			restarted := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", Cleanups: base.Cleanups, CleanupOperator: base.CleanupOperator}
+			restarted := newTestReconciler(client, repository, withCleanupsFrom(base))
 			if err := restarted.ReconcileAll(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -406,7 +397,7 @@ func TestCompletionAfterVolumeDeletion(t *testing.T) {
 	}
 	delete(repository.volumes, move.Spec.VolumeID)
 	notFound := apierrors.NewNotFound(schema.GroupResource{Group: "shiftpv.io", Resource: "shiftpvvolumes"}, move.Spec.VolumeID)
-	restarted := &Reconciler{Client: client, Repository: &completionReadRepository{memoryRepository: repository, getError: notFound}, Namespace: "system", HelperImage: "helper", Cleanups: reconciler.Cleanups, CleanupOperator: reconciler.CleanupOperator}
+	restarted := newTestReconciler(client, &completionReadRepository{memoryRepository: repository, getError: notFound}, withCleanupsFrom(reconciler))
 	client.ClearActions()
 	if err := restarted.ReconcileAll(ctx); err != nil {
 		t.Fatalf("deleted Volume stranded completion: %v", err)
@@ -473,7 +464,7 @@ func TestCompletionCASPreservesConcurrentMove(t *testing.T) {
 	if err := reconciler.reconcileMove(ctx, move); !errors.Is(err, volumeapi.ErrStateConflict) {
 		t.Fatalf("concurrent lock was not fenced: %v", err)
 	}
-	restarted := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", Cleanups: reconciler.Cleanups, CleanupOperator: reconciler.CleanupOperator}
+	restarted := newTestReconciler(client, repository, withCleanupsFrom(reconciler))
 	if err := restarted.reconcileMove(ctx, repository.moves[0]); err != nil {
 		t.Fatal(err)
 	}

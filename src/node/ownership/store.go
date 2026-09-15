@@ -63,25 +63,19 @@ type Store struct {
 }
 
 func WithLock(ctx context.Context, root string, pool PoolIdentity, volumeID string, operation func(*Store) error) error {
-	if operation == nil {
-		return ErrIdentity
-	}
-	store, err := OpenExisting(root, pool)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	lock, err := store.Acquire(ctx, volumeID)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	return operation(store)
+	return withLock(ctx, root, pool, volumeID, false, operation)
 }
 
 // WithExistingLock serializes a read-only verification with mutating volume
 // operations without creating or modifying node-local state.
 func WithExistingLock(ctx context.Context, root string, pool PoolIdentity, volumeID string, operation func(*Store) error) error {
+	return withLock(ctx, root, pool, volumeID, true, operation)
+}
+
+// withLock runs operation under the volume lock of an existing Pool store.
+// existingOnly joins the lock through an already created read-only file, which
+// is what keeps a read-only verification from creating node-local state.
+func withLock(ctx context.Context, root string, pool PoolIdentity, volumeID string, existingOnly bool, operation func(*Store) error) error {
 	if operation == nil {
 		return ErrIdentity
 	}
@@ -90,7 +84,11 @@ func WithExistingLock(ctx context.Context, root string, pool PoolIdentity, volum
 		return err
 	}
 	defer store.Close()
-	lock, err := store.AcquireExisting(ctx, volumeID)
+	acquire := store.Acquire
+	if existingOnly {
+		acquire = store.AcquireExisting
+	}
+	lock, err := acquire(ctx, volumeID)
 	if err != nil {
 		return err
 	}

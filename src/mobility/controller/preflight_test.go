@@ -26,7 +26,7 @@ func preflightFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
 	}
 	client := fake.NewSimpleClientset(mobilityObjects(preflightVolume)...)
-	return &Reconciler{Client: client, Repository: repo, Namespace: "system", HelperImage: "helper"}, repo, client
+	return newTestReconciler(client, repo), repo, client
 }
 
 func TestPreflightDefersWithoutLockOrEviction(t *testing.T) {

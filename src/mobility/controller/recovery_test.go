@@ -26,6 +26,16 @@ import (
 
 func recoveryFixture(t *testing.T, owner string) (*Reconciler, *memoryRepository, *fake.Clientset) {
 	t.Helper()
+	r, repo, client, _, _ := recoveryTransactionFixture(t, owner, owner == "destination")
+	return r, repo, client
+}
+
+// recoveryTransactionFixture builds a blocked ResumeOwner move whose volume is
+// still owned by owner. recordDestination journals the destination transaction
+// identities on the move: the destination owner reached them by definition, and
+// a source-owned rollback has to settle the same recorded artifacts.
+func recoveryTransactionFixture(t *testing.T, owner string, recordDestination bool) (*Reconciler, *memoryRepository, *fake.Clientset, volume.CopyIdentity, volume.CopyIdentity) {
+	t.Helper()
 	id := "shiftpv-0123456789abcdef0123456789abcdef"
 	source, incoming, destination := testCopyIdentities(id, "source", "destination")
 	incoming.CopyID = "move-move-uid-incoming"
@@ -34,29 +44,25 @@ func recoveryFixture(t *testing.T, owner string) (*Reconciler, *memoryRepository
 		Phase: "Blocked", Reason: "OriginalFailure", PersistentVolumeName: "pv", ClaimNamespace: "workload", ClaimName: "claim", DestinationNode: "destination", SourceCopy: &source,
 	}}
 	state := volumeapi.State{UID: source.VolumeUID, Phase: "Blocked", ActiveMove: move.Name, OwnerNode: owner, CurrentCopy: &source, CapacityBytes: 32 << 20}
-	if owner == "destination" {
+	if recordDestination {
 		move.Status.DestinationPoolUID = destination.PoolUID
-		move.Status.SourceCopy, move.Status.IncomingCopy, move.Status.DestinationCopy = &source, &incoming, &destination
+		move.Status.IncomingCopy, move.Status.DestinationCopy = &incoming, &destination
 		move.Status.CopyJobName = namesFor(move.Name).CopyJob
 		move.Status.CopyOperationID, move.Status.PromotionOperationID = "copy-"+move.UID, "promote-"+move.UID
 		move.Status.CapacityApproved = true
+	}
+	if owner == "destination" {
 		state.CurrentCopy = &destination
 	}
 	repo := &memoryRepository{moves: []volumeapi.Move{move}, volumes: map[string]volumeapi.State{id: state}, pools: []volumeapi.Pool{
 		{Name: source.PoolName, UID: source.PoolUID, NodeName: "source", MountPath: "/source"},
 		{Name: destination.PoolName, UID: destination.PoolUID, NodeName: "destination", MountPath: "/destination"},
 	}}
-	objects := mobilityObjects(id)
-	objects[1].(*corev1.Node).Spec.Unschedulable = false
-	objects[3].(*corev1.PersistentVolume).Spec.ClaimRef.UID = "claim-uid"
-	objects[4].(*corev1.PersistentVolumeClaim).UID = "claim-uid"
-	objects[len(objects)-1].(*corev1.Pod).Spec.NodeName = owner
-	objects[len(objects)-1].(*corev1.Pod).UID = "consumer-uid"
-	client := fake.NewSimpleClientset(objects...)
-	return &Reconciler{
-		Client: client, Repository: repo, Namespace: "system", HelperImage: "helper", ServiceAccountName: "shiftpv-controller",
-		Cleanups: newTestCleanupStore(), CleanupOperator: receiptCleanupOperator{},
-	}, repo, client
+	fixture := newMobilityFixture(id)
+	fixture.SourceNode.Spec.Unschedulable = false
+	fixture.Consumer.Spec.NodeName = owner
+	client := fake.NewSimpleClientset(fixture.Objects()...)
+	return newTestReconciler(client, repo, withTestCleanups()), repo, client, incoming, destination
 }
 
 func finishRecoveryJobs(t *testing.T, client *fake.Clientset, condition batchv1.JobConditionType) {
@@ -81,10 +87,9 @@ func TestRecoveryResumesOnlyCurrentOwnerAndSurvivesEveryBoundary(t *testing.T) {
 			id := repo.moves[0].Spec.VolumeID
 			for cycle := 0; cycle < 24; cycle++ {
 				// Construct a fresh reconciler on every pass: no in-memory recovery state.
-				restarted := &Reconciler{
-					Client: client, Repository: repo, Namespace: r.Namespace, HelperImage: r.HelperImage, ServiceAccountName: r.ServiceAccountName,
-					Cleanups: r.Cleanups, CleanupOperator: r.CleanupOperator,
-				}
+				restarted := newTestReconciler(client, repo, withCleanupsFrom(r), func(fresh *Reconciler) {
+					fresh.ServiceAccountName = r.ServiceAccountName
+				})
 				if err := restarted.ReconcileAll(context.Background()); err != nil {
 					t.Fatal(err)
 				}
@@ -319,29 +324,12 @@ func TestDiscoveryWaitsForDestinationRecoveryJournalAfterFinalCAS(t *testing.T) 
 
 func rollbackRecoveryFixture(t *testing.T, copies []volumeapi.CopyObservation) (*Reconciler, *memoryRepository, volume.CopyIdentity, volume.CopyIdentity) {
 	t.Helper()
-	r, repo, _ := recoveryFixture(t, "source")
+	r, repo, _, incoming, destination := recoveryTransactionFixture(t, "source", true)
 	move := repo.moves[0]
-	state, err := repo.Get(context.Background(), move.Spec.VolumeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := *state.CurrentCopy
-	incoming := volume.CopyIdentity{
-		InstallationID: source.InstallationID, PoolName: "destination-pool", PoolUID: "destination-pool-uid",
-		VolumeID: move.Spec.VolumeID, VolumeUID: source.VolumeUID, CopyID: "move-" + move.UID + "-incoming",
-		NodeName: "destination", Role: volume.RoleIncoming,
-	}
-	destination := incoming
-	destination.CopyID, destination.Role = "move-"+move.UID+"-serving", volume.RoleServing
 	transitionedAt := time.Date(2026, 9, 13, 1, 0, 0, 0, time.UTC)
 	move.Status.RecoveryOwner, move.Status.RecoveryPhase = "source", recoveryRetiring
 	move.Status.LastTransitionTime = transitionedAt.Format(time.RFC3339Nano)
-	move.Status.DestinationNode, move.Status.DestinationPoolUID = "destination", destination.PoolUID
-	move.Status.SourceCopy, move.Status.IncomingCopy, move.Status.DestinationCopy = &source, &incoming, &destination
-	move.Status.CopyJobName = namesFor(move.Name).CopyJob
-	move.Status.CopyOperationID, move.Status.PromotionOperationID = "copy-"+move.UID, "promote-"+move.UID
 	move.Status.SourceBytes = 32 << 20
-	move.Status.CapacityApproved = true
 	repo.moves[0] = move
 
 	observedAt := transitionedAt.Add(time.Second)
