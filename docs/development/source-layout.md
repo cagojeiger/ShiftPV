@@ -19,9 +19,38 @@ cmd wiring
           lock · inventory · copy · purge
 ```
 
+## Current tree
+
+```text
+src/
+├── cmd/                    process entrypoints and the node-bound helper CLI
+├── csi/                    Controller, Identity, Node and gRPC adapters
+├── kubernetes/             durable API repositories and helper Pod execution
+│   ├── cleanupapi/         parent-owned cleanup journal
+│   ├── helperpod/          exact child executor lifecycle
+│   └── volumeapi/          Pool, Volume and Move persistence
+├── lifecycle/              admission, Pool lifecycle and uninstall guards
+├── mobility/
+│   ├── admission/          workload mutation boundary
+│   ├── controller/         observe, decide and execute one Move action
+│   └── fsm/                pure Move state transition rules
+├── node/                   mount, inventory and identity-bound filesystem effects
+├── pool/                   readiness and conservative capacity accounting
+├── metrics/                cached observation only
+├── volume/                 pure IDs, copy identity and path rules
+└── webhook/                serving certificate lifecycle
+
+test/
+├── model/                  exhaustive state/invariant checks
+├── integration/            Linux mount boundary
+├── e2e/kind/               isolated Kubernetes fault injection
+└── e2e/real-node/          service, reboot and soak qualification
+```
+
 | 책임 | 규칙 |
 |---|---|
-| `cmd` | flag, dependency wiring, process lifecycle만 소유 |
+| `cmd/controller`, `cmd/node`, `cmd/uninstall-guard` | flag, dependency wiring, process lifecycle만 소유 |
+| `cmd/volume-helper` | node-bound CLI parsing, exact Kubernetes authority 재확인, node-local effect 호출만 소유; durable truth는 소유하지 않음 |
 | CSI | RPC validation과 protocol command 변환; filesystem effect 직접 실행 금지 |
 | Kubernetes repositories | Pool/Volume/Move read, status patch, resourceVersion CAS, child executor 생성 |
 | Pure protocol | 외부 I/O 없는 state decision, identity comparison, capacity holds |

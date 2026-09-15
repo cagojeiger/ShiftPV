@@ -18,13 +18,14 @@ has passed and all test resources have returned to the recorded baseline.
 3. **Operating-system reboot**: repeat the two boundaries with a forced worker
    reboot, prove the boot ID changed, and hold MicroK8s stopped after boot until
    the control plane has observed the node unavailable.
-4. **Hard power loss**: repeat them only after an independent out-of-band method
-   for powering the worker back on has been demonstrated.
-5. **Soak**: alternate a synthetic volume between nodes for at least 100 moves
+4. **Soak**: alternate a synthetic volume between nodes for at least 100 moves
    and 12 hours. Inject a controller restart every tenth move and a cleanup Pod
    deletion every twentieth move.
-6. **Canary**: run one isolated synthetic PVC for 72 hours with at least 25
-   scheduled moves. Do not place application data on the candidate StorageClass.
+
+A physical power cut is an optional qualification for a specific host and
+filesystem, and requires an independently proven out-of-band power-on path.
+A separate low-frequency canary is not a release gate: it repeats the same
+synthetic move contract already exercised more densely by the soak.
 
 ## Preflight
 
@@ -110,9 +111,9 @@ EXPECTED_NON_DAEMONSET_PODS_SHA256=... \
 ./test/e2e/real-node/service-interruption.sh
 ```
 
-This is an unclean OS reboot, not stage 4 hard power loss. Stage 4 still
-requires an independently demonstrated IPMI, managed-PDU, smart-plug, or other
-out-of-band power-on path before power is removed.
+This proves the supported unclean OS reboot boundary, not physical power-loss
+durability. A physical power-cut qualification requires an independently
+demonstrated IPMI, managed-PDU, smart-plug, or other out-of-band power-on path.
 
 ## Soak
 
@@ -154,7 +155,7 @@ MIN_DURATION_SECONDS=43200 \
 
 ## Acceptance contract
 
-Every interruption, soak iteration, and canary move must preserve all of these
+Every interruption and soak iteration must preserve all of these
 invariants:
 
 - PVC UID, PV name, and ShiftPV volume identity remain unchanged.

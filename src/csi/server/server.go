@@ -13,10 +13,6 @@ import (
 
 type Register func(*grpc.Server)
 
-func Serve(endpoint string, register Register) error {
-	return ServeContext(context.Background(), endpoint, register)
-}
-
 func ServeContext(ctx context.Context, endpoint string, register Register, options ...grpc.ServerOption) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {

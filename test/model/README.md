@@ -23,4 +23,4 @@ make v04-filesystem-primitives
 transition을 허용하지 않는다.
 
 모든 production 보증은 같은 계약을 실제 CRD, Controller, node-local lock, helper effect에 구현한 뒤
-unit, Linux integration, isolated Kind fault injection, real-node power-fault와 soak gate를 통과해야 성립한다.
+unit, Linux integration, isolated Kind fault injection, real-node unclean OS reboot와 soak gate를 통과해야 성립한다.

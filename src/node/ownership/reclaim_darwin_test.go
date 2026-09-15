@@ -20,7 +20,7 @@ func TestDarwinReclaimPreservesServingCopyWhenMountBoundaryProofIsUnavailable(t 
 	if err := os.WriteFile(filepath.Join(root, "volumes", identity.VolumeID, "data"), []byte("preserved"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := Reclaim(context.Background(), root, identity, "operation-a", authority)
+	_, _, err := ReclaimWithResume(context.Background(), root, identity, "operation-a", resumeAuthority(authority))
 	if err == nil || !strings.Contains(err.Error(), "requires Linux") {
 		t.Fatalf("unsupported purge result: %v", err)
 	}

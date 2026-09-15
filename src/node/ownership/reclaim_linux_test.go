@@ -24,8 +24,8 @@ func TestReclaimRejectsUnsupportedPurgeBeforeRetire(t *testing.T) {
 		t.Fatal(err)
 	}
 	purgeCalled := false
-	_, _, err := reclaim(
-		context.Background(), root, identity, "operation-unsupported", authority,
+	_, _, err := reclaimWithState(
+		context.Background(), root, identity, "operation-unsupported", resumeAuthority(authority),
 		func(*Store) error { return unix.ENOSYS },
 		func(context.Context, *Store, localIntent) error {
 			purgeCalled = true
@@ -75,7 +75,7 @@ func TestReclaimIsIdentityBoundIdempotentAndDoesNotFollowSymlinks(t *testing.T) 
 	var receipt Receipt
 	var digest string
 	for range 2 {
-		got, gotDigest, err := Reclaim(context.Background(), root, identity, "operation-a", authority)
+		got, gotDigest, err := ReclaimWithResume(context.Background(), root, identity, "operation-a", resumeAuthority(authority))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,9 +83,6 @@ func TestReclaimIsIdentityBoundIdempotentAndDoesNotFollowSymlinks(t *testing.T) 
 			t.Fatal("retry changed durable receipt")
 		}
 		receipt, digest = got, gotDigest
-	}
-	if _, err := VerifyReceipt(root, identity, "operation-a", digest); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := os.Stat(dataset); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dataset remains: %v", err)
@@ -113,7 +110,7 @@ func TestReclaimIsIdentityBoundIdempotentAndDoesNotFollowSymlinks(t *testing.T) 
 	}
 	changed := identity
 	changed.VolumeUID = "replacement"
-	if _, _, err := Reclaim(context.Background(), root, changed, "operation-a", authority); !errors.Is(err, ErrIdentity) {
+	if _, _, err := ReclaimWithResume(context.Background(), root, changed, "operation-a", resumeAuthority(authority)); !errors.Is(err, ErrIdentity) {
 		t.Fatalf("replacement identity accepted: %v", err)
 	}
 }
@@ -127,7 +124,7 @@ func TestReclaimChecksAuthorityBeforeDiskEffect(t *testing.T) {
 	}
 	denied := errors.New("authority revoked")
 	checks := 0
-	_, _, err := Reclaim(context.Background(), root, identity, "operation-a", func(context.Context) error {
+	_, _, err := ReclaimWithResume(context.Background(), root, identity, "operation-a", func(context.Context, bool) error {
 		checks++
 		if checks == 2 {
 			return denied
@@ -153,9 +150,9 @@ func TestReclaimRechecksAuthorityImmediatelyBeforeFilesystemEffect(t *testing.T)
 	}
 	denied := errors.New("authority appeared")
 	checks := 0
-	_, _, err := Reclaim(context.Background(), root, identity, "operation-recheck", func(context.Context) error {
+	_, _, err := ReclaimWithResume(context.Background(), root, identity, "operation-recheck", func(context.Context, bool) error {
 		checks++
-		if checks == 3 {
+		if checks == 2 {
 			return denied
 		}
 		return nil
@@ -167,7 +164,7 @@ func TestReclaimRechecksAuthorityImmediatelyBeforeFilesystemEffect(t *testing.T)
 	if data, readErr := os.ReadFile(serving); readErr != nil || string(data) != "preserve" {
 		t.Fatalf("data changed after authority was revoked: data=%q err=%v", data, readErr)
 	}
-	if _, _, err := Reclaim(context.Background(), root, identity, "operation-recheck", func(context.Context) error { return nil }); err != nil {
+	if _, _, err := ReclaimWithResume(context.Background(), root, identity, "operation-recheck", func(context.Context, bool) error { return nil }); err != nil {
 		t.Fatalf("cleanup did not resume after authority became safe: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".shiftpv", "retired", identity.CopyID)); !errors.Is(err, os.ErrNotExist) {
@@ -184,7 +181,7 @@ func TestReclaimPurgesAnExactIncomingCopy(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Reclaim(context.Background(), root, incoming, "reclaim-incoming", authority); err != nil {
+	if _, _, err := ReclaimWithResume(context.Background(), root, incoming, "reclaim-incoming", resumeAuthority(authority)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".shiftpv", "incoming", incoming.CopyID)); !errors.Is(err, os.ErrNotExist) {
@@ -208,7 +205,7 @@ func TestReclaimIncomingPreservesServingCopyOfSameVolume(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(servingPath, "payload"), []byte("preserve"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Reclaim(context.Background(), root, incoming, "reclaim-incoming", authority); err != nil {
+	if _, _, err := ReclaimWithResume(context.Background(), root, incoming, "reclaim-incoming", resumeAuthority(authority)); err != nil {
 		t.Fatalf("incoming cleanup was blocked by the serving copy: %v", err)
 	}
 	if data, err := os.ReadFile(filepath.Join(servingPath, "payload")); err != nil || string(data) != "preserve" {

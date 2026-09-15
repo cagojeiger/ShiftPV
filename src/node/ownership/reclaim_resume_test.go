@@ -49,7 +49,8 @@ func TestReclaimResumesExactJournalAfterRetireBeforeAPIReceipt(t *testing.T) {
 	if err != nil || checks != 2 || !receipt.Retired || !receipt.Purged || digest == "" {
 		t.Fatalf("journaled cleanup did not resume: receipt=%#v digest=%q checks=%d err=%v", receipt, digest, checks, err)
 	}
-	if _, err := VerifyReceipt(root, identity, "operation-resume", digest); err != nil {
-		t.Fatalf("resumed receipt is invalid: %v", err)
+	replayed, replayedDigest, err := ReclaimWithResume(context.Background(), root, identity, "operation-resume", func(context.Context, bool) error { return nil })
+	if err != nil || replayed != receipt || replayedDigest != digest {
+		t.Fatalf("resumed receipt did not replay: receipt=%#v digest=%q err=%v", replayed, replayedDigest, err)
 	}
 }

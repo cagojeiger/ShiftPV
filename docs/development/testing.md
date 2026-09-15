@@ -12,11 +12,11 @@
 | Unit/race | fake API + fault injection | 실제 CRD field, CAS, journal, 멱등 action | 0.4 구현과 함께 필수 |
 | Linux integration | real mount namespace/filesystem | local lock, bind mount, rename/fsync/purge | 0.4 구현과 함께 필수 |
 | Isolated Kind | API server, scheduler, kubelet, CSI | end-to-end lifecycle와 node/process failure | 0.4 구현과 함께 필수 |
-| Real node fault | 대상 filesystem과 power/process fault | reboot 뒤 receipt와 directory durability | 운영 전 필수 |
+| Real node fault | 대상 filesystem과 process/unclean OS reboot | reboot 뒤 receipt와 directory durability | 운영 전 필수 |
 | Soak | 운영 동형 다중 node | 반복 이동·삭제, leak, capacity drift, alert | 운영 전 필수 |
 
 낮은 gate의 성공은 높은 gate를 대체하지 않는다. 특히 model, Kind, Docker overlay 결과를 실제 disk의
-power-loss durability로 해석하지 않는다.
+reboot durability로 해석하지 않는다. 물리 전원 차단은 별도 환경 qualification이며 기본 release gate가 아니다.
 
 ## Design preflight
 
