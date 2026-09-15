@@ -387,7 +387,7 @@ func TestNodeGetInfoPublishesTopology(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := response.AccessibleTopology.Segments[controllercsi.TopologyKey]; got != "worker-a" {
+	if got := response.AccessibleTopology.Segments[volume.TopologyKey]; got != "worker-a" {
 		t.Fatalf("unexpected topology: %q", got)
 	}
 }

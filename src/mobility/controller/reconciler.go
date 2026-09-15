@@ -15,14 +15,15 @@ import (
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
 )
 
 const (
-	admissionNamespaceLabel     = "shiftpv.io/admission"
-	placementHoldName           = "shiftpv.io/placement-hold"
-	placementAnnotationKey      = "shiftpv.io/placement"
+	admissionNamespaceLabel     = admission.MobilityNamespaceLabel
+	placementHoldName           = admission.PlacementHold
+	placementAnnotationKey      = admission.PlacementKey
 	DefaultMoveJournalRetention = 7 * 24 * time.Hour
 )
 

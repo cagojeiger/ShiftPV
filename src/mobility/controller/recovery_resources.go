@@ -69,18 +69,39 @@ func recoveryNames(move volumeapi.Move) resourceNames {
 	return namesFor(move.Name + "-recovery-" + move.UID)
 }
 
-func (r *Reconciler) recoveryJob(ctx context.Context, move volumeapi.Move, verify bool) (bool, error) {
-	if !verify {
-		// Non-owner copies are classified and reclaimed by the bounded cleanup
-		// inventory. Recovery only proves the copy that will resume ownership.
-		return true, nil
+// verifyOwnerJob builds the single recovery owner-verification Job spec used
+// both to create the Job and to compare an existing one against it.
+func (r *Reconciler) verifyOwnerJob(ctx context.Context, move volumeapi.Move, names resourceNames, name, node string) (*batchv1.Job, error) {
+	job, err := r.operationJob(ctx, name, node, names, nil, nil, nil)
+	if err != nil {
+		return nil, err
 	}
+	controller := true
+	job.OwnerReferences = []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: move.Name, UID: types.UID(move.UID), Controller: &controller}}
+	job.Labels["shiftpv.io/move-uid"] = move.UID
+	job.Spec.Template.Labels["shiftpv.io/move-uid"] = move.UID
+	job.Spec.Template.Spec.Containers[0].Command = []string{"/shiftpv-volume-helper"}
+	job.Spec.Template.Spec.Containers[0].Args = []string{
+		"verify-owner", "--move-name=" + move.Name, "--move-uid=" + move.UID,
+		"--operation-id=verify-" + move.UID, "--namespace=" + r.Namespace,
+	}
+	job.Spec.Template.Spec.Containers[0].Env = podNameEnvironment()
+	// Preserve completion evidence across long controller outages. Only the
+	// recovery controller removes these Jobs after durable phase advancement.
+	job.Spec.TTLSecondsAfterFinished = nil
+	zeroRetries := int32(0)
+	job.Spec.BackoffLimit = &zeroRetries
+	job.Spec.Template.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
+	return job, nil
+}
+
+func (r *Reconciler) recoveryJob(ctx context.Context, move volumeapi.Move) (bool, error) {
 	names := recoveryNames(move)
 	node := move.Status.RecoveryOwner
 	name := names.Base + "-verify"
 	job, err := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		job, err = r.operationJob(ctx, name, node, names, nil, nil, nil)
+		job, err = r.verifyOwnerJob(ctx, move, names, name, node)
 		if err != nil {
 			return false, err
 		}
@@ -89,22 +110,6 @@ func (r *Reconciler) recoveryJob(ctx context.Context, move volumeapi.Move, verif
 		} else if state.CurrentCopy == nil || state.CurrentCopy.NodeName != node || state.CurrentCopy.Role != "Serving" {
 			return false, fmt.Errorf("recovery owner copy identity is missing")
 		}
-		job.Spec.Template.Spec.Containers[0].Command = []string{"/shiftpv-volume-helper"}
-		job.Spec.Template.Spec.Containers[0].Args = []string{
-			"verify-owner", "--move-name=" + move.Name, "--move-uid=" + move.UID,
-			"--operation-id=verify-" + move.UID, "--namespace=" + r.Namespace,
-		}
-		job.Spec.Template.Spec.Containers[0].Env = podNameEnvironment()
-		// Preserve completion evidence across long controller outages. Only the
-		// recovery controller removes these Jobs after durable phase advancement.
-		job.Spec.TTLSecondsAfterFinished = nil
-		zeroRetries := int32(0)
-		job.Spec.BackoffLimit = &zeroRetries
-		controller := true
-		job.OwnerReferences = []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: move.Name, UID: types.UID(move.UID), Controller: &controller}}
-		job.Labels["shiftpv.io/move-uid"] = move.UID
-		job.Spec.Template.Labels["shiftpv.io/move-uid"] = move.UID
-		job.Spec.Template.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
 		_, err = r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
 			err = nil
@@ -114,24 +119,13 @@ func (r *Reconciler) recoveryJob(ctx context.Context, move volumeapi.Move, verif
 	if err != nil {
 		return false, err
 	}
-	if job.Labels["shiftpv.io/move"] != names.Base || !recoveryOwned(job, move.UID) || job.Spec.Template.Spec.NodeName != node || job.DeletionTimestamp != nil {
+	if job.Labels["shiftpv.io/move"] != names.Base || !moveOwned(job.OwnerReferences, move.UID) || job.Spec.Template.Spec.NodeName != node || job.DeletionTimestamp != nil {
 		return false, fmt.Errorf("recovery Job %q identity or node mismatch", name)
 	}
-	expected, buildErr := r.operationJob(ctx, name, node, names, nil, nil, nil)
+	expected, buildErr := r.verifyOwnerJob(ctx, move, names, name, node)
 	if buildErr != nil {
 		return false, buildErr
 	}
-	controller := true
-	expected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: move.Name, UID: types.UID(move.UID), Controller: &controller}}
-	expected.Labels["shiftpv.io/move-uid"] = move.UID
-	expected.Spec.Template.Labels["shiftpv.io/move-uid"] = move.UID
-	expected.Spec.Template.Spec.Containers[0].Command = []string{"/shiftpv-volume-helper"}
-	expected.Spec.Template.Spec.Containers[0].Args = []string{"verify-owner", "--move-name=" + move.Name, "--move-uid=" + move.UID, "--operation-id=verify-" + move.UID, "--namespace=" + r.Namespace}
-	expected.Spec.Template.Spec.Containers[0].Env = podNameEnvironment()
-	expected.Spec.TTLSecondsAfterFinished = nil
-	zeroRetries := int32(0)
-	expected.Spec.BackoffLimit = &zeroRetries
-	expected.Spec.Template.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
 	if !sameOperationJob(job, expected) {
 		return false, fmt.Errorf("recovery Job %q execution identity changed", name)
 	}
@@ -174,7 +168,7 @@ func (r *Reconciler) removeJob(ctx context.Context, name, label, moveUID string)
 	if err != nil {
 		return false, err
 	}
-	if job.Labels["shiftpv.io/move"] != label || (moveUID != "" && !recoveryOwned(job, moveUID)) {
+	if job.Labels["shiftpv.io/move"] != label || (moveUID != "" && !moveOwned(job.OwnerReferences, moveUID)) {
 		return false, fmt.Errorf("refusing to delete unrelated Job %q", name)
 	}
 	if job.DeletionTimestamp == nil {
@@ -186,10 +180,6 @@ func (r *Reconciler) removeJob(ctx context.Context, name, label, moveUID string)
 		}
 	}
 	return false, err
-}
-
-func recoveryOwned(job *batchv1.Job, uid string) bool {
-	return moveOwned(job.OwnerReferences, uid)
 }
 
 func moveOwned(references []metav1.OwnerReference, uid string) bool {

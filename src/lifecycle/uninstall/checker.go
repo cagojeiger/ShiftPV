@@ -60,7 +60,7 @@ type Report struct {
 }
 
 const PoolInventoryBlockerKind = "ShiftPVPoolInventory"
-const topologyKey = "topology.csi.shiftpv.io/node"
+const topologyKey = volume.TopologyKey
 
 func (r Report) Safe() bool {
 	return len(r.Blockers) == 0
@@ -165,7 +165,7 @@ func (c *Checker) CheckPoolDeleteAfter(ctx context.Context, poolName string, poo
 		if known && !usesPool {
 			continue
 		}
-		if !known && !contains(state.PublishedNodes, target.NodeName) && state.OwnerNode != target.NodeName {
+		if !known && !slices.Contains(state.PublishedNodes, target.NodeName) && state.OwnerNode != target.NodeName {
 			continue
 		}
 		reason := "owner=" + state.OwnerNode
@@ -244,7 +244,7 @@ func moveUsesPool(move volumeapi.Move, pool volumeapi.Pool) bool {
 			return true
 		}
 	}
-	return !destinationKnown && (move.Status.DestinationNode == pool.NodeName || contains(move.Status.CandidateNodes, pool.NodeName))
+	return !destinationKnown && (move.Status.DestinationNode == pool.NodeName || slices.Contains(move.Status.CandidateNodes, pool.NodeName))
 }
 
 func exactMoveCopy(copy *volume.CopyIdentity, volumeID, nodeName, role string) bool {
@@ -274,10 +274,10 @@ func persistentVolumeTargetsNode(persistentVolume corev1.PersistentVolume, nodeN
 			switch expression.Operator {
 			case corev1.NodeSelectorOpIn:
 				known = true
-				matches = contains(expression.Values, nodeName)
+				matches = slices.Contains(expression.Values, nodeName)
 			case corev1.NodeSelectorOpNotIn:
 				known = true
-				matches = !contains(expression.Values, nodeName)
+				matches = !slices.Contains(expression.Values, nodeName)
 			}
 		}
 		if !known {
@@ -288,15 +288,6 @@ func persistentVolumeTargetsNode(persistentVolume corev1.PersistentVolume, nodeN
 		}
 	}
 	return false, true
-}
-
-func contains(values []string, expected string) bool {
-	for _, value := range values {
-		if value == expected {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Checker) CheckAfter(ctx context.Context, inventoryAfter time.Time) (Report, error) {

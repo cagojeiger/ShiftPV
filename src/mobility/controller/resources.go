@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -319,52 +320,58 @@ func (r *Reconciler) poolMountPath(ctx context.Context, nodeName string) (string
 }
 
 func (r *Reconciler) deleteTransferResources(ctx context.Context, move volumeapi.Move, names resourceNames) error {
+	pods := r.Client.CoreV1().Pods(r.Namespace)
+	services := r.Client.CoreV1().Services(r.Namespace)
+	configMaps := r.Client.CoreV1().ConfigMaps(r.Namespace)
+	secrets := r.Client.CoreV1().Secrets(r.Namespace)
+	owned := []ownedTransferObject{
+		{kind: "Pod", missingUIDKind: "source Pod", name: names.SourcePod,
+			get: func() (metav1.Object, error) { return pods.Get(ctx, names.SourcePod, metav1.GetOptions{}) },
+			del: func(options metav1.DeleteOptions) error { return pods.Delete(ctx, names.SourcePod, options) }},
+		{kind: "Service", missingUIDKind: "source Service", name: names.SourceService,
+			get: func() (metav1.Object, error) { return services.Get(ctx, names.SourceService, metav1.GetOptions{}) },
+			del: func(options metav1.DeleteOptions) error { return services.Delete(ctx, names.SourceService, options) }},
+		{kind: "ConfigMap", missingUIDKind: "rsync ConfigMap", name: names.Config,
+			get: func() (metav1.Object, error) { return configMaps.Get(ctx, names.Config, metav1.GetOptions{}) },
+			del: func(options metav1.DeleteOptions) error { return configMaps.Delete(ctx, names.Config, options) }},
+		{kind: "Secret", missingUIDKind: "rsync Secret", name: names.Secret,
+			get: func() (metav1.Object, error) { return secrets.Get(ctx, names.Secret, metav1.GetOptions{}) },
+			del: func(options metav1.DeleteOptions) error { return secrets.Delete(ctx, names.Secret, options) }},
+	}
 	var errs []error
-	if pod, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, names.SourcePod, metav1.GetOptions{}); err == nil {
-		if !moveOwned(pod.OwnerReferences, move.UID) || pod.Labels["shiftpv.io/move-uid"] != move.UID {
-			errs = append(errs, fmt.Errorf("refusing to delete unrelated Pod %q", names.SourcePod))
-		} else if uid := pod.UID; uid == "" {
-			errs = append(errs, fmt.Errorf("source Pod %q has no UID", names.SourcePod))
-		} else if err := r.Client.CoreV1().Pods(r.Namespace).Delete(ctx, names.SourcePod, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, err)
-		}
-	} else if !apierrors.IsNotFound(err) {
-		errs = append(errs, err)
+	for _, target := range owned {
+		errs = append(errs, target.delete(move.UID)...)
 	}
-	if service, err := r.Client.CoreV1().Services(r.Namespace).Get(ctx, names.SourceService, metav1.GetOptions{}); err == nil {
-		if !moveOwned(service.OwnerReferences, move.UID) || service.Labels["shiftpv.io/move-uid"] != move.UID {
-			errs = append(errs, fmt.Errorf("refusing to delete unrelated Service %q", names.SourceService))
-		} else if uid := service.UID; uid == "" {
-			errs = append(errs, fmt.Errorf("source Service %q has no UID", names.SourceService))
-		} else if err := r.Client.CoreV1().Services(r.Namespace).Delete(ctx, names.SourceService, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, err)
+	return errors.Join(errs...)
+}
+
+// ownedTransferObject deletes one Move-owned transfer object under its exact UID,
+// refusing anything that is not labelled and owned by the current ShiftPVMove.
+type ownedTransferObject struct {
+	kind, missingUIDKind, name string
+	get                        func() (metav1.Object, error)
+	del                        func(metav1.DeleteOptions) error
+}
+
+func (o ownedTransferObject) delete(moveUID string) []error {
+	object, err := o.get()
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
 		}
-	} else if !apierrors.IsNotFound(err) {
-		errs = append(errs, err)
+		return []error{err}
 	}
-	if config, err := r.Client.CoreV1().ConfigMaps(r.Namespace).Get(ctx, names.Config, metav1.GetOptions{}); err == nil {
-		if !moveOwned(config.OwnerReferences, move.UID) || config.Labels["shiftpv.io/move-uid"] != move.UID {
-			errs = append(errs, fmt.Errorf("refusing to delete unrelated ConfigMap %q", names.Config))
-		} else if uid := config.UID; uid == "" {
-			errs = append(errs, fmt.Errorf("rsync ConfigMap %q has no UID", names.Config))
-		} else if err := r.Client.CoreV1().ConfigMaps(r.Namespace).Delete(ctx, names.Config, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, err)
-		}
-	} else if !apierrors.IsNotFound(err) {
-		errs = append(errs, err)
+	if !moveOwned(object.GetOwnerReferences(), moveUID) || object.GetLabels()["shiftpv.io/move-uid"] != moveUID {
+		return []error{fmt.Errorf("refusing to delete unrelated %s %q", o.kind, o.name)}
 	}
-	if secret, err := r.Client.CoreV1().Secrets(r.Namespace).Get(ctx, names.Secret, metav1.GetOptions{}); err == nil {
-		if !moveOwned(secret.OwnerReferences, move.UID) || secret.Labels["shiftpv.io/move-uid"] != move.UID {
-			errs = append(errs, fmt.Errorf("refusing to delete unrelated Secret %q", names.Secret))
-		} else if uid := secret.UID; uid == "" {
-			errs = append(errs, fmt.Errorf("rsync Secret %q has no UID", names.Secret))
-		} else if err := r.Client.CoreV1().Secrets(r.Namespace).Delete(ctx, names.Secret, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, err)
-		}
-	} else if !apierrors.IsNotFound(err) {
-		errs = append(errs, err)
+	uid := object.GetUID()
+	if uid == "" {
+		return []error{fmt.Errorf("%s %q has no UID", o.missingUIDKind, o.name)}
 	}
-	return errorsJoin(errs...)
+	if err := o.del(metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+		return []error{err}
+	}
+	return nil
 }
 
 func transferLabels(names resourceNames, moves ...volumeapi.Move) map[string]string {

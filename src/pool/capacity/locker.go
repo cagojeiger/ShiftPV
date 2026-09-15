@@ -2,8 +2,9 @@ package capacity
 
 import "sync"
 
-// Locker serializes capacity decisions for one Pool while allowing independent
-// Pools to proceed concurrently.
+// Locker is a keyed mutex: it serializes work for one key, such as a Pool
+// capacity decision or a Volume lifecycle, while allowing independent keys to
+// proceed concurrently.
 type Locker struct {
 	mu      sync.Mutex
 	entries map[string]*lockEntry

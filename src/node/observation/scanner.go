@@ -207,10 +207,3 @@ func scanPhysical(ctx context.Context, root string, known map[string]struct{}, l
 	}
 	return result, false, nil
 }
-
-func min(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
-}

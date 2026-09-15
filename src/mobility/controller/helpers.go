@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"errors"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -13,4 +11,3 @@ func int64Pointer(value int64) *int64            { return &value }
 func hostPathTypePointer(value corev1.HostPathType) *corev1.HostPathType {
 	return &value
 }
-func errorsJoin(values ...error) error { return errors.Join(values...) }

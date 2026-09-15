@@ -152,6 +152,9 @@ func (h *Handler) MutatePod(ctx context.Context, namespace string, pod *corev1.P
 }
 
 func NodeReady(node *corev1.Node) bool {
+	if node == nil {
+		return false
+	}
 	for _, condition := range node.Status.Conditions {
 		if condition.Type == corev1.NodeReady {
 			return condition.Status == corev1.ConditionTrue

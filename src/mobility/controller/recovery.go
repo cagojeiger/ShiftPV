@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -11,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
 )
 
 const (
@@ -80,7 +82,7 @@ func (r *Reconciler) recoveryStep(ctx context.Context, move volumeapi.Move, stat
 		}
 		return r.recoveryAdvance(ctx, move, recoveryVerifying)
 	case recoveryVerifying:
-		done, err := r.recoveryJob(ctx, move, true)
+		done, err := r.recoveryJob(ctx, move)
 		if err != nil || !done {
 			return err
 		}
@@ -107,7 +109,7 @@ func (r *Reconciler) recoveryStep(ctx context.Context, move volumeapi.Move, stat
 			return r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseBlocked, move.Name, state.OwnerNode, next)
 		}
 		placed, err := r.recoverPlacement(ctx, move, claim)
-		if err != nil || !placed || !contains(state.PublishedNodes, state.OwnerNode) {
+		if err != nil || !placed || !slices.Contains(state.PublishedNodes, state.OwnerNode) {
 			return err
 		}
 		if state.OwnerNode == move.Status.DestinationNode {
@@ -139,7 +141,7 @@ func (r *Reconciler) recoveryNodes(ctx context.Context, move volumeapi.Move, own
 		if err != nil {
 			return err
 		}
-		if !nodeReady(node) || node.DeletionTimestamp != nil {
+		if !admission.NodeReady(node) || node.DeletionTimestamp != nil {
 			return fmt.Errorf("node %q must be Ready", name)
 		}
 		if name == owner && node.Spec.Unschedulable {
@@ -165,7 +167,7 @@ func (r *Reconciler) recoveryClaim(ctx context.Context, move volumeapi.Move) (*c
 		return nil, err
 	}
 	ref := pv.Spec.ClaimRef
-	if pv.DeletionTimestamp != nil || claim.DeletionTimestamp != nil || pv.Spec.CSI == nil || pv.Spec.CSI.Driver != "csi.shiftpv.io" || pv.Spec.CSI.VolumeHandle != move.Spec.VolumeID || ref == nil || ref.Namespace != claim.Namespace || ref.Name != claim.Name || ref.UID == "" || ref.UID != claim.UID || claim.Spec.VolumeName != pv.Name {
+	if pv.DeletionTimestamp != nil || claim.DeletionTimestamp != nil || pv.Spec.CSI == nil || pv.Spec.CSI.Driver != admission.DriverName || pv.Spec.CSI.VolumeHandle != move.Spec.VolumeID || ref == nil || ref.Namespace != claim.Namespace || ref.Name != claim.Name || ref.UID == "" || ref.UID != claim.UID || claim.Spec.VolumeName != pv.Name {
 		return nil, fmt.Errorf("PV/PVC binding or volume handle changed")
 	}
 	namespace, err := r.Client.CoreV1().Namespaces().Get(ctx, claim.Namespace, metav1.GetOptions{})

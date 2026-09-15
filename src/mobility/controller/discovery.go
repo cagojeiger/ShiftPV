@@ -10,6 +10,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
 	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
 )
 
@@ -54,7 +55,7 @@ func (r *Reconciler) discoverMoves(ctx context.Context) (discoveryErr error) {
 			}
 			return fmt.Errorf("read owner Node %q: %w", state.OwnerNode, err)
 		}
-		if !node.Spec.Unschedulable || !nodeReady(node) {
+		if !node.Spec.Unschedulable || !admission.NodeReady(node) {
 			continue
 		}
 		candidate := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: state.OwnerNode}}

@@ -38,13 +38,13 @@ func (r *Reconciler) execute(ctx context.Context, move *volumeapi.Move, observed
 	case fsm.ActionCommitOwner:
 		return r.commitOwner(ctx, move, observed)
 	case fsm.ActionEnsureCleanup:
-		return r.ensureCleanup(ctx, move, observed)
+		return r.ensureCleanupContract(ctx, move)
 	case fsm.ActionConfirmCleanup:
 		return r.acknowledgeCleanup(ctx, *move)
 	case fsm.ActionMarkSucceeded:
 		return r.markSucceeded(ctx, move, observed)
 	case fsm.ActionMarkBlocked:
-		return r.markBlocked(ctx, move, observed, decision.Reason)
+		return r.markBlocked(ctx, move, observed)
 	default:
 		return fmt.Errorf("unsupported mobility action %q", decision.Action)
 	}
@@ -289,10 +289,6 @@ func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volume
 	return nil
 }
 
-func (r *Reconciler) ensureCleanup(ctx context.Context, move *volumeapi.Move, observed observation) error {
-	return r.ensureCleanupContract(ctx, move)
-}
-
 func (r *Reconciler) markSucceeded(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	complete, failed, err := r.cleanupState(ctx, *move)
 	if err != nil {
@@ -340,8 +336,9 @@ func validDestinationAuthorityIntent(move volumeapi.Move) bool {
 		destination.VolumeID == move.Spec.VolumeID && destination.NodeName == move.Status.DestinationNode
 }
 
-func (r *Reconciler) markBlocked(ctx context.Context, move *volumeapi.Move, observed observation, reason string) error {
-	move.Status.Reason = reason
+// reconcileMove records decision.Reason on the Move after this action returns,
+// so the blocked reason is not assigned here.
+func (r *Reconciler) markBlocked(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	move.Status.Message = "mobility stopped without automatic rollback"
 	if observed.Volume.Phase == volumeapi.PhaseBlocked && observed.Volume.ActiveMove == move.Name {
 		return nil

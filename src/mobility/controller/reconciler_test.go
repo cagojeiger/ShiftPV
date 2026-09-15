@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -174,7 +175,7 @@ func identifiedTestPools(pools []volumeapi.Pool) []volumeapi.Pool {
 		if result[index].UID == "" {
 			result[index].UID = result[index].Name + "-uid"
 		}
-		if !contains(result[index].Finalizers, volumeapi.PoolProtectionFinalizer) {
+		if !slices.Contains(result[index].Finalizers, volumeapi.PoolProtectionFinalizer) {
 			result[index].Finalizers = append(result[index].Finalizers, volumeapi.PoolProtectionFinalizer)
 		}
 	}
@@ -195,7 +196,7 @@ func identifiedReadyTestPools(pools []volumeapi.Pool, states map[string]volumeap
 			}
 			copy := *state.CurrentCopy
 			inventory.Copies = append(inventory.Copies, volumeapi.CopyObservation{
-				Marker: "test-copy", Identity: &copy, Present: true, Published: contains(state.PublishedNodes, copy.NodeName),
+				Marker: "test-copy", Identity: &copy, Present: true, Published: slices.Contains(state.PublishedNodes, copy.NodeName),
 			})
 		}
 		result[index].Status.Inventory = inventory

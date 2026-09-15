@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -549,7 +550,7 @@ func TestRecoveredMoveReleasesFinalizerOnlyAfterCapacitySettlement(t *testing.T)
 	}
 	got := repo.moves[0]
 	if got.Status.RecoveryPhase != recoveryRecovered || repo.volumes[move.Spec.VolumeID].ActiveMove != "" ||
-		contains(got.Finalizers, volumeapi.MoveProtectionFinalizer) || !volumeapi.MoveCleanupSettled(got) {
+		slices.Contains(got.Finalizers, volumeapi.MoveProtectionFinalizer) || !volumeapi.MoveCleanupSettled(got) {
 		t.Fatalf("recovery did not terminally settle: move=%+v volume=%+v", got, repo.volumes[move.Spec.VolumeID])
 	}
 	reserved, err := poolcapacity.ReservedBytes(repo.volumes, repo.moves, "destination")
@@ -565,7 +566,7 @@ func TestRecoveredMoveReleasesFinalizerOnlyAfterCapacitySettlement(t *testing.T)
 	if err := r.ReconcileAll(context.Background()); err == nil {
 		t.Fatal("Recovered without capacity settlement was accepted")
 	}
-	if !contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) {
+	if !slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) {
 		t.Fatal("unsafe Recovered move lost its finalizer")
 	}
 }

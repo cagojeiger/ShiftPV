@@ -36,7 +36,7 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
 	}
 
-	unlock := s.poolLifecycles.lock(nodeName)
+	unlock := s.poolLifecycles.Lock(nodeName)
 	if s.PoolLocks != nil {
 		unlock()
 		unlock = s.PoolLocks.Lock(nodeName)
