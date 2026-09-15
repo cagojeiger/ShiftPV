@@ -458,6 +458,131 @@ func TestSameCleanupJobAcceptsAPIDefaultsButRejectsEffectChanges(t *testing.T) {
 	}
 }
 
+// TestCleanupJobDifferenceLocalizesEveryComparedField flips one compared field
+// at a time. Every row of the comparison table must reject its own change and
+// report itself, and no row may reject a Job that is still the approved effect.
+func TestCleanupJobDifferenceLocalizesEveryComparedField(t *testing.T) {
+	_, cleanup := cleanupFixture(t)
+	runner := &Runner{Namespace: "shiftpv-system", ServiceAccountName: "shiftpv-controller", Image: "helper:test", Timeout: 500 * time.Millisecond}
+	expected := runner.cleanupJob(cleanup, "/mnt/shiftpv")
+	if field := cleanupJobDifference(expected.DeepCopy(), expected); field != "" {
+		t.Fatalf("approved cleanup effect rejected at %q", field)
+	}
+	if sameCleanupJob(nil, expected) || sameCleanupJob(expected, nil) {
+		t.Fatal("missing cleanup Job accepted")
+	}
+	deleted := metav1.Now()
+	two, zero, deadline := int32(2), int32(0), int64(9999)
+	indexed := batchv1.IndexedCompletion
+	foreign := "example.com/cleanup-controller"
+	for _, testCase := range []struct {
+		field  string
+		change func(*batchv1.Job)
+	}{
+		{"metadata.labels[" + cleanupUIDLabel + "]", func(job *batchv1.Job) { job.Labels[cleanupUIDLabel] = "other-uid" }},
+		{"metadata.labels[" + cleanupNameLabel + "]", func(job *batchv1.Job) { job.Labels[cleanupNameLabel] = "other-name" }},
+		{"metadata.deletionTimestamp", func(job *batchv1.Job) { job.DeletionTimestamp = &deleted }},
+		{"metadata.namespace", func(job *batchv1.Job) { job.Namespace = "other-namespace" }},
+		{"metadata.name", func(job *batchv1.Job) { job.Name = "other-effect" }},
+		{"metadata.ownerReferences", func(job *batchv1.Job) { job.OwnerReferences = nil }},
+		{"spec.parallelism", func(job *batchv1.Job) { job.Spec.Parallelism = &two }},
+		{"spec.completions", func(job *batchv1.Job) { job.Spec.Completions = &two }},
+		{"spec.manualSelector", func(job *batchv1.Job) { job.Spec.ManualSelector = boolPtr(true) }},
+		{"spec.completionMode", func(job *batchv1.Job) { job.Spec.CompletionMode = &indexed }},
+		{"spec.podFailurePolicy", func(job *batchv1.Job) { job.Spec.PodFailurePolicy = &batchv1.PodFailurePolicy{} }},
+		{"spec.successPolicy", func(job *batchv1.Job) { job.Spec.SuccessPolicy = &batchv1.SuccessPolicy{} }},
+		{"spec.backoffLimitPerIndex", func(job *batchv1.Job) { job.Spec.BackoffLimitPerIndex = &zero }},
+		{"spec.maxFailedIndexes", func(job *batchv1.Job) { job.Spec.MaxFailedIndexes = &zero }},
+		{"spec.managedBy", func(job *batchv1.Job) { job.Spec.ManagedBy = &foreign }},
+		{"spec.template.labels[" + cleanupUIDLabel + "]", func(job *batchv1.Job) {
+			job.Spec.Template.Labels[cleanupUIDLabel] = "other-uid"
+		}},
+		{"spec.template.labels[" + cleanupNameLabel + "]", func(job *batchv1.Job) {
+			job.Spec.Template.Labels[cleanupNameLabel] = "other-name"
+		}},
+		{"spec.template.spec.nodeName", func(job *batchv1.Job) { job.Spec.Template.Spec.NodeName = "other-node" }},
+		{"spec.template.spec.serviceAccountName", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.ServiceAccountName = "other-account"
+		}},
+		{"spec.template.spec.restartPolicy", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
+		}},
+		{"spec.template.spec.hostPID", func(job *batchv1.Job) { job.Spec.Template.Spec.HostPID = true }},
+		{"spec.template.spec.hostIPC", func(job *batchv1.Job) { job.Spec.Template.Spec.HostIPC = true }},
+		{"spec.template.spec.hostNetwork", func(job *batchv1.Job) { job.Spec.Template.Spec.HostNetwork = true }},
+		{"spec.template.spec.initContainers", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "init"}}
+		}},
+		{"spec.template.spec.ephemeralContainers", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.EphemeralContainers = []corev1.EphemeralContainer{{}}
+		}},
+		{"spec.template.spec.containers", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers = append(job.Spec.Template.Spec.Containers, corev1.Container{Name: "sidecar"})
+		}},
+		{"spec.template.spec.volumes", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{Name: "extra"})
+		}},
+		{"spec.template.spec.containers[0].name", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].Name = "other"
+		}},
+		{"spec.template.spec.containers[0].image", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].Image = "other:tag"
+		}},
+		{"spec.template.spec.containers[0].command", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].Command = []string{"/bin/sh"}
+		}},
+		{"spec.template.spec.containers[0].args", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].Args = append(job.Spec.Template.Spec.Containers[0].Args, "--pool-root=/other")
+		}},
+		{"spec.template.spec.containers[0].env", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].Env = nil
+		}},
+		{"spec.template.spec.containers[0].envFrom", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{{Prefix: "SHIFTPV_"}}
+		}},
+		{"spec.template.spec.containers[0].resources", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{}
+		}},
+		{"spec.template.spec.containers[0].securityContext", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation = boolPtr(true)
+		}},
+		{"spec.template.spec.containers[0].volumeMounts", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].VolumeMounts[0].MountPath = "/other"
+		}},
+		{"spec.template.spec.containers[0].volumeDevices", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].VolumeDevices = []corev1.VolumeDevice{{Name: "pool", DevicePath: "/dev/pool"}}
+		}},
+		{"spec.template.spec.containers[0].lifecycle", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].Lifecycle = &corev1.Lifecycle{}
+		}},
+		{"spec.template.spec.containers[0].livenessProbe", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].LivenessProbe = &corev1.Probe{}
+		}},
+		{"spec.template.spec.containers[0].readinessProbe", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].ReadinessProbe = &corev1.Probe{}
+		}},
+		{"spec.template.spec.containers[0].startupProbe", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Containers[0].StartupProbe = &corev1.Probe{}
+		}},
+		{"spec.template.spec.volumes[0]", func(job *batchv1.Job) {
+			job.Spec.Template.Spec.Volumes[0].HostPath.Path = "/other"
+		}},
+		{"spec.backoffLimit", func(job *batchv1.Job) { job.Spec.BackoffLimit = &zero }},
+		{"spec.activeDeadlineSeconds", func(job *batchv1.Job) { job.Spec.ActiveDeadlineSeconds = &deadline }},
+	} {
+		t.Run(strings.ReplaceAll(testCase.field, "/", "_"), func(t *testing.T) {
+			current := expected.DeepCopy()
+			testCase.change(current)
+			if field := cleanupJobDifference(current, expected); field != testCase.field {
+				t.Fatalf("difference = %q, want %q", field, testCase.field)
+			}
+			if sameCleanupJob(current, expected) {
+				t.Fatal("changed cleanup effect accepted")
+			}
+		})
+	}
+}
+
 func TestCleanupRunnerReportsFailedAndReceiptlessJobs(t *testing.T) {
 	for name, condition := range map[string]batchv1.JobConditionType{
 		"failed": batchv1.JobFailed, "receiptless": batchv1.JobComplete,

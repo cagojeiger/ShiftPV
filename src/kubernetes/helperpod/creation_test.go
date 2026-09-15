@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/cagojeiger/ShiftPV/src/volume"
 )
 
@@ -129,6 +130,113 @@ func TestCreationRejectsChangedExistingPodWithoutDeletingIt(t *testing.T) {
 	}
 	if _, err := client.CoreV1().Pods(runner.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{}); err != nil {
 		t.Fatalf("changed helper was deleted: %v", err)
+	}
+}
+
+// TestCreationPodDifferenceLocalizesEveryComparedField flips one compared field
+// at a time. Every row must reject its own change, report itself, and keep the
+// error text its group is reported under; an unchanged Pod must be accepted.
+func TestCreationPodDifferenceLocalizesEveryComparedField(t *testing.T) {
+	runner := validRunner(fake.NewClientset())
+	runner.ServiceAccountName = "shiftpv-controller"
+	identity := creationIdentity()
+	operationID, err := volumeapi.CreationOperationID(identity.VolumeUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := runner.creationPod(context.Background(), identity, operationID, []string{"/shiftpv-volume-helper", "create"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := desired.DeepCopy()
+	settled.UID = "creation-pod-uid"
+	if field, err := creationPodDifference(desired, settled); field != "" || err != nil {
+		t.Fatalf("desired creation helper rejected at %q: %v", field, err)
+	}
+	if err := sameCreationPod(nil, settled); err == nil {
+		t.Fatal("missing creation helper accepted")
+	}
+	deleted := metav1.Now()
+	const (
+		shapeError      = "creation helper Pod identity or execution shape changed"
+		labelError      = "creation helper Pod label changed"
+		annotationError = "creation helper Pod annotation changed"
+		commandError    = "creation helper Pod command changed"
+		mountError      = "creation helper Pod Pool mount changed"
+	)
+	for _, testCase := range []struct {
+		name    string
+		field   string
+		message string
+		change  func(*corev1.Pod)
+	}{
+		{"uid", "metadata.uid", shapeError, func(pod *corev1.Pod) { pod.UID = "" }},
+		{"deleting", "metadata.deletionTimestamp", shapeError, func(pod *corev1.Pod) { pod.DeletionTimestamp = &deleted }},
+		{"name", "metadata.name", shapeError, func(pod *corev1.Pod) { pod.Name = "other-helper" }},
+		{"namespace", "metadata.namespace", shapeError, func(pod *corev1.Pod) { pod.Namespace = "other-namespace" }},
+		{"node", "spec.nodeName", shapeError, func(pod *corev1.Pod) { pod.Spec.NodeName = "other-node" }},
+		{"account", "spec.serviceAccountName", shapeError, func(pod *corev1.Pod) { pod.Spec.ServiceAccountName = "other-account" }},
+		{"restart", "spec.restartPolicy", shapeError, func(pod *corev1.Pod) { pod.Spec.RestartPolicy = corev1.RestartPolicyOnFailure }},
+		{"token", "spec.automountServiceAccountToken", shapeError, func(pod *corev1.Pod) {
+			pod.Spec.AutomountServiceAccountToken = nil
+		}},
+		{"hostNetwork", "spec.hostNetwork", shapeError, func(pod *corev1.Pod) { pod.Spec.HostNetwork = true }},
+		{"hostPID", "spec.hostPID", shapeError, func(pod *corev1.Pod) { pod.Spec.HostPID = true }},
+		{"hostIPC", "spec.hostIPC", shapeError, func(pod *corev1.Pod) { pod.Spec.HostIPC = true }},
+		{"containers", "spec.containers", shapeError, func(pod *corev1.Pod) {
+			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "sidecar"})
+		}},
+		{"initContainers", "spec.initContainers", shapeError, func(pod *corev1.Pod) {
+			pod.Spec.InitContainers = []corev1.Container{{Name: "init"}}
+		}},
+		{"ephemeralContainers", "spec.ephemeralContainers", shapeError, func(pod *corev1.Pod) {
+			pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{}}
+		}},
+		{"label", "metadata.labels[shiftpv.io/volume-id]", labelError, func(pod *corev1.Pod) {
+			pod.Labels["shiftpv.io/volume-id"] = "other-volume"
+		}},
+		{"annotation", "metadata.annotations[" + creationCopyIDAnnotation + "]", annotationError, func(pod *corev1.Pod) {
+			pod.Annotations[creationCopyIDAnnotation] = "other-copy"
+		}},
+		{"containerName", "spec.containers[0].name", commandError, func(pod *corev1.Pod) { pod.Spec.Containers[0].Name = "other" }},
+		{"image", "spec.containers[0].image", commandError, func(pod *corev1.Pod) { pod.Spec.Containers[0].Image = "other:tag" }},
+		{"command", "spec.containers[0].command", commandError, func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].Command = []string{"/bin/sh", "-c", "touch /pool/foreign"}
+		}},
+		{"args", "spec.containers[0].args", commandError, func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].Args = []string{"--pool-root=/other"}
+		}},
+		{"env", "spec.containers[0].env", commandError, func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "POOL_ROOT", Value: "/other"}}
+		}},
+		{"envFrom", "spec.containers[0].envFrom", commandError, func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{{Prefix: "SHIFTPV_"}}
+		}},
+		{"resources", "spec.containers[0].resources", commandError, func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].Resources.Requests = corev1.ResourceList{}
+		}},
+		{"securityContext", "spec.containers[0].securityContext", commandError, func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation = boolPtr(true)
+		}},
+		{"poolRoot", "spec.volumes[pool]", mountError, func(pod *corev1.Pod) { pod.Spec.Volumes[0].HostPath.Path = "/other" }},
+		{"mountPath", "spec.volumes[pool]", mountError, func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].VolumeMounts[0].MountPath = "/other"
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			current := settled.DeepCopy()
+			testCase.change(current)
+			field, err := creationPodDifference(desired, current)
+			if field != testCase.field {
+				t.Fatalf("difference = %q, want %q", field, testCase.field)
+			}
+			if err == nil || err.Error() != testCase.message {
+				t.Fatalf("error = %v, want %q", err, testCase.message)
+			}
+			if got := sameCreationPod(desired, current); got == nil || got.Error() != testCase.message {
+				t.Fatalf("changed creation helper accepted: %v", got)
+			}
+		})
 	}
 }
 
