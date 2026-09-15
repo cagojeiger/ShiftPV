@@ -3,17 +3,13 @@ package docs_test
 import (
 	"os"
 	"path/filepath"
-	"runtime"
+	"regexp"
 	"strings"
 	"testing"
 )
 
 func TestTarget04DocsDoNotRetainRemovedDurableResources(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test location")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+	root := repositoryRoot(t)
 	paths := []string{
 		"README.md",
 		"charts/shiftpv/README.md",
@@ -38,7 +34,7 @@ func TestTarget04DocsDoNotRetainRemovedDurableResources(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", relative, err)
 		}
-		for _, forbidden := range []string{"ShiftPVCleanup", "reservation ConfigMap", "0.3.1"} {
+		for _, forbidden := range forbiddenHistoricalTerms {
 			if strings.Contains(string(content), forbidden) {
 				t.Errorf("%s retains removed or historical term %q", relative, forbidden)
 			}
@@ -46,12 +42,12 @@ func TestTarget04DocsDoNotRetainRemovedDurableResources(t *testing.T) {
 	}
 }
 
+// shiftPVResourceName matches a backtick-quoted ShiftPV resource identifier,
+// e.g. `ShiftPVPool`.
+var shiftPVResourceName = regexp.MustCompile("`ShiftPV[A-Za-z]+`")
+
 func TestTarget04ContractNamesThreeDurableAPIs(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test location")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+	root := repositoryRoot(t)
 	content, err := os.ReadFile(filepath.Join(root, "docs", "spec", "csi-driver.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +58,34 @@ func TestTarget04ContractNamesThreeDurableAPIs(t *testing.T) {
 			t.Errorf("CSI contract is missing durable API %s", kind)
 		}
 	}
-	if !strings.Contains(contract, "durable API는 정확히 세 개") {
-		t.Error("CSI contract does not close the durable API surface at three resources")
+
+	// The durable-API surface is closed structurally: find the statement that
+	// introduces it and the table naming each API, and require it to list
+	// exactly ShiftPVPool, ShiftPVVolume, and ShiftPVMove and no other
+	// ShiftPV* resource, rather than pinning to the literal Korean sentence.
+	statementStart := strings.Index(contract, "durable API")
+	if statementStart == -1 {
+		t.Fatal("CSI contract has no durable-API statement")
+	}
+	afterStatement := contract[statementStart:]
+	statementEnd := strings.Index(afterStatement, "Helper Job")
+	if statementEnd == -1 {
+		t.Fatal("durable-API statement has no closing paragraph naming Helper Job as a non-source-of-truth")
+	}
+	statement := afterStatement[:statementEnd]
+
+	names := shiftPVResourceName.FindAllString(statement, -1)
+	unique := map[string]bool{}
+	for _, name := range names {
+		unique[name] = true
+	}
+	want := map[string]bool{"`ShiftPVPool`": true, "`ShiftPVVolume`": true, "`ShiftPVMove`": true}
+	if len(unique) != len(want) {
+		t.Fatalf("durable-API statement names %v, want exactly ShiftPVPool, ShiftPVVolume, ShiftPVMove", names)
+	}
+	for name := range want {
+		if !unique[name] {
+			t.Errorf("durable-API statement is missing %s", name)
+		}
 	}
 }

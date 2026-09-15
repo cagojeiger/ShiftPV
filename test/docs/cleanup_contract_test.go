@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"testing"
 
@@ -102,15 +101,6 @@ func TestParentCleanupJournalSchemasMatchRuntimeContract(t *testing.T) {
 			}
 		})
 	}
-}
-
-func repositoryRoot(t *testing.T) string {
-	t.Helper()
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test location")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
 }
 
 func readYAMLMap(t *testing.T, path string) map[string]any {

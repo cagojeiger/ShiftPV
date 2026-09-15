@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,11 +16,7 @@ var adrFile = regexp.MustCompile(`^([0-9]{4})-.+\.md$`)
 var adrIndexLink = regexp.MustCompile(`(?m)^\| [^|]+ \| \[([0-9]{4})\]\((([0-9]{4})-[^)]+\.md)\) \|`)
 
 func TestLocalMarkdownLinksResolve(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test file location")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+	root := repositoryRoot(t)
 	paths := []string{filepath.Join(root, "README.md")}
 	for _, directory := range []string{"docs", "charts", "test"} {
 		err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry os.DirEntry, err error) error {
@@ -95,11 +90,7 @@ func markdownAnchor(heading string) string {
 }
 
 func TestADRHeadingsAreConsistent(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test file location")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+	root := repositoryRoot(t)
 	adrDir := filepath.Join(root, "docs", "adr")
 	want := []string{"Context", "Decision", "Alternatives considered", "Consequences"}
 
@@ -127,11 +118,7 @@ func TestADRHeadingsAreConsistent(t *testing.T) {
 }
 
 func TestADRsFollowNumericOrder(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test file location")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+	root := repositoryRoot(t)
 	adrDir := filepath.Join(root, "docs", "adr")
 	entries, err := os.ReadDir(adrDir)
 	if err != nil {
