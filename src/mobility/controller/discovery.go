@@ -58,14 +58,13 @@ func (r *Reconciler) discoverMoves(ctx context.Context) (discoveryErr error) {
 		if !node.Spec.Unschedulable || !admission.NodeReady(node) {
 			continue
 		}
-		candidate := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: state.OwnerNode}}
-		observed, err := r.observe(ctx, candidate)
+		eligible, reason, err := r.preflightVolume(ctx, volumeID, state.OwnerNode)
 		if err != nil {
 			return fmt.Errorf("preflight volume %s: %w", volumeID, err)
 		}
-		if !observed.FSM.PreconditionsValid {
-			deferred[observed.FSM.UnsafeReason]++
-			klog.V(2).Infof("deferred ShiftPV mobility for volume %s: %s", volumeID, observed.FSM.UnsafeReason)
+		if !eligible {
+			deferred[reason]++
+			klog.V(2).Infof("deferred ShiftPV mobility for volume %s: %s", volumeID, reason)
 			continue
 		}
 		move, err := r.Repository.CreateMove(ctx, moveGenerateName(volumeID), volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: state.OwnerNode})
