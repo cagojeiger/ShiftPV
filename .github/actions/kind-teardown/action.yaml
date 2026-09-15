@@ -1,0 +1,56 @@
+name: Export kind teardown diagnostics
+description: >-
+  Collect kind/kubectl diagnostics for a failed end-to-end job and upload them
+  as a build artifact. Callers keep their own step-level `if:` gate so the
+  job-status semantics stay with the workflow.
+
+inputs:
+  cluster-name:
+    description: Name of the kind cluster to export logs from.
+    required: true
+  diagnostics-dir:
+    description: Workspace-relative directory that collects the diagnostics.
+    required: true
+  artifact-name:
+    description: Name of the uploaded diagnostics artifact.
+    required: true
+  resource-kinds:
+    description: Comma-separated resource kinds passed to `kubectl get -A -o wide`.
+    required: false
+    default: nodes,pods,jobs,pvc,pv,storageclass,csinode
+  extra-diagnostics:
+    description: Optional extra shell commands run after the standard collection.
+    required: false
+    default: ""
+  retention-days:
+    description: Retention for the uploaded diagnostics artifact.
+    required: false
+    default: "14"
+
+runs:
+  using: composite
+  steps:
+    - name: Export failure diagnostics
+      shell: bash
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        DIAGNOSTICS_DIR: ${{ inputs.diagnostics-dir }}
+        RESOURCE_KINDS: ${{ inputs.resource-kinds }}
+        EXTRA_DIAGNOSTICS: ${{ inputs.extra-diagnostics }}
+      run: |
+        mkdir -p "${DIAGNOSTICS_DIR}"
+        kind export logs "${DIAGNOSTICS_DIR}/kind" --name "${CLUSTER_NAME}" || true
+        kubectl get "${RESOURCE_KINDS}" -A -o wide > "${DIAGNOSTICS_DIR}/resources.txt" 2>&1 || true
+        kubectl get shiftpvpools,shiftpvvolumes,shiftpvmoves -o yaml > "${DIAGNOSTICS_DIR}/shiftpv-resources.yaml" 2>&1 || true
+        kubectl get events -A --sort-by=.metadata.creationTimestamp > "${DIAGNOSTICS_DIR}/events.txt" 2>&1 || true
+        if [[ -n "${EXTRA_DIAGNOSTICS}" ]]; then
+          bash -e -o pipefail -c "${EXTRA_DIAGNOSTICS}"
+        fi
+
+    - name: Upload failure diagnostics
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.diagnostics-dir }}
+        if-no-files-found: ignore
+        retention-days: ${{ inputs.retention-days }}

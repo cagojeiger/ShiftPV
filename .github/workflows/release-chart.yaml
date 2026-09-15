@@ -26,7 +26,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Check out release commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0
@@ -71,24 +71,15 @@ jobs:
       contents: write
     steps:
       - name: Check out release commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
 
       - name: Install Helm
-        env:
-          HELM_VERSION: v3.15.2
-        run: |
-          set -euo pipefail
-          asset="helm-${HELM_VERSION}-linux-amd64.tar.gz"
-          mkdir -p "${RUNNER_TEMP}/bin"
-          curl -fsSL "https://get.helm.sh/${asset}" -o "${RUNNER_TEMP}/${asset}"
-          curl -fsSL "https://get.helm.sh/${asset}.sha256sum" -o "${RUNNER_TEMP}/${asset}.sha256sum"
-          cd "${RUNNER_TEMP}"
-          sha256sum -c "${asset}.sha256sum"
-          tar -xzf "${asset}"
-          mv linux-amd64/helm "${RUNNER_TEMP}/bin/helm"
-          echo "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+        uses: ./.github/actions/install-k8s-tools
+        with:
+          kind: "false"
+          kubectl: "false"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -108,7 +99,7 @@ jobs:
           sha256sum "shiftpv-${VERSION}.tgz" >"shiftpv-${VERSION}.tgz.sha256"
 
       - name: Check out chart repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: gh-pages
           path: chart-repository
