@@ -447,6 +447,23 @@ func TestNodePublishReportsBinderFailure(t *testing.T) {
 	}
 }
 
+func TestNodePublishFailsClosedForForeignStorageIdentity(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	foreign := *registry.state.CurrentCopy
+	foreign.InstallationID = "other-installation"
+	registry.state.CurrentCopy = &foreign
+
+	_, err := service.NodePublishVolume(context.Background(), validPublishRequest())
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("foreign storage identity code=%s err=%v", status.Code(err), err)
+	}
+	if binder.publishedSource != "" || registry.published {
+		t.Fatalf("foreign storage identity reached publish effects: binder=%#v registry=%#v", binder, registry)
+	}
+}
+
 func TestNodePublishRejectsUnconfiguredService(t *testing.T) {
 	_, err := (&Service{}).NodePublishVolume(context.Background(), validPublishRequest())
 	if status.Code(err) != codes.Internal {
@@ -747,6 +764,43 @@ func TestNodeUnpublishFailsClosedWhenRemainingTargetsCannotBeInspected(t *testin
 	})
 	if status.Code(err) != codes.Internal || registry.publishedNode != "" {
 		t.Fatalf("expected fail-closed inspection error without state change, got err=%v registry=%#v", err, registry)
+	}
+}
+
+func TestNodeUnpublishRemovesTargetWhenStorageIdentityIsForeign(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	foreign := *registry.state.CurrentCopy
+	foreign.InstallationID = "other-installation"
+	registry.state.CurrentCopy = &foreign
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: foreign.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+
+	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if binder.unpublished != request.TargetPath || registry.reconcileCalls.Load() != 0 {
+		t.Fatalf("foreign storage identity blocked target teardown or changed publication state: binder=%#v reconciles=%d", binder, registry.reconcileCalls.Load())
+	}
+}
+
+func TestNodeUnpublishFailsClosedWhenAuthorityChangesUnderStorageLock(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	registry := service.Volumes.(*fakeVolumeRegistry)
+	copy := *registry.state.CurrentCopy
+	registry.getStates = []volumeapi.State{
+		registry.state,
+		{UID: "rotated-volume-uid", Phase: volumeapi.PhaseReady, OwnerNode: copy.NodeName, CurrentCopy: &copy},
+	}
+	request := &csi.NodeUnpublishVolumeRequest{VolumeId: copy.VolumeID, TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount"}
+
+	_, err := service.NodeUnpublishVolume(context.Background(), request)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("rotated volume authority code=%s err=%v", status.Code(err), err)
+	}
+	if binder.unpublished != request.TargetPath || registry.reconcileCalls.Load() != 0 {
+		t.Fatalf("rotated volume authority blocked target teardown or changed publication state: binder=%#v reconciles=%d", binder, registry.reconcileCalls.Load())
 	}
 }
 
