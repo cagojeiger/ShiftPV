@@ -91,6 +91,9 @@ func (h *Handler) Admit(ctx context.Context, request *admissionv1.AdmissionReque
 		return denied(fmt.Sprintf("ShiftPV resource deletion denied: inspect dependencies: %v", err), request.UID)
 	}
 	if report.Safe() {
+		if isStorageClassDelete(request) {
+			return &admissionv1.AdmissionResponse{UID: request.UID, Allowed: true}
+		}
 		return denied("ShiftPV resource deletion denied: use the Helm or Argo CD uninstall guard to begin a quiesced teardown", request.UID)
 	}
 
@@ -107,6 +110,13 @@ func blockerNames(report uninstallcheck.Report) string {
 		blockers = append(blockers, fmt.Sprintf("%s %s", blocker.Kind, name))
 	}
 	return strings.Join(blockers, ", ")
+}
+
+// isStorageClassDelete reports whether the request deletes a StorageClass. A StorageClass holds no
+// data and the chart recreates it, so its deletion is allowed once the uninstall checker finds no
+// dependent ShiftPV storage.
+func isStorageClassDelete(request *admissionv1.AdmissionRequest) bool {
+	return request.Resource.Group == "storage.k8s.io" && request.Resource.Resource == "storageclasses"
 }
 
 func isPoolDelete(request *admissionv1.AdmissionRequest) bool {

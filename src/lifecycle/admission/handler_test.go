@@ -145,6 +145,39 @@ func TestAdmitDeleteRequiresGrantedQuiescedTeardown(t *testing.T) {
 	}
 }
 
+func TestAdmitAllowsStorageClassDeleteOnlyWithoutDependents(t *testing.T) {
+	storageClassDelete := func() *admissionv1.AdmissionRequest {
+		return &admissionv1.AdmissionRequest{
+			UID:       types.UID("storageclass-delete"),
+			Operation: admissionv1.Delete,
+			Name:      "shiftpv",
+			Resource:  metav1.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses"},
+		}
+	}
+
+	response := (&Handler{Checker: fakeChecker{}, Permit: fakePermit{}}).Admit(context.Background(), storageClassDelete())
+	if !response.Allowed || response.UID != types.UID("storageclass-delete") {
+		t.Fatalf("safe StorageClass deletion response = %#v", response)
+	}
+
+	blocked := fakeChecker{report: uninstallcheck.Report{Blockers: []uninstallcheck.Blocker{{Kind: "PersistentVolumeClaim", Namespace: "apps", Name: "data"}}}}
+	response = (&Handler{Checker: blocked, Permit: fakePermit{}}).Admit(context.Background(), storageClassDelete())
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "dependent storage exists: PersistentVolumeClaim apps/data") {
+		t.Fatalf("blocked StorageClass deletion response = %#v", response)
+	}
+
+	csiDriverDelete := &admissionv1.AdmissionRequest{
+		UID:       types.UID("csidriver-delete"),
+		Operation: admissionv1.Delete,
+		Name:      "shiftpv.io",
+		Resource:  metav1.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "csidrivers"},
+	}
+	response = (&Handler{Checker: fakeChecker{}, Permit: fakePermit{}}).Admit(context.Background(), csiDriverDelete)
+	if response.Allowed || response.Result == nil || !strings.Contains(response.Result.Message, "quiesced teardown") {
+		t.Fatalf("safe CSIDriver deletion response = %#v", response)
+	}
+}
+
 func TestAdmitStartsOnlyFinalizerProtectedPoolDeregistration(t *testing.T) {
 	request := poolDeleteRequest("pool-a", true)
 	response := (&Handler{Checker: fakeChecker{}, Permit: fakePermit{}}).Admit(context.Background(), request)
