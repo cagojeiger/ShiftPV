@@ -32,32 +32,9 @@ func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup
 	}
 	switch current.Status.Phase {
 	case PhaseCompleted:
-		if !validPurgedReceipt(current, current.Status) || !validAbsenceFence(current.Spec.Target, current.Status.AbsenceProof) ||
-			!confirmedAbsence(current.Status.AbsenceProof) || current.Status.SettledAt == "" {
-			return Cleanup{}, false, fmt.Errorf("%w: completed cleanup proof is invalid", ErrConflict)
-		}
-		return current, true, nil
+		return settledAbsence(current)
 	case PhaseVerifying:
-		if !validPurgedReceipt(current, current.Status) {
-			return Cleanup{}, false, fmt.Errorf("%w: absence scan requires a purged API receipt", ErrConflict)
-		}
-		generation, err := s.requestPoolScan(ctx, current.Spec.Target)
-		if err != nil {
-			return Cleanup{}, false, err
-		}
-		next := current.Status
-		next.Phase = PhaseConfirmingAbsence
-		next.AbsenceProof = &AbsenceProof{
-			RequestID:          absenceRequestID(current, generation),
-			PoolName:           current.Spec.Target.PoolName,
-			PoolUID:            current.Spec.Target.PoolUID,
-			RequiredGeneration: generation,
-		}
-		if err := s.UpdateStatus(ctx, current, next); err != nil {
-			return Cleanup{}, false, err
-		}
-		current, err = s.Get(ctx, current.Spec.Authority)
-		return current, false, err
+		return s.openAbsenceFence(ctx, current)
 	case PhaseConfirmingAbsence:
 		if !validPurgedReceipt(current, current.Status) {
 			return Cleanup{}, false, fmt.Errorf("%w: absence confirmation requires a purged API receipt", ErrConflict)
@@ -66,39 +43,95 @@ func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup
 		return Cleanup{}, false, fmt.Errorf("%w: cleanup is phase=%q", ErrConflict, current.Status.Phase)
 	}
 
-	pool, err := s.Client.Resource(volumeapi.PoolResource).Get(ctx, current.Spec.Target.PoolName, metav1.GetOptions{})
+	observedGeneration, proven, err := s.scanProvesAbsence(ctx, current)
 	if err != nil {
 		return Cleanup{}, false, err
 	}
+	if !proven {
+		return current, false, nil
+	}
+	return s.settleAbsence(ctx, current, observedGeneration)
+}
+
+// settledAbsence re-checks an already Completed journal: closing cleanup is
+// only reportable while the recorded proof still stands on its own.
+func settledAbsence(current Cleanup) (Cleanup, bool, error) {
+	if !validPurgedReceipt(current, current.Status) || !validAbsenceFence(current.Spec.Target, current.Status.AbsenceProof) ||
+		!confirmedAbsence(current.Status.AbsenceProof) || current.Status.SettledAt == "" {
+		return Cleanup{}, false, fmt.Errorf("%w: completed cleanup proof is invalid", ErrConflict)
+	}
+	return current, true, nil
+}
+
+// openAbsenceFence bumps spec.scanEpoch on the target Pool and records the
+// generation that write returned as the fence the later scan must reach.
+func (s *Store) openAbsenceFence(ctx context.Context, current Cleanup) (Cleanup, bool, error) {
+	if !validPurgedReceipt(current, current.Status) {
+		return Cleanup{}, false, fmt.Errorf("%w: absence scan requires a purged API receipt", ErrConflict)
+	}
+	generation, err := s.requestPoolScan(ctx, current.Spec.Target)
+	if err != nil {
+		return Cleanup{}, false, err
+	}
+	next := current.Status
+	next.Phase = PhaseConfirmingAbsence
+	next.AbsenceProof = &AbsenceProof{
+		RequestID:          absenceRequestID(current, generation),
+		PoolName:           current.Spec.Target.PoolName,
+		PoolUID:            current.Spec.Target.PoolUID,
+		RequiredGeneration: generation,
+	}
+	if err := s.UpdateStatus(ctx, current, next); err != nil {
+		return Cleanup{}, false, err
+	}
+	current, err = s.Get(ctx, current.Spec.Authority)
+	return current, false, err
+}
+
+// scanProvesAbsence reads the fenced Pool and reports the observed generation
+// only when it is the exact current one, at or past the fence, and carries
+// complete evidence that the target copy is neither present nor published.
+// A false result without an error is an ambiguous or stale observation, which
+// leaves the journal where it is and is retried later.
+func (s *Store) scanProvesAbsence(ctx context.Context, current Cleanup) (int64, bool, error) {
+	pool, err := s.Client.Resource(volumeapi.PoolResource).Get(ctx, current.Spec.Target.PoolName, metav1.GetOptions{})
+	if err != nil {
+		return 0, false, err
+	}
 	if string(pool.GetUID()) != current.Spec.Target.PoolUID || !hasFinalizer(pool, volumeapi.PoolProtectionFinalizer) {
-		return Cleanup{}, false, fmt.Errorf("%w: cleanup Pool identity or protection changed", ErrConflict)
+		return 0, false, fmt.Errorf("%w: cleanup Pool identity or protection changed", ErrConflict)
 	}
 	proof := current.Status.AbsenceProof
 	if !validAbsenceFence(current.Spec.Target, proof) {
-		return Cleanup{}, false, fmt.Errorf("%w: cleanup absence fence is invalid", ErrConflict)
+		return 0, false, fmt.Errorf("%w: cleanup absence fence is invalid", ErrConflict)
 	}
 	observedGeneration, _, err := unstructured.NestedInt64(pool.Object, "status", "observedGeneration")
 	if err != nil {
-		return Cleanup{}, false, err
+		return 0, false, err
 	}
 	if observedGeneration != pool.GetGeneration() || observedGeneration < proof.RequiredGeneration {
-		return current, false, nil
+		return 0, false, nil
 	}
 	inventory, found, err := volumeapi.PoolInventoryFrom(pool)
 	if err != nil {
-		return Cleanup{}, false, err
+		return 0, false, err
 	}
 	if !found || !inventory.Valid || inventory.Truncated || inventory.Message != "" {
-		return current, false, nil
+		return 0, false, nil
 	}
 	poolNode, found, err := unstructured.NestedString(pool.Object, "spec", "nodeName")
 	if err != nil {
-		return Cleanup{}, false, err
+		return 0, false, err
 	}
 	if !found || !inventoryProvesAbsence(inventory, pool.GetName(), string(pool.GetUID()), poolNode, current.Spec.Target) {
-		return current, false, nil
+		return 0, false, nil
 	}
+	return observedGeneration, true, nil
+}
 
+// settleAbsence records the confirmed proof and closes the journal.
+func (s *Store) settleAbsence(ctx context.Context, current Cleanup, observedGeneration int64) (Cleanup, bool, error) {
+	proof := current.Status.AbsenceProof
 	next := current.Status
 	next.Phase = PhaseCompleted
 	next.AbsenceProof = &AbsenceProof{
@@ -116,7 +149,7 @@ func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup
 	if err := s.UpdateStatus(ctx, current, next); err != nil {
 		return Cleanup{}, false, err
 	}
-	current, err = s.Get(ctx, current.Spec.Authority)
+	current, err := s.Get(ctx, current.Spec.Authority)
 	if err != nil {
 		return Cleanup{}, false, err
 	}
