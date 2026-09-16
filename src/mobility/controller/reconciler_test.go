@@ -13,8 +13,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
@@ -29,6 +31,11 @@ type memoryRepository struct {
 	readyPools           []volumeapi.Pool
 	readyPoolsConfigured bool
 	moves                []volumeapi.Move
+	// journalParents, when set, is the dynamic fake that carries the cleanup
+	// journal parents so Move finalizer changes stay visible to the store.
+	journalParents dynamic.Interface
+	// deletingMoves names the Moves that already carry a deletionTimestamp.
+	deletingMoves map[string]bool
 }
 
 type countingRepository struct {
@@ -115,7 +122,29 @@ func (m *memoryRepository) CreateMove(_ context.Context, _ string, spec volumeap
 	m.moves = append(m.moves, move)
 	return move, nil
 }
-func (m *memoryRepository) RemoveMoveFinalizer(_ context.Context, name, uid string) error {
+
+// AddMoveFinalizer mirrors Registry.AddMoveFinalizer: protecting an object it
+// cannot read is a NotFound, and an object that is already deleting can never
+// gain a finalizer.
+func (m *memoryRepository) AddMoveFinalizer(ctx context.Context, name, uid string) error {
+	for index := range m.moves {
+		if m.moves[index].Name != name {
+			continue
+		}
+		if m.moves[index].UID != uid {
+			return volumeapi.ErrStateConflict
+		}
+		if m.deletingMoves[name] {
+			return fmt.Errorf("%w: object %q is already deleting without protection", volumeapi.ErrStateConflict, name)
+		}
+		if !slices.Contains(m.moves[index].Finalizers, volumeapi.MoveProtectionFinalizer) {
+			m.moves[index].Finalizers = append(m.moves[index].Finalizers, volumeapi.MoveProtectionFinalizer)
+		}
+		return m.mirrorMoveFinalizer(ctx, name, true)
+	}
+	return apierrors.NewNotFound(volumeapi.MoveResource.GroupResource(), name)
+}
+func (m *memoryRepository) RemoveMoveFinalizer(ctx context.Context, name, uid string) error {
 	for index := range m.moves {
 		if m.moves[index].Name != name {
 			continue
@@ -130,9 +159,36 @@ func (m *memoryRepository) RemoveMoveFinalizer(_ context.Context, name, uid stri
 			}
 		}
 		m.moves[index].Finalizers = filtered
-		return nil
+		return m.mirrorMoveFinalizer(ctx, name, false)
 	}
 	return nil
+}
+
+// mirrorMoveFinalizer keeps the journal parent object in journalParents in step
+// with the Move records this repository owns. Production reads both facts from
+// the same ShiftPVMove; the tests keep two fakes, so protection has to be
+// mirrored for the cleanup journal store to observe it at all.
+func (m *memoryRepository) mirrorMoveFinalizer(ctx context.Context, name string, present bool) error {
+	if m.journalParents == nil {
+		return nil
+	}
+	parents := m.journalParents.Resource(volumeapi.MoveResource)
+	object, err := parents.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	finalizers := []string{}
+	for _, finalizer := range object.GetFinalizers() {
+		if finalizer != volumeapi.MoveProtectionFinalizer {
+			finalizers = append(finalizers, finalizer)
+		}
+	}
+	if present {
+		finalizers = append(finalizers, volumeapi.MoveProtectionFinalizer)
+	}
+	object.SetFinalizers(finalizers)
+	_, err = parents.Update(ctx, object, metav1.UpdateOptions{})
+	return err
 }
 func (m *memoryRepository) DeleteMove(_ context.Context, name, uid string) error {
 	for index := range m.moves {
@@ -152,7 +208,30 @@ func (m *memoryRepository) DeleteMove(_ context.Context, name, uid string) error
 	}
 	return nil
 }
-func (m *memoryRepository) ListMoves(context.Context) ([]volumeapi.Move, error) { return m.moves, nil }
+func (m *memoryRepository) ListMoves(ctx context.Context) ([]volumeapi.Move, error) {
+	if m.journalParents == nil {
+		return m.moves, nil
+	}
+	// volumeapi.moveStatusFrom decodes cleanupPhase straight off the parent
+	// object, so a repository backed by journal parents has to report the phase
+	// the journal store actually wrote rather than a stale local copy.
+	moves := append([]volumeapi.Move(nil), m.moves...)
+	for index := range moves {
+		object, err := m.journalParents.Resource(volumeapi.MoveResource).Get(ctx, moves[index].Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		phase, _, err := unstructured.NestedString(object.Object, "status", "cleanup", "status", "phase")
+		if err != nil {
+			return nil, err
+		}
+		moves[index].Status.CleanupPhase = phase
+	}
+	return moves, nil
+}
 func (m *memoryRepository) SetMoveStatus(_ context.Context, name, uid string, status volumeapi.MoveStatus) error {
 	for index := range m.moves {
 		if m.moves[index].Name == name {

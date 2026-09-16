@@ -78,7 +78,7 @@ func (r *Reconciler) settleSourceRollback(ctx context.Context, move *volumeapi.M
 		return false, err
 	}
 	if !present {
-		return true, nil
+		return r.settledRollbackJournal(ctx, *move)
 	}
 	spec := cleanupapi.Spec{
 		OperationID: volumeapi.MoveRollbackOperationID(move.UID),
@@ -320,6 +320,40 @@ func rollbackExecutorIntent(move volumeapi.Move) error {
 		return volumeapi.MoveIdentityMismatch("PromotionJobName")
 	}
 	return nil
+}
+
+// settledRollbackJournal answers the already-absent case once a rollback
+// journal exists. An absent artifact proves only that the purge effect ran; the
+// journal still owns the API receipt and the post-receipt absence fence that
+// close the operation. Declaring settlement here would release the hold and the
+// parent finalizer while the journal is mid-flight, and ReconcileAll never
+// returns a Recovered Move to recovery, so the journal would stay unfinished
+// forever. Only a Move that never recorded an intent settles without one.
+func (r *Reconciler) settledRollbackJournal(ctx context.Context, move volumeapi.Move) (bool, error) {
+	if r.Cleanups == nil {
+		return false, fmt.Errorf("recovery cleanup store is not configured")
+	}
+	current, err := r.Cleanups.Get(ctx, moveCleanupAuthority(move))
+	if errors.Is(err, cleanupapi.ErrNoJournal) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.Status.Phase == cleanupapi.PhaseCompleted {
+		return true, nil
+	}
+	if current.Spec.Reason != "MoveRollback" || current.Spec.OperationID != volumeapi.MoveRollbackOperationID(move.UID) {
+		return false, r.reviewCleanupJournal(ctx, current, "CleanupIntentMismatch",
+			fmt.Sprintf("rollback settlement found cleanup operation %q for reason %q", current.Spec.OperationID, current.Spec.Reason))
+	}
+	// Recovery is still Retiring here, so the hold is intact and an executor may
+	// legitimately run; only a lost Pool identity is a contradiction.
+	complete, err := r.ensureRecoveryCleanup(ctx, move, current.Spec)
+	if contradictedCleanup(err) && !errors.Is(err, errRecoveryCleanupNeedsReview) {
+		return false, r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
+	}
+	return complete, err
 }
 
 func needsRecoveryCleanupReview(format string, arguments ...any) error {

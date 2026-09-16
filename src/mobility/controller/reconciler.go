@@ -35,6 +35,7 @@ type Repository interface {
 	ReadyPools(context.Context) ([]volumeapi.Pool, error)
 	ReadyPoolForNode(context.Context, string) (volumeapi.Pool, error)
 	CreateMove(context.Context, string, volumeapi.MoveSpec) (volumeapi.Move, error)
+	AddMoveFinalizer(context.Context, string, string) error
 	RemoveMoveFinalizer(context.Context, string, string) error
 	DeleteMove(context.Context, string, string) error
 	ListMoves(context.Context) ([]volumeapi.Move, error)
@@ -111,6 +112,16 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 			continue
 		}
 		if phase == fsm.PhaseSucceeded || (phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered) {
+			// A terminal Move whose embedded journal is still working owns an
+			// unfinished destructive operation. Finish it here instead of
+			// parking it for journal GC, then re-observe before the terminal
+			// path releases the finalizer this journal still depends on.
+			if moveCleanupPending(move) {
+				if err := r.settleTerminalCleanup(ctx, move); err != nil {
+					reconcileErrors = append(reconcileErrors, fmt.Errorf("settle cleanup for terminal move %s: %w", move.Name, err))
+				}
+				continue
+			}
 			if !volumeapi.MoveCleanupSettled(move) {
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("retain terminal move %s: cleanup and capacity are not settled", move.Name))
 				continue
