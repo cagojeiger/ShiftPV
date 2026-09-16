@@ -53,9 +53,7 @@ func (r *Reconciler) ensureCleanupContract(ctx context.Context, move *volumeapi.
 }
 
 func (r *Reconciler) ensureCleanupSpec(ctx context.Context, move *volumeapi.Move, spec cleanupapi.Spec) error {
-	if r.Cleanups == nil || r.CleanupOperator == nil || move == nil || move.UID == "" ||
-		spec.Authority != (cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID}) ||
-		spec.Target.VolumeID != move.Spec.VolumeID || spec.Validate() != nil {
+	if !r.cleanupContractComplete(move, spec) {
 		return fmt.Errorf("move cleanup contract is incomplete")
 	}
 	request, err := r.Cleanups.Ensure(ctx, spec)
@@ -74,20 +72,29 @@ func (r *Reconciler) ensureCleanupSpec(ctx context.Context, move *volumeapi.Move
 	if request.Status.Phase == cleanupapi.PhaseCompleted {
 		return nil
 	}
-	if (request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence) ||
-		request.Status.Receipt == nil || request.Status.Executor == nil ||
-		request.Status.Receipt.OperationID != spec.OperationID || request.Status.Receipt.ExecutorUID != request.Status.Executor.JobUID ||
-		!request.Status.Receipt.Retired || !request.Status.Receipt.Purged {
+	if !cleanupReceiptComplete(request, spec) {
 		return fmt.Errorf("cleanup receipt is incomplete")
 	}
-	request, complete, err := r.Cleanups.ReconcileAbsence(ctx, request)
-	if err != nil || complete {
-		return err
-	}
-	if request.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
-		_, _, err = r.Cleanups.ReconcileAbsence(ctx, request)
-	}
-	return err
+	return r.driveCleanupAbsence(ctx, request)
+}
+
+// cleanupContractComplete reports whether this reconciler may drive that exact
+// journal for that exact Move. Anything less is an incomplete contract, never a
+// journal to write.
+func (r *Reconciler) cleanupContractComplete(move *volumeapi.Move, spec cleanupapi.Spec) bool {
+	return r.Cleanups != nil && r.CleanupOperator != nil && move != nil && move.UID != "" &&
+		spec.Authority == (cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID}) &&
+		spec.Target.VolumeID == move.Spec.VolumeID && spec.Validate() == nil
+}
+
+// cleanupReceiptComplete reports whether the journal carries the exact purge
+// receipt the requested operation's executor wrote. Only such a journal may be
+// driven through its absence fence.
+func cleanupReceiptComplete(request cleanupapi.Cleanup, spec cleanupapi.Spec) bool {
+	return (request.Status.Phase == cleanupapi.PhaseVerifying || request.Status.Phase == cleanupapi.PhaseConfirmingAbsence) &&
+		request.Status.Receipt != nil && request.Status.Executor != nil &&
+		request.Status.Receipt.OperationID == spec.OperationID && request.Status.Receipt.ExecutorUID == request.Status.Executor.JobUID &&
+		request.Status.Receipt.Retired && request.Status.Receipt.Purged
 }
 
 // moveCleanupAuthority is the exact durable parent every Move cleanup journal,
@@ -182,7 +189,7 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 		return r.reviewCleanupJournal(ctx, current, "TerminalMoveCleanupIntentUnfinished",
 			fmt.Sprintf("terminal Move carries a cleanup intent still in phase %q with no purge receipt", current.Status.Phase))
 	}
-	if err := r.driveTerminalAbsence(ctx, current); err != nil {
+	if err := r.driveCleanupAbsence(ctx, current); err != nil {
 		if contradictedCleanup(err) {
 			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
 		}
@@ -191,11 +198,12 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 	return nil
 }
 
-// driveTerminalAbsence finishes a receipt-bearing journal through its Pool
-// fence. It never reaches the executor path, so the terminal arm cannot start
-// destructive work on behalf of a Move that already released its hold. The
-// second pass is the same read-back the ordinary cleanup contract performs.
-func (r *Reconciler) driveTerminalAbsence(ctx context.Context, current cleanupapi.Cleanup) error {
+// driveCleanupAbsence finishes a receipt-bearing journal through its Pool
+// fence. It never reaches the executor path, so a caller cannot start
+// destructive work here: the terminal arm in particular must not act on behalf
+// of a Move that already released its hold. The second pass is the read-back
+// both the ordinary cleanup contract and the terminal arm perform.
+func (r *Reconciler) driveCleanupAbsence(ctx context.Context, current cleanupapi.Cleanup) error {
 	next, complete, err := r.Cleanups.ReconcileAbsence(ctx, current)
 	if err != nil || complete {
 		return err

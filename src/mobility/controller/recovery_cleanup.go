@@ -141,18 +141,40 @@ func (r *Reconciler) rollbackArtifact(ctx context.Context, move volumeapi.Move) 
 // complete observation collected strictly after entry into Retiring. Nothing
 // here inspects copies: it only decides which observation may be trusted.
 func (r *Reconciler) rollbackInventoryPool(ctx context.Context, move volumeapi.Move) (*volumeapi.Pool, error) {
-	if err := validRollbackIntent(move); err != nil {
-		return nil, needsRecoveryCleanupReview("destination cleanup intent is incomplete: %v", err)
-	}
-
-	transitionedAt, err := time.Parse(time.RFC3339Nano, move.Status.LastTransitionTime)
+	transitionedAt, err := rollbackTransitionTime(move)
 	if err != nil {
-		return nil, needsRecoveryCleanupReview("Retiring transition time is invalid")
+		return nil, err
 	}
 	pools, err := r.Repository.Pools(ctx)
 	if err != nil {
 		return nil, err
 	}
+	destination, err := rollbackDestinationPool(move, pools)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.rollbackInventoryFresh(destination, transitionedAt); err != nil {
+		return nil, err
+	}
+	return destination, nil
+}
+
+// rollbackTransitionTime reads the exact instant the Move entered Retiring. An
+// unusable intent or timestamp is a contradiction, never a retry.
+func rollbackTransitionTime(move volumeapi.Move) (time.Time, error) {
+	if err := validRollbackIntent(move); err != nil {
+		return time.Time{}, needsRecoveryCleanupReview("destination cleanup intent is incomplete: %v", err)
+	}
+	transitionedAt, err := time.Parse(time.RFC3339Nano, move.Status.LastTransitionTime)
+	if err != nil {
+		return time.Time{}, needsRecoveryCleanupReview("Retiring transition time is invalid")
+	}
+	return transitionedAt, nil
+}
+
+// rollbackDestinationPool resolves the one registered Pool on the destination
+// node whose identity still matches every approved hold.
+func rollbackDestinationPool(move volumeapi.Move, pools []volumeapi.Pool) (*volumeapi.Pool, error) {
 	var destination *volumeapi.Pool
 	for index := range pools {
 		pool := &pools[index]
@@ -171,21 +193,27 @@ func (r *Reconciler) rollbackInventoryPool(ctx context.Context, move volumeapi.M
 	if !slices.Contains(destination.Finalizers, volumeapi.PoolProtectionFinalizer) {
 		return nil, needsRecoveryCleanupReview("destination Pool lacks lifecycle protection")
 	}
+	return destination, nil
+}
 
+// rollbackInventoryFresh reports whether the destination Pool is cleanup-ready
+// and carries a fresh, complete inventory collected strictly after entry into
+// Retiring. A stale or partial observation is a wait, not a contradiction.
+func (r *Reconciler) rollbackInventoryFresh(destination *volumeapi.Pool, transitionedAt time.Time) error {
 	now := r.now()
 	staleAfter := r.PoolReadinessStaleAfter
 	if staleAfter <= 0 {
 		staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 	}
 	if ready, reason := destination.CleanupReadyAt(now, staleAfter); !ready {
-		return nil, fmt.Errorf("destination Pool is not cleanup-ready: %s", reason)
+		return fmt.Errorf("destination Pool is not cleanup-ready: %s", reason)
 	}
 	inventory := destination.Status.Inventory
 	if inventory == nil || !inventory.Valid || inventory.Truncated || inventory.Message != "" ||
 		inventory.ObservedAt.IsZero() || !inventory.ObservedAt.Time.After(transitionedAt) || now.Before(inventory.ObservedAt.Time) || now.Sub(inventory.ObservedAt.Time) > staleAfter {
-		return nil, fmt.Errorf("waiting for a fresh complete destination inventory collected after Retiring")
+		return fmt.Errorf("waiting for a fresh complete destination inventory collected after Retiring")
 	}
-	return destination, nil
+	return nil
 }
 
 // rollbackPresentArtifact decides which exact transaction artifact, if any, the

@@ -215,10 +215,7 @@ func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, obse
 		return fmt.Errorf("destination node is empty")
 	}
 	if observed.FSM.OwnerCommitted {
-		if move.Status.DestinationCopy == nil || observed.Volume.CurrentCopy == nil || *observed.Volume.CurrentCopy != *move.Status.DestinationCopy {
-			return fmt.Errorf("committed owner has a different serving-copy identity")
-		}
-		return nil
+		return confirmCommittedCopy(move, observed)
 	}
 	if err := r.requireScheduledPlacement(ctx, *move); err != nil {
 		return err
@@ -237,14 +234,31 @@ func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, obse
 		return err
 	}
 	if err != nil {
-		current, getErr := r.Repository.Get(ctx, move.Spec.VolumeID)
-		if getErr != nil {
-			return getErr
-		}
-		identityMismatch := current.CurrentCopy == nil || *current.CurrentCopy != destinationCopy
-		if current.Phase != volumeapi.PhaseReady || current.OwnerNode != destination || current.ActiveMove != move.Name || identityMismatch {
-			return err
-		}
+		return r.confirmCommitConflict(ctx, *move, destination, destinationCopy, err)
+	}
+	return nil
+}
+
+// confirmCommittedCopy checks that an already committed owner still serves the
+// exact destination copy this transaction promoted.
+func confirmCommittedCopy(move *volumeapi.Move, observed observation) error {
+	if move.Status.DestinationCopy == nil || observed.Volume.CurrentCopy == nil || *observed.Volume.CurrentCopy != *move.Status.DestinationCopy {
+		return fmt.Errorf("committed owner has a different serving-copy identity")
+	}
+	return nil
+}
+
+// confirmCommitConflict re-reads the lock after a losing CAS. A conflict that
+// already records this transaction's exact outcome is this controller's own
+// earlier write replayed; anything else is returned as the conflict it is.
+func (r *Reconciler) confirmCommitConflict(ctx context.Context, move volumeapi.Move, destination string, destinationCopy volume.CopyIdentity, conflict error) error {
+	current, getErr := r.Repository.Get(ctx, move.Spec.VolumeID)
+	if getErr != nil {
+		return getErr
+	}
+	identityMismatch := current.CurrentCopy == nil || *current.CurrentCopy != destinationCopy
+	if current.Phase != volumeapi.PhaseReady || current.OwnerNode != destination || current.ActiveMove != move.Name || identityMismatch {
+		return conflict
 	}
 	return nil
 }
