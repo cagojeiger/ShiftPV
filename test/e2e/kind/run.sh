@@ -150,20 +150,62 @@ if [[ "${MOBILITY_NODE_RESTARTS_ONLY:-0}" == "1" ]]; then
 	exit 0
 fi
 
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/metrics/prometheus.yaml"
-kubectl -n shiftpv-system rollout status deployment/metrics-test --timeout=3m
+# Scenario groups. CI runs g1/g2/g3 as parallel shards on separate clusters;
+# `all` (the default, and what every focused entry point above keeps using) runs
+# the original sweep on one cluster in the original order. The split targets
+# equal wall clock once the ~170 s cluster setup that every group pays for is
+# included, and only reuses orderings the focused entry points already prove:
+#
+#   g1  directory-pool (262 s) + metrics (10 s) + pool-capacity (138 s)
+#       The metrics assertions count the CSI calls, the observed Copying move
+#       and the settled reserved-byte gauge that directory-pool produces, and
+#       require exactly the two base Pools, so those two stay adjacent and in
+#       order. pool-capacity only ever runs behind them today.
+#   g2  volume-delete-cleanup (138 s) + the release lifecycle (257 s:
+#       uninstall guard, break-glass reinstall, forced controller/node restarts,
+#       fsGroup, StorageClass coexistence) + filesystem-faults (77 s)
+#       The release lifecycle needs a cluster with no retained PVC/PV/Volume for
+#       its first successful uninstall, and it rewrites the release afterwards,
+#       so nothing that depends on the original install may follow it in the
+#       same group. filesystem-faults keeps its current position behind it.
+#   g3  orphan-cleanup (139 s) + mobility-filesystem-faults (369 s)
+#       Both are standalone entry points today (ORPHAN_CLEANUP_ONLY runs
+#       orphan-cleanup straight after install, MOBILITY_FILESYSTEM_FAULTS_ONLY
+#       runs the fault sweep behind orphan-cleanup), so pairing the longest
+#       scenario with a short one balances the three shards.
+KIND_E2E_GROUP=${KIND_E2E_GROUP:-all}
+case "${KIND_E2E_GROUP}" in
+all | g1 | g2 | g3) ;;
+*)
+	echo "unsupported KIND_E2E_GROUP: ${KIND_E2E_GROUP}" >&2
+	exit 1
+	;;
+esac
 
-run_directory_pool
+group_selected() {
+	[[ "${KIND_E2E_GROUP}" == all || "${KIND_E2E_GROUP}" == "$1" ]]
+}
 
-bash "${ROOT_DIR}/test/e2e/kind/metrics/check.sh"
+if group_selected g1; then
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/metrics/prometheus.yaml"
+	kubectl -n shiftpv-system rollout status deployment/metrics-test --timeout=3m
+
+	run_directory_pool
+
+	bash "${ROOT_DIR}/test/e2e/kind/metrics/check.sh"
+fi
 
 if [[ "${DIRECTORY_POOL_ONLY:-0}" == "1" ]]; then
 	echo "ShiftPV focused ordinary directory Pool E2E passed"
 	exit 0
 fi
 
-run_pool_capacity
-run_orphan_preservation
+if group_selected g1; then
+	run_pool_capacity
+fi
+if group_selected g3; then
+	run_orphan_preservation
+fi
 
 if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
 	echo "ShiftPV focused Pool capacity E2E passed"
@@ -176,220 +218,227 @@ if [[ "${MOBILITY_FILESYSTEM_FAULTS_ONLY:-0}" == "1" ]]; then
 	exit 0
 fi
 
-run_volume_delete_cleanup
+if group_selected g2; then
+	run_volume_delete_cleanup
 
-# Lifecycle admission is read-only. A direct dry-run DELETE must not mint an
-# uninstall permit even when no storage dependency exists.
-if kubectl -n shiftpv-system delete deployment shiftpv-controller --dry-run=server; then
-	echo "direct dry-run DELETE unexpectedly bypassed the uninstall guard" >&2
-	exit 1
+	# Lifecycle admission is read-only. A direct dry-run DELETE must not mint an
+	# uninstall permit even when no storage dependency exists.
+	if kubectl -n shiftpv-system delete deployment shiftpv-controller --dry-run=server; then
+		echo "direct dry-run DELETE unexpectedly bypassed the uninstall guard" >&2
+		exit 1
+	fi
+	kubectl -n shiftpv-system get deployment/shiftpv-controller >/dev/null
+	if kubectl -n shiftpv-system get configmap/shiftpv-uninstall-permit >/dev/null 2>&1; then
+		echo "direct dry-run DELETE created uninstall state" >&2
+		exit 1
+	fi
+
+	# Pool registration alone is safe to retain. With no PVC/PV/Volume/Move, the
+	# hook must allow a normal uninstall and delete its successful Job.
+	helm uninstall shiftpv --namespace shiftpv-system --timeout 2m
+	if kubectl -n shiftpv-system get job shiftpv-uninstall-guard >/dev/null 2>&1; then
+	  echo "successful uninstall guard Job was not deleted" >&2
+	  exit 1
+	fi
+	install_shiftpv true
+
+	DEFAULT_CLASS=$(kubectl get storageclass shiftpv \
+	  -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+	DEFAULT_POLICY=$(kubectl get storageclass shiftpv -o jsonpath='{.reclaimPolicy}')
+	RETAIN_CLASS=$(kubectl get storageclass shiftpv-retain \
+	  -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+	RETAIN_POLICY=$(kubectl get storageclass shiftpv-retain -o jsonpath='{.reclaimPolicy}')
+	if [[ "${DEFAULT_CLASS}" != "true" || "${DEFAULT_POLICY}" != "Delete" || \
+	  "${RETAIN_CLASS}" != "false" || "${RETAIN_POLICY}" != "Retain" ]]; then
+	  echo "unexpected StorageClass contract: shiftpv=${DEFAULT_CLASS}/${DEFAULT_POLICY} shiftpv-retain=${RETAIN_CLASS}/${RETAIN_POLICY}" >&2
+	  exit 1
+	fi
+
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pvc.yaml"
+	kubectl wait \
+	  --for=jsonpath='{.spec.storageClassName}'=shiftpv \
+	  pvc/shiftpv-e2e \
+	  --timeout=2m
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
+	kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
+	kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-e2e --timeout=2m
+
+	PV_NAME=$(kubectl get pvc shiftpv-e2e -o jsonpath='{.spec.volumeName}')
+	PVC_UID=$(kubectl get pvc shiftpv-e2e -o jsonpath='{.metadata.uid}')
+	OWNER_NODE=$(kubectl get pod shiftpv-e2e -o jsonpath='{.spec.nodeName}')
+	CHECKSUM_BEFORE=$(pod_sha256 default shiftpv-e2e /data/payload)
+	VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
+	PV_DRIVER=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.driver}')
+	if [[ "${PV_DRIVER}" != "csi.shiftpv.io" ]]; then
+	  echo "PVC was not provisioned by ShiftPV: ${PV_DRIVER}" >&2
+	  exit 1
+	fi
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${OWNER_NODE}"
+
+	# Force replacement of both controller and owner-node plugin Pods while the
+	# workload keeps the volume mounted. Their Kubernetes UIDs must change.
+	CONTROLLER_POD_BEFORE=$(kubectl -n shiftpv-system get pod \
+	  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=controller \
+	  -o jsonpath='{.items[0].metadata.name}')
+	CONTROLLER_UID_BEFORE=$(kubectl -n shiftpv-system get "pod/${CONTROLLER_POD_BEFORE}" \
+	  -o jsonpath='{.metadata.uid}')
+	kubectl -n shiftpv-system delete "pod/${CONTROLLER_POD_BEFORE}" \
+	  --grace-period=0 --force --wait=true
+	kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m
+	CONTROLLER_UID_AFTER=$(kubectl -n shiftpv-system get pod \
+	  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=controller \
+	  -o jsonpath='{.items[0].metadata.uid}')
+	if [[ "${CONTROLLER_UID_BEFORE}" == "${CONTROLLER_UID_AFTER}" ]]; then
+	  echo "controller Pod UID did not change after forced replacement" >&2
+	  exit 1
+	fi
+
+	NODE_POD_BEFORE=$(kubectl -n shiftpv-system get pod \
+	  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=node \
+	  --field-selector "spec.nodeName=${OWNER_NODE}" \
+	  -o jsonpath='{.items[0].metadata.name}')
+	NODE_UID_BEFORE=$(kubectl -n shiftpv-system get "pod/${NODE_POD_BEFORE}" \
+	  -o jsonpath='{.metadata.uid}')
+	kubectl -n shiftpv-system delete "pod/${NODE_POD_BEFORE}" \
+	  --grace-period=0 --force --wait=true
+	kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=5m
+	NODE_UID_AFTER=$(kubectl -n shiftpv-system get pod \
+	  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=node \
+	  --field-selector "spec.nodeName=${OWNER_NODE}" \
+	  -o jsonpath='{.items[0].metadata.uid}')
+	if [[ "${NODE_UID_BEFORE}" == "${NODE_UID_AFTER}" ]]; then
+	  echo "owner-node plugin Pod UID did not change after forced replacement" >&2
+	  exit 1
+	fi
+
+	kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=2m
+	CHECKSUM_AFTER_RESTARTS=$(pod_sha256 default shiftpv-e2e /data/payload)
+	if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_RESTARTS}" ]]; then
+	  echo "checksum mismatch after controller and node plugin replacement" >&2
+	  exit 1
+	fi
+
+	# Verify kubelet applies Pod fsGroup ownership on a previously root-owned
+	# ShiftPV volume before testing an ordinary unpublish/publish.
+	kubectl delete pod shiftpv-e2e --wait=true
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/fs-group-pod.yaml"
+	kubectl wait --for=condition=Ready pod/shiftpv-fsgroup-e2e --timeout=5m
+	test "$(kubectl exec shiftpv-fsgroup-e2e -- stat -c %g /data)" = 10001
+	kubectl exec shiftpv-fsgroup-e2e -- grep -Fx 'ShiftPV non-root fsGroup write' /data/non-root
+	kubectl delete pod shiftpv-fsgroup-e2e --wait=true
+
+	# Verify ordinary kubelet unpublish/publish before testing the Helm boundary.
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
+	kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
+	CHECKSUM_RECREATED=$(pod_sha256 default shiftpv-e2e /data/payload)
+	if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_RECREATED}" ]]; then
+	  echo "checksum mismatch after Pod recreation" >&2
+	  exit 1
+	fi
+	kubectl wait --for=jsonpath="{.status.publishedNodes[0]}=${OWNER_NODE}" \
+	  "shiftpvvolume/${VOLUME_ID}" --timeout=2m
+
+	# A failed pre-delete hook must leave the release and the running workload intact.
+	if helm uninstall shiftpv --namespace shiftpv-system --timeout 2m; then
+	  echo "Helm uninstall unexpectedly succeeded while a ShiftPV workload was running" >&2
+	  exit 1
+	fi
+	helm status shiftpv --namespace shiftpv-system >/dev/null
+	kubectl -n shiftpv-system get deployment/shiftpv-controller >/dev/null
+	kubectl -n shiftpv-system get daemonset/shiftpv-node >/dev/null
+	kubectl get validatingwebhookconfiguration shiftpv-lifecycle >/dev/null
+	kubectl -n shiftpv-system wait --for=delete configmap/shiftpv-uninstall-permit --timeout=30s
+	kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -F 'ShiftPV uninstall denied'
+	CHECKSUM_AFTER_DENIAL=$(pod_sha256 default shiftpv-e2e /data/payload)
+	if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_DENIAL}" ]]; then
+	  echo "checksum mismatch after denied Helm uninstall" >&2
+	  exit 1
+	fi
+
+	# Stopping the Pod is not enough: retained PVC/PV/Volume state still requires an
+	# explicit recovery decision. A second denial also exercises hook replacement.
+	kubectl delete pod shiftpv-e2e --wait=true
+	if helm uninstall shiftpv --namespace shiftpv-system --timeout 2m; then
+	  echo "Helm uninstall unexpectedly succeeded while retained ShiftPV resources existed" >&2
+	  exit 1
+	fi
+	helm status shiftpv --namespace shiftpv-system >/dev/null
+	kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -F 'PersistentVolume'
+
+	# The break-glass path deliberately bypasses hooks. Remove the failed hook Job,
+	# which Helm does not own, so the subsequent reinstall starts without leftovers.
+	kubectl -n shiftpv-system delete job shiftpv-uninstall-guard --ignore-not-found --wait=true
+	kubectl delete validatingwebhookconfiguration shiftpv-lifecycle --ignore-not-found --wait=true
+	helm uninstall shiftpv --namespace shiftpv-system --no-hooks
+
+	kubectl get pvc shiftpv-e2e >/dev/null
+	kubectl get "pv/${PV_NAME}" >/dev/null
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
+	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
+
+	DATA_MOUNT=$(pool_mount_for_node "${OWNER_NODE}")
+	assert_node_file "${OWNER_NODE}" "${DATA_MOUNT}/volumes/${VOLUME_ID}/payload"
+
+	install_shiftpv true
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
+	kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
+	CHECKSUM_AFTER=$(pod_sha256 default shiftpv-e2e /data/payload)
+
+	if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER}" ]]; then
+		echo "checksum mismatch after Helm reinstall" >&2
+		exit 1
+	fi
+
+	# Reinstall with ShiftPV opt-in while an unrelated default class already exists.
+	kubectl delete pod shiftpv-e2e --wait=true
+	kubectl delete validatingwebhookconfiguration shiftpv-lifecycle --ignore-not-found --wait=true
+	helm uninstall shiftpv --namespace shiftpv-system --no-hooks
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/existing-default-storageclass.yaml"
+	install_shiftpv false
+
+	EXISTING_DEFAULT=$(kubectl get storageclass existing-default \
+		-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+	SHIFTPV_DEFAULT=$(kubectl get storageclass shiftpv \
+		-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+	SHIFTPV_RETAIN_DEFAULT=$(kubectl get storageclass shiftpv-retain \
+		-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
+	if [[ "${EXISTING_DEFAULT}" != "true" || "${SHIFTPV_DEFAULT}" != "false" || \
+		"${SHIFTPV_RETAIN_DEFAULT}" != "false" ]]; then
+		echo "StorageClass default annotations changed unexpectedly: existing=${EXISTING_DEFAULT} shiftpv=${SHIFTPV_DEFAULT} shiftpv-retain=${SHIFTPV_RETAIN_DEFAULT}" >&2
+		exit 1
+	fi
+
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/implicit-pvc.yaml"
+	kubectl wait \
+		--for=jsonpath='{.spec.storageClassName}'=existing-default \
+		pvc/existing-default-e2e \
+		--timeout=2m
+
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/coexistence-pvc.yaml"
+	kubectl apply -f "${ROOT_DIR}/test/e2e/kind/coexistence-pod.yaml"
+	kubectl wait --for=condition=Ready pod/shiftpv-coexistence --timeout=5m
+	kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-coexistence --timeout=2m
+	COEXISTENCE_PV=$(kubectl get pvc shiftpv-coexistence -o jsonpath='{.spec.volumeName}')
+	COEXISTENCE_DRIVER=$(kubectl get "pv/${COEXISTENCE_PV}" -o jsonpath='{.spec.csi.driver}')
+	if [[ "${COEXISTENCE_DRIVER}" != "csi.shiftpv.io" ]]; then
+		echo "explicit ShiftPV PVC used unexpected driver: ${COEXISTENCE_DRIVER}" >&2
+		exit 1
+	fi
+	kubectl exec shiftpv-coexistence -- grep -Fx 'ShiftPV StorageClass coexistence' /data/payload
+
+	kubectl delete pod shiftpv-coexistence --wait=true
+	kubectl delete pvc shiftpv-coexistence --wait=true
+	CLUSTER_NAME="${CLUSTER_NAME}" WORKER_B_POOL="${WORKER_B_POOL}" \
+	  "${ROOT_DIR}/test/e2e/kind/filesystem-faults.sh"
 fi
-kubectl -n shiftpv-system get deployment/shiftpv-controller >/dev/null
-if kubectl -n shiftpv-system get configmap/shiftpv-uninstall-permit >/dev/null 2>&1; then
-	echo "direct dry-run DELETE created uninstall state" >&2
-	exit 1
+
+if group_selected g3; then
+	run_mobility_filesystem_faults
 fi
 
-# Pool registration alone is safe to retain. With no PVC/PV/Volume/Move, the
-# hook must allow a normal uninstall and delete its successful Job.
-helm uninstall shiftpv --namespace shiftpv-system --timeout 2m
-if kubectl -n shiftpv-system get job shiftpv-uninstall-guard >/dev/null 2>&1; then
-  echo "successful uninstall guard Job was not deleted" >&2
-  exit 1
+echo "ShiftPV kind e2e passed (group=${KIND_E2E_GROUP})"
+if group_selected g2; then
+	echo "PV=${PV_NAME} volume=${VOLUME_ID} node=${OWNER_NODE} checksum=${CHECKSUM_AFTER} controller_restart=${CONTROLLER_UID_AFTER} node_restart=${NODE_UID_AFTER}"
 fi
-install_shiftpv true
-
-DEFAULT_CLASS=$(kubectl get storageclass shiftpv \
-  -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
-DEFAULT_POLICY=$(kubectl get storageclass shiftpv -o jsonpath='{.reclaimPolicy}')
-RETAIN_CLASS=$(kubectl get storageclass shiftpv-retain \
-  -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
-RETAIN_POLICY=$(kubectl get storageclass shiftpv-retain -o jsonpath='{.reclaimPolicy}')
-if [[ "${DEFAULT_CLASS}" != "true" || "${DEFAULT_POLICY}" != "Delete" || \
-  "${RETAIN_CLASS}" != "false" || "${RETAIN_POLICY}" != "Retain" ]]; then
-  echo "unexpected StorageClass contract: shiftpv=${DEFAULT_CLASS}/${DEFAULT_POLICY} shiftpv-retain=${RETAIN_CLASS}/${RETAIN_POLICY}" >&2
-  exit 1
-fi
-
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pvc.yaml"
-kubectl wait \
-  --for=jsonpath='{.spec.storageClassName}'=shiftpv \
-  pvc/shiftpv-e2e \
-  --timeout=2m
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
-kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
-kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-e2e --timeout=2m
-
-PV_NAME=$(kubectl get pvc shiftpv-e2e -o jsonpath='{.spec.volumeName}')
-PVC_UID=$(kubectl get pvc shiftpv-e2e -o jsonpath='{.metadata.uid}')
-OWNER_NODE=$(kubectl get pod shiftpv-e2e -o jsonpath='{.spec.nodeName}')
-CHECKSUM_BEFORE=$(pod_sha256 default shiftpv-e2e /data/payload)
-VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
-PV_DRIVER=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.driver}')
-if [[ "${PV_DRIVER}" != "csi.shiftpv.io" ]]; then
-  echo "PVC was not provisioned by ShiftPV: ${PV_DRIVER}" >&2
-  exit 1
-fi
-test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
-test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
-test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${OWNER_NODE}"
-
-# Force replacement of both controller and owner-node plugin Pods while the
-# workload keeps the volume mounted. Their Kubernetes UIDs must change.
-CONTROLLER_POD_BEFORE=$(kubectl -n shiftpv-system get pod \
-  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=controller \
-  -o jsonpath='{.items[0].metadata.name}')
-CONTROLLER_UID_BEFORE=$(kubectl -n shiftpv-system get "pod/${CONTROLLER_POD_BEFORE}" \
-  -o jsonpath='{.metadata.uid}')
-kubectl -n shiftpv-system delete "pod/${CONTROLLER_POD_BEFORE}" \
-  --grace-period=0 --force --wait=true
-kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m
-CONTROLLER_UID_AFTER=$(kubectl -n shiftpv-system get pod \
-  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=controller \
-  -o jsonpath='{.items[0].metadata.uid}')
-if [[ "${CONTROLLER_UID_BEFORE}" == "${CONTROLLER_UID_AFTER}" ]]; then
-  echo "controller Pod UID did not change after forced replacement" >&2
-  exit 1
-fi
-
-NODE_POD_BEFORE=$(kubectl -n shiftpv-system get pod \
-  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=node \
-  --field-selector "spec.nodeName=${OWNER_NODE}" \
-  -o jsonpath='{.items[0].metadata.name}')
-NODE_UID_BEFORE=$(kubectl -n shiftpv-system get "pod/${NODE_POD_BEFORE}" \
-  -o jsonpath='{.metadata.uid}')
-kubectl -n shiftpv-system delete "pod/${NODE_POD_BEFORE}" \
-  --grace-period=0 --force --wait=true
-kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=5m
-NODE_UID_AFTER=$(kubectl -n shiftpv-system get pod \
-  -l app.kubernetes.io/instance=shiftpv,app.kubernetes.io/component=node \
-  --field-selector "spec.nodeName=${OWNER_NODE}" \
-  -o jsonpath='{.items[0].metadata.uid}')
-if [[ "${NODE_UID_BEFORE}" == "${NODE_UID_AFTER}" ]]; then
-  echo "owner-node plugin Pod UID did not change after forced replacement" >&2
-  exit 1
-fi
-
-kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=2m
-CHECKSUM_AFTER_RESTARTS=$(pod_sha256 default shiftpv-e2e /data/payload)
-if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_RESTARTS}" ]]; then
-  echo "checksum mismatch after controller and node plugin replacement" >&2
-  exit 1
-fi
-
-# Verify kubelet applies Pod fsGroup ownership on a previously root-owned
-# ShiftPV volume before testing an ordinary unpublish/publish.
-kubectl delete pod shiftpv-e2e --wait=true
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/fs-group-pod.yaml"
-kubectl wait --for=condition=Ready pod/shiftpv-fsgroup-e2e --timeout=5m
-test "$(kubectl exec shiftpv-fsgroup-e2e -- stat -c %g /data)" = 10001
-kubectl exec shiftpv-fsgroup-e2e -- grep -Fx 'ShiftPV non-root fsGroup write' /data/non-root
-kubectl delete pod shiftpv-fsgroup-e2e --wait=true
-
-# Verify ordinary kubelet unpublish/publish before testing the Helm boundary.
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
-kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
-CHECKSUM_RECREATED=$(pod_sha256 default shiftpv-e2e /data/payload)
-if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_RECREATED}" ]]; then
-  echo "checksum mismatch after Pod recreation" >&2
-  exit 1
-fi
-kubectl wait --for=jsonpath="{.status.publishedNodes[0]}=${OWNER_NODE}" \
-  "shiftpvvolume/${VOLUME_ID}" --timeout=2m
-
-# A failed pre-delete hook must leave the release and the running workload intact.
-if helm uninstall shiftpv --namespace shiftpv-system --timeout 2m; then
-  echo "Helm uninstall unexpectedly succeeded while a ShiftPV workload was running" >&2
-  exit 1
-fi
-helm status shiftpv --namespace shiftpv-system >/dev/null
-kubectl -n shiftpv-system get deployment/shiftpv-controller >/dev/null
-kubectl -n shiftpv-system get daemonset/shiftpv-node >/dev/null
-kubectl get validatingwebhookconfiguration shiftpv-lifecycle >/dev/null
-kubectl -n shiftpv-system wait --for=delete configmap/shiftpv-uninstall-permit --timeout=30s
-kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -F 'ShiftPV uninstall denied'
-CHECKSUM_AFTER_DENIAL=$(pod_sha256 default shiftpv-e2e /data/payload)
-if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER_DENIAL}" ]]; then
-  echo "checksum mismatch after denied Helm uninstall" >&2
-  exit 1
-fi
-
-# Stopping the Pod is not enough: retained PVC/PV/Volume state still requires an
-# explicit recovery decision. A second denial also exercises hook replacement.
-kubectl delete pod shiftpv-e2e --wait=true
-if helm uninstall shiftpv --namespace shiftpv-system --timeout 2m; then
-  echo "Helm uninstall unexpectedly succeeded while retained ShiftPV resources existed" >&2
-  exit 1
-fi
-helm status shiftpv --namespace shiftpv-system >/dev/null
-kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | grep -F 'PersistentVolume'
-
-# The break-glass path deliberately bypasses hooks. Remove the failed hook Job,
-# which Helm does not own, so the subsequent reinstall starts without leftovers.
-kubectl -n shiftpv-system delete job shiftpv-uninstall-guard --ignore-not-found --wait=true
-kubectl delete validatingwebhookconfiguration shiftpv-lifecycle --ignore-not-found --wait=true
-helm uninstall shiftpv --namespace shiftpv-system --no-hooks
-
-kubectl get pvc shiftpv-e2e >/dev/null
-kubectl get "pv/${PV_NAME}" >/dev/null
-test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName}')" = "pvc-${PVC_UID}"
-test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 67108864
-
-DATA_MOUNT=$(pool_mount_for_node "${OWNER_NODE}")
-assert_node_file "${OWNER_NODE}" "${DATA_MOUNT}/volumes/${VOLUME_ID}/payload"
-
-install_shiftpv true
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
-kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m
-CHECKSUM_AFTER=$(pod_sha256 default shiftpv-e2e /data/payload)
-
-if [[ "${CHECKSUM_BEFORE}" != "${CHECKSUM_AFTER}" ]]; then
-	echo "checksum mismatch after Helm reinstall" >&2
-	exit 1
-fi
-
-# Reinstall with ShiftPV opt-in while an unrelated default class already exists.
-kubectl delete pod shiftpv-e2e --wait=true
-kubectl delete validatingwebhookconfiguration shiftpv-lifecycle --ignore-not-found --wait=true
-helm uninstall shiftpv --namespace shiftpv-system --no-hooks
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/existing-default-storageclass.yaml"
-install_shiftpv false
-
-EXISTING_DEFAULT=$(kubectl get storageclass existing-default \
-	-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
-SHIFTPV_DEFAULT=$(kubectl get storageclass shiftpv \
-	-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
-SHIFTPV_RETAIN_DEFAULT=$(kubectl get storageclass shiftpv-retain \
-	-o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
-if [[ "${EXISTING_DEFAULT}" != "true" || "${SHIFTPV_DEFAULT}" != "false" || \
-	"${SHIFTPV_RETAIN_DEFAULT}" != "false" ]]; then
-	echo "StorageClass default annotations changed unexpectedly: existing=${EXISTING_DEFAULT} shiftpv=${SHIFTPV_DEFAULT} shiftpv-retain=${SHIFTPV_RETAIN_DEFAULT}" >&2
-	exit 1
-fi
-
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/implicit-pvc.yaml"
-kubectl wait \
-	--for=jsonpath='{.spec.storageClassName}'=existing-default \
-	pvc/existing-default-e2e \
-	--timeout=2m
-
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/coexistence-pvc.yaml"
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/coexistence-pod.yaml"
-kubectl wait --for=condition=Ready pod/shiftpv-coexistence --timeout=5m
-kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-coexistence --timeout=2m
-COEXISTENCE_PV=$(kubectl get pvc shiftpv-coexistence -o jsonpath='{.spec.volumeName}')
-COEXISTENCE_DRIVER=$(kubectl get "pv/${COEXISTENCE_PV}" -o jsonpath='{.spec.csi.driver}')
-if [[ "${COEXISTENCE_DRIVER}" != "csi.shiftpv.io" ]]; then
-	echo "explicit ShiftPV PVC used unexpected driver: ${COEXISTENCE_DRIVER}" >&2
-	exit 1
-fi
-kubectl exec shiftpv-coexistence -- grep -Fx 'ShiftPV StorageClass coexistence' /data/payload
-
-kubectl delete pod shiftpv-coexistence --wait=true
-kubectl delete pvc shiftpv-coexistence --wait=true
-CLUSTER_NAME="${CLUSTER_NAME}" WORKER_B_POOL="${WORKER_B_POOL}" \
-  "${ROOT_DIR}/test/e2e/kind/filesystem-faults.sh"
-run_mobility_filesystem_faults
-
-echo "ShiftPV kind e2e passed"
-echo "PV=${PV_NAME} volume=${VOLUME_ID} node=${OWNER_NODE} checksum=${CHECKSUM_AFTER} controller_restart=${CONTROLLER_UID_AFTER} node_restart=${NODE_UID_AFTER}"
