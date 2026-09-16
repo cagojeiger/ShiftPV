@@ -7,6 +7,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
@@ -137,38 +138,18 @@ func (s *Store) UpdateStatus(ctx context.Context, expected Cleanup, next Status)
 	if err := s.validate(); err != nil {
 		return err
 	}
-	if expected.UID == "" || expected.Name != cleanupName(expected.Spec.Target) || expected.UID != expected.Spec.Authority.UID || expected.Spec.Validate() != nil {
+	if !boundStatusIntent(expected) {
 		return ErrConflict
 	}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		resource, finalizer, err := s.parentResource(expected.Spec.Authority)
+		resource, object, current, err := s.loadBoundJournal(ctx, expected)
 		if err != nil {
 			return err
 		}
-		object, err := resource.Get(ctx, expected.Spec.Authority.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if err := validateParent(object, expected.Spec.Authority, finalizer); err != nil {
-			return err
-		}
-		current, found, err := journalFromParent(object)
-		if err != nil {
-			return err
-		}
-		if !found || current.UID != expected.UID || current.Name != expected.Name || !reflect.DeepEqual(current.Spec, expected.Spec) {
-			return ErrConflict
-		}
-		if next.ObservedGeneration == 0 {
-			next.ObservedGeneration = object.GetGeneration()
-		}
-		if next.LastTransitionTime == "" {
-			if next.Phase == current.Status.Phase && current.Status.LastTransitionTime != "" {
-				next.LastTransitionTime = current.Status.LastTransitionTime
-			} else {
-				next.LastTransitionTime = s.now().Format(time.RFC3339Nano)
-			}
-		}
+		// Assigning back into the captured next keeps the resolved observation
+		// fields sticky across conflict retries: a retry must republish the first
+		// attempt's generation and transition time, not observe them again.
+		next = s.resolveStatusDefaults(current, next, object.GetGeneration())
 		if reflect.DeepEqual(current.Status, next) {
 			return nil
 		}
@@ -181,6 +162,53 @@ func (s *Store) UpdateStatus(ctx context.Context, expected Cleanup, next Status)
 		_, err = resource.UpdateStatus(ctx, object, metav1.UpdateOptions{})
 		return err
 	})
+}
+
+// boundStatusIntent reports whether the caller's view names one exact journal
+// that is internally consistent with its own parent authority.
+func boundStatusIntent(expected Cleanup) bool {
+	return expected.UID != "" && expected.Name == cleanupName(expected.Spec.Target) &&
+		expected.UID == expected.Spec.Authority.UID && expected.Spec.Validate() == nil
+}
+
+// loadBoundJournal reads the live parent and returns its journal only when the
+// parent and the embedded intent still match the caller's exact expectation.
+func (s *Store) loadBoundJournal(ctx context.Context, expected Cleanup) (dynamic.ResourceInterface, *unstructured.Unstructured, Cleanup, error) {
+	resource, finalizer, err := s.parentResource(expected.Spec.Authority)
+	if err != nil {
+		return nil, nil, Cleanup{}, err
+	}
+	object, err := resource.Get(ctx, expected.Spec.Authority.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, nil, Cleanup{}, err
+	}
+	if err := validateParent(object, expected.Spec.Authority, finalizer); err != nil {
+		return nil, nil, Cleanup{}, err
+	}
+	current, found, err := journalFromParent(object)
+	if err != nil {
+		return nil, nil, Cleanup{}, err
+	}
+	if !found || current.UID != expected.UID || current.Name != expected.Name || !reflect.DeepEqual(current.Spec, expected.Spec) {
+		return nil, nil, Cleanup{}, ErrConflict
+	}
+	return resource, object, current, nil
+}
+
+// resolveStatusDefaults fills the observation fields the caller left open. The
+// transition clock only advances when the phase actually changes.
+func (s *Store) resolveStatusDefaults(current Cleanup, next Status, generation int64) Status {
+	if next.ObservedGeneration == 0 {
+		next.ObservedGeneration = generation
+	}
+	if next.LastTransitionTime == "" {
+		if next.Phase == current.Status.Phase && current.Status.LastTransitionTime != "" {
+			next.LastTransitionTime = current.Status.LastTransitionTime
+		} else {
+			next.LastTransitionTime = s.now().Format(time.RFC3339Nano)
+		}
+	}
+	return next
 }
 
 func (s *Store) now() time.Time {
