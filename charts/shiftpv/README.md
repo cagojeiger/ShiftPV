@@ -141,6 +141,10 @@ helm upgrade shiftpv shiftpv/shiftpv --namespace shiftpv-system --version <appro
 kubectl get storageclass shiftpv shiftpv-retain
 ```
 
+이 절차가 실제로 동작하는지는 `make kind-upgrade-e2e`가 확인한다. 마지막 공개 릴리스를 설치한 뒤 현재
+checkout으로 in-place upgrade하고, 의존하는 storage가 남아 있을 때의 삭제 거부와 정리 후의 삭제·재생성을
+그대로 재현한다.
+
 ## Planned mobility
 
 Settled terminal `ShiftPVMove` metadata is retained for seven days by default

@@ -285,6 +285,41 @@ jobs:
         if: always()
         run: kind delete cluster --name "${CLUSTER_NAME}" || true
 
+  kind-upgrade-e2e:
+    name: kind-upgrade-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
+      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
+      CLUSTER_NAME: shiftpv-upgrade-e2e
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Kubernetes tools
+        uses: ./.github/actions/install-k8s-tools
+        with:
+          report-versions: "true"
+
+      - name: Run published-to-candidate upgrade E2E
+        env:
+          KEEP_CLUSTER: "1"
+        run: ./test/e2e/kind/upgrade/run.sh
+
+      - name: Export failure diagnostics
+        if: failure() || cancelled()
+        uses: ./.github/actions/kind-teardown
+        with:
+          cluster-name: ${{ env.CLUSTER_NAME }}
+          diagnostics-dir: .tmp/ci-upgrade-diagnostics
+          artifact-name: kind-upgrade-e2e-diagnostics
+          resource-kinds: nodes,pods,pvc,pv,storageclass,csinode
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name "${CLUSTER_NAME}" || true
+
   kind-argocd-e2e:
     name: kind-argocd-e2e
     runs-on: ubuntu-24.04

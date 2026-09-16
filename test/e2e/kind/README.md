@@ -56,6 +56,14 @@ MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./te
 Each run owns a unique cluster name, kubeconfig, image tag and host directories. It removes exactly those
 resources on success or failure. `KEEP_CLUSTER=1` is for bounded diagnosis only.
 
-The mobility-specific contract is in [`mobility/README.md`](mobility/README.md). Argo CD removal and public
-artifact provenance use isolated suites in [`argocd/`](argocd/README.md) and
-[`artifact/`](artifact/README.md).
+## Related suites
+
+| Suite | Contract |
+|---|---|
+| [`mobility/`](mobility/README.md) | closed-loop planned move, restart and fault coverage |
+| [`argocd/`](argocd/README.md) | Argo CD Application removal through the uninstall guard |
+| [`artifact/`](artifact/README.md) | provenance of the published chart and digest-pinned images |
+| [`upgrade/`](upgrade/README.md) | published release upgraded in place to this checkout, plus the documented StorageClass replacement |
+
+A fresh install only ever sees one chart. `upgrade/` is the suite that observes an immutable StorageClass field
+changing between releases and a webhook rule that contradicts the migration documentation.
