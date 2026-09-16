@@ -279,19 +279,36 @@ func podNameEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}}}
 }
 
+// sameOperationJob compares the live Job against the desired one section by
+// section, in the order identity, Pod spec, container. The first section that
+// differs decides the answer, so the sections must stay in this order.
 func sameOperationJob(current, expected *batchv1.Job) bool {
-	if current == nil || expected == nil || current.DeletionTimestamp != nil || current.Name != expected.Name || current.Namespace != expected.Namespace ||
-		!reflect.DeepEqual(current.OwnerReferences, expected.OwnerReferences) || current.Labels["shiftpv.io/move-uid"] != expected.Labels["shiftpv.io/move-uid"] ||
-		!reflect.DeepEqual(current.Spec.BackoffLimit, expected.Spec.BackoffLimit) || !reflect.DeepEqual(current.Spec.ActiveDeadlineSeconds, expected.Spec.ActiveDeadlineSeconds) {
+	if !sameOperationJobIdentity(current, expected) {
 		return false
 	}
 	actual, wanted := current.Spec.Template.Spec, expected.Spec.Template.Spec
-	if actual.NodeName != wanted.NodeName || actual.ServiceAccountName != wanted.ServiceAccountName || actual.RestartPolicy != wanted.RestartPolicy ||
-		actual.HostPID || actual.HostIPC || actual.HostNetwork || len(actual.InitContainers) != 0 || len(actual.EphemeralContainers) != 0 ||
-		len(actual.Containers) != 1 || len(wanted.Containers) != 1 || !reflect.DeepEqual(actual.Volumes, wanted.Volumes) {
+	if !sameOperationPodSpec(actual, wanted) {
 		return false
 	}
-	a, w := actual.Containers[0], wanted.Containers[0]
+	return sameOperationContainer(actual.Containers[0], wanted.Containers[0])
+}
+
+func sameOperationJobIdentity(current, expected *batchv1.Job) bool {
+	return current != nil && expected != nil && current.DeletionTimestamp == nil &&
+		current.Name == expected.Name && current.Namespace == expected.Namespace &&
+		reflect.DeepEqual(current.OwnerReferences, expected.OwnerReferences) &&
+		current.Labels["shiftpv.io/move-uid"] == expected.Labels["shiftpv.io/move-uid"] &&
+		reflect.DeepEqual(current.Spec.BackoffLimit, expected.Spec.BackoffLimit) &&
+		reflect.DeepEqual(current.Spec.ActiveDeadlineSeconds, expected.Spec.ActiveDeadlineSeconds)
+}
+
+func sameOperationPodSpec(actual, wanted corev1.PodSpec) bool {
+	return actual.NodeName == wanted.NodeName && actual.ServiceAccountName == wanted.ServiceAccountName && actual.RestartPolicy == wanted.RestartPolicy &&
+		!actual.HostPID && !actual.HostIPC && !actual.HostNetwork && len(actual.InitContainers) == 0 && len(actual.EphemeralContainers) == 0 &&
+		len(actual.Containers) == 1 && len(wanted.Containers) == 1 && reflect.DeepEqual(actual.Volumes, wanted.Volumes)
+}
+
+func sameOperationContainer(a, w corev1.Container) bool {
 	return a.Name == w.Name && a.Image == w.Image && reflect.DeepEqual(a.Command, w.Command) && reflect.DeepEqual(a.Args, w.Args) &&
 		reflect.DeepEqual(a.Env, w.Env) && len(a.EnvFrom) == 0 && reflect.DeepEqual(a.Resources, w.Resources) &&
 		reflect.DeepEqual(a.VolumeMounts, w.VolumeMounts) && reflect.DeepEqual(a.SecurityContext, w.SecurityContext) &&
@@ -413,17 +430,27 @@ func validTransferSecret(secret *corev1.Secret) bool {
 	return string(secret.Data["secrets"]) == "shiftpv:"+string(secret.Data["password"])+"\n"
 }
 
+// sameSourcePod compares the live source Pod against the desired one section by
+// section, in the order volumes, Pod spec, container. The first section that
+// differs decides the answer, so the sections must stay in this order.
 func sameSourcePod(current, expected *corev1.Pod) bool {
 	if current == nil || expected == nil {
 		return false
 	}
 	a, w := current.Spec, expected.Spec
 	serviceAccountVolume, volumesMatch := sameSourceVolumes(a.Volumes, w.Volumes)
-	if a.NodeName != w.NodeName || a.ServiceAccountName != w.ServiceAccountName || a.RestartPolicy != w.RestartPolicy || a.HostPID || a.HostIPC || a.HostNetwork ||
-		len(a.InitContainers) != 0 || len(a.EphemeralContainers) != 0 || len(a.Containers) != 1 || len(w.Containers) != 1 || !volumesMatch {
+	if !sameSourcePodSpec(a, w, volumesMatch) {
 		return false
 	}
-	ac, wc := a.Containers[0], w.Containers[0]
+	return sameSourceContainer(a.Containers[0], w.Containers[0], serviceAccountVolume)
+}
+
+func sameSourcePodSpec(a, w corev1.PodSpec, volumesMatch bool) bool {
+	return a.NodeName == w.NodeName && a.ServiceAccountName == w.ServiceAccountName && a.RestartPolicy == w.RestartPolicy && !a.HostPID && !a.HostIPC && !a.HostNetwork &&
+		len(a.InitContainers) == 0 && len(a.EphemeralContainers) == 0 && len(a.Containers) == 1 && len(w.Containers) == 1 && volumesMatch
+}
+
+func sameSourceContainer(ac, wc corev1.Container, serviceAccountVolume string) bool {
 	return ac.Name == wc.Name && ac.Image == wc.Image && reflect.DeepEqual(ac.Command, wc.Command) && reflect.DeepEqual(ac.Args, wc.Args) &&
 		reflect.DeepEqual(ac.Env, wc.Env) && len(ac.EnvFrom) == 0 && reflect.DeepEqual(ac.Ports, wc.Ports) && reflect.DeepEqual(ac.ReadinessProbe, wc.ReadinessProbe) &&
 		ac.ImagePullPolicy == wc.ImagePullPolicy && reflect.DeepEqual(ac.Resources, wc.Resources) &&
