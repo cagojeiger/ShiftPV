@@ -129,7 +129,9 @@ ShiftPV는 CSI `File` fsGroup 정책을 선언한다. Pod가 `securityContext.fs
 Kubernetes StorageClass의 `reclaimPolicy`는 immutable이다. 설치된 class와 Chart의 정책이 다르면 일반적인
 Helm upgrade만으로 변경할 수 없다. 이 경우에는 먼저 ShiftPV PV/PVC와 진행 중인 provisioning이 없는지
 확인하고, 기존 StorageClass만 삭제한 직후 Chart를 sync해 다시 생성한다. 기존 PV의 reclaim policy는
-StorageClass를 다시 만들어도 소급 변경되지 않는다.
+StorageClass를 다시 만들어도 소급 변경되지 않는다. Lifecycle webhook은 uninstall checker가 의존하는 ShiftPV
+storage를 찾지 못했을 때에 한해 StorageClass 삭제만 허용하며, 의존 리소스가 남아 있으면 blocker 목록과 함께
+삭제를 거부한다.
 
 ```bash
 kubectl get pv,pvc -A
