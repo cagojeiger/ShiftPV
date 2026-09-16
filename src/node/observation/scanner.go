@@ -14,9 +14,9 @@ import (
 	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/node/ownership"
-	"github.com/cagojeiger/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/node/ownership"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 type Installation interface {

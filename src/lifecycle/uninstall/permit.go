@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/cagojeiger/ShiftPV/src/webhook/certificate"
+	"github.com/project-jelly/ShiftPV/src/webhook/certificate"
 )
 
 const (

@@ -21,10 +21,10 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 var cleanupListKinds = map[schema.GroupVersionResource]string{

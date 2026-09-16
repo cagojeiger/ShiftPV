@@ -14,9 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
-	"github.com/cagojeiger/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 type fakePoolCapacityRegistry struct {

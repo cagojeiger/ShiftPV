@@ -3,7 +3,7 @@ package volumeapi
 import (
 	"testing"
 
-	"github.com/cagojeiger/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 func TestMoveTransactionNamesAreDerivedFromTheMoveUID(t *testing.T) {

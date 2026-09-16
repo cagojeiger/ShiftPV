@@ -9,8 +9,8 @@ import (
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
 
 type PoolCapacityRegistry interface {

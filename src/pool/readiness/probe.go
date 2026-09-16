@@ -9,8 +9,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
 
 type Check struct {

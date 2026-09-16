@@ -17,9 +17,9 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	uninstallcheck "github.com/project-jelly/ShiftPV/src/lifecycle/uninstall"
 )
 
 type emptyVolumeRepository struct{}

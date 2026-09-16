@@ -23,7 +23,7 @@ controller:
   replicas: 1
   logLevel: 2
   image:
-    repository: ghcr.io/cagojeiger/shiftpv-controller
+    repository: ghcr.io/project-jelly/shiftpv-controller
     tag: 0.4.3
     pullPolicy: IfNotPresent
   resources: {}
@@ -45,7 +45,7 @@ node:
   kubeletRootDir: /var/lib/kubelet
   logLevel: 2
   image:
-    repository: ghcr.io/cagojeiger/shiftpv-node
+    repository: ghcr.io/project-jelly/shiftpv-node
     tag: 0.4.1
     pullPolicy: IfNotPresent
   nodeSelector: {}

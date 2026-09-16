@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/node/ownership"
-	"github.com/cagojeiger/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/node/ownership"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 type installation struct {

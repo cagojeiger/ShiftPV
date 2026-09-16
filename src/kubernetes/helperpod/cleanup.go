@@ -17,8 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
 const (

@@ -1,10 +1,11 @@
-module github.com/cagojeiger/ShiftPV
+module github.com/project-jelly/ShiftPV
 
 go 1.25.0
 
 require (
 	github.com/container-storage-interface/spec v1.12.0
 	github.com/prometheus/client_golang v1.24.1
+	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.78.0
 	k8s.io/api v0.35.8
 	k8s.io/apimachinery v0.35.8
@@ -13,6 +14,7 @@ require (
 	k8s.io/klog/v2 v2.140.0
 	k8s.io/mount-utils v0.35.8
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -43,7 +45,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
@@ -56,5 +57,4 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )

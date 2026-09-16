@@ -12,12 +12,12 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/helperpod"
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
-	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
-	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/mobility/admission"
+	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
 
 const (

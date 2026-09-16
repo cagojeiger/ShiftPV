@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cagojeiger/ShiftPV/src/cmd/internal/flagvalue"
-	"github.com/cagojeiger/ShiftPV/src/cmd/internal/wiring"
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
+	"github.com/project-jelly/ShiftPV/src/cmd/internal/flagvalue"
+	"github.com/project-jelly/ShiftPV/src/cmd/internal/wiring"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	uninstallcheck "github.com/project-jelly/ShiftPV/src/lifecycle/uninstall"
 )
 
 func main() {

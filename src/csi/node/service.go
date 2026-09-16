@@ -14,11 +14,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/utils/keymutex"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	shiftmount "github.com/cagojeiger/ShiftPV/src/node/mount"
-	"github.com/cagojeiger/ShiftPV/src/node/ownership"
-	"github.com/cagojeiger/ShiftPV/src/node/publication"
-	"github.com/cagojeiger/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
+	"github.com/project-jelly/ShiftPV/src/node/ownership"
+	"github.com/project-jelly/ShiftPV/src/node/publication"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 // Binder and VolumeRegistry are the node-local effect contracts; the adapter

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
 // TestHelperForwardsPoolReadinessBudgetToRegistry pins that every node-bound

@@ -12,9 +12,9 @@ import (
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 	"k8s.io/klog/v2"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
-	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/mobility/admission"
+	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 )
 
 // preflight only rejects known constraints. It neither reserves scheduler resources

@@ -11,10 +11,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/mobility/admission"
-	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
-	"github.com/cagojeiger/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/mobility/admission"
+	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 type observation struct {

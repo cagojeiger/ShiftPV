@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	resourcehelper "k8s.io/component-helpers/resource"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
 const placementRole = "placement"
