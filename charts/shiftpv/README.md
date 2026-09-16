@@ -145,6 +145,36 @@ kubectl get storageclass shiftpv shiftpv-retain
 checkout으로 in-place upgrade하고, 의존하는 storage가 남아 있을 때의 삭제 거부와 정리 후의 삭제·재생성을
 그대로 재현한다.
 
+#### Argo CD에서의 교체
+
+Argo CD는 immutable field가 다른 StorageClass를 server-side diff dry-run으로 비교하다 실패하고, 그
+Application 전체를 `ComparisonError`/`Sync Unknown`으로 두어 auto-sync와 selfHeal이 멈춘다. 이 상태는 Chart
+값이나 리소스 annotation으로는 풀 수 없다. `Replace=true,Force=true` sync-option은 매 sync마다 두 class를
+delete/create하므로 ShiftPV storage가 하나라도 생기면 webhook이 삭제를 거부해 이후 sync가 모두 실패한다 —
+그래서 Chart는 그 annotation을 제공하지 않는다. 절차는 위와 같다: 의존 storage가 없음을 확인하고 StorageClass를
+직접 삭제한 뒤 Application을 refresh/sync하면 Chart가 다시 만든다. 삭제부터 재생성까지 cluster에 기본
+StorageClass가 없으므로 `storageClassName`을 생략한 PVC는 그 사이 Pending에 머문다. Argo CD는 같은 revision의
+실패한 sync를 자동으로 재시도하지 않으니 삭제 뒤에는 sync를 명시적으로 트리거한다.
+
+### Retain volume 회수
+
+`shiftpv-retain`의 PV를 삭제해도 `ShiftPVVolume`과 node의 data directory는 남는다. ShiftPV는 data를
+자동으로 폐기하는 경로를 두지 않으므로 운영자가 다음 순서로 직접 회수한다. `ShiftPVVolume`은
+`shiftpv.io/volume-protection` finalizer와 lifecycle webhook이 보호하므로 controller ServiceAccount로
+impersonate해서 지운다.
+
+```bash
+kubectl delete pv <pv-name>
+kubectl get shiftpvvolume <volume-id> -o jsonpath='{.status.currentCopy.nodeName} {.status.currentCopy.poolName}'
+kubectl patch shiftpvvolume <volume-id> --type=merge -p '{"metadata":{"finalizers":[]}}' \
+  --as=system:serviceaccount:shiftpv-system:shiftpv-controller
+kubectl delete shiftpvvolume <volume-id> --as=system:serviceaccount:shiftpv-system:shiftpv-controller
+# node에서: rm -rf <pool mountPath>/volumes/<volume-id>
+```
+
+Pool `mountPath`는 `kubectl get shiftpvpool <pool> -o jsonpath='{.spec.mountPath}'`로 확인한다. directory를
+지우지 않으면 Pool inventory가 해당 copy를 unknown storage로 계속 보고한다.
+
 ## Planned mobility
 
 Settled terminal `ShiftPVMove` metadata is retained for seven days by default
