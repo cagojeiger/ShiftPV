@@ -49,7 +49,7 @@ func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
 
 func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) volumeapi.PoolInventory {
 	result := volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now.UTC())}
-	if s == nil || s.Installation == nil || s.Publications == nil || !filepath.IsAbs(s.HostRoot) || !filepath.IsAbs(s.TargetRoot) || pool.UID == "" || s.Limit < 1 || s.Limit > 256 {
+	if s.configurationInvalid(pool) {
 		result.Message = "InventoryConfigurationInvalid"
 		return result
 	}
@@ -69,46 +69,9 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 			return result
 		}
 		defer inventory.Close()
-		done := false
-		for !done && len(result.Copies) < s.Limit {
-			page, pageDone, pageErr := inventory.Page(ctx, min(64, s.Limit-len(result.Copies)))
-			if pageErr != nil {
-				result.Message = "InventoryReadFailed: " + pageErr.Error()
-				return result
-			}
-			for _, item := range page {
-				observation := volumeapi.CopyObservation{Marker: item.Marker, Identity: item.Identity, Present: item.Present, Problem: item.Problem}
-				if item.Identity != nil && (item.Identity.InstallationID != installationID || item.Identity.PoolName != pool.Name ||
-					item.Identity.PoolUID != pool.UID || item.Identity.NodeName != pool.NodeName) {
-					observation.Identity = nil
-					observation.Problem = "PoolIdentityMismatch"
-				}
-				if observation.Identity != nil && observation.Present && observation.Problem == "" {
-					source := filepath.Join(root, filepath.FromSlash(physicalKey(*observation.Identity)))
-					observation.Published, err = s.Publications.HasPublishedTarget(source, s.TargetRoot)
-					if err != nil {
-						observation.Problem = "PublicationObservationFailed: " + err.Error()
-					}
-				}
-				result.Copies = append(result.Copies, observation)
-				if item.Identity != nil && item.Present {
-					known[physicalKey(*item.Identity)] = struct{}{}
-				}
-			}
-			done = pageDone
+		if !s.observeRecorded(ctx, inventory, pool, root, installationID, known, &result) {
+			return result
 		}
-		for !done && len(result.Copies) == s.Limit {
-			page, pageDone, pageErr := inventory.Page(ctx, 1)
-			if pageErr != nil {
-				result.Message = "InventoryReadFailed: " + pageErr.Error()
-				return result
-			}
-			if len(page) > 0 {
-				break
-			}
-			done = pageDone
-		}
-		result.Truncated = !done
 	} else if !errors.Is(err, os.ErrNotExist) {
 		result.Message = "PoolIdentityInvalid: " + err.Error()
 	}
@@ -120,12 +83,7 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 	result.Copies = append(result.Copies, unknown...)
 	result.Truncated = result.Truncated || truncated
 	if result.Message == "" {
-		for _, observed := range result.Copies {
-			if observed.Problem != "" {
-				result.Message = "CopyObservationProblem"
-				break
-			}
-		}
+		result.Message = copyProblemMessage(result.Copies)
 	}
 	result.Valid = result.Message == ""
 	return result
