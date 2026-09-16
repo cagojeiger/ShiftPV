@@ -38,6 +38,7 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: __SOURCE_NODE__
+      terminationGracePeriodSeconds: 1
       containers:
         - name: writer
           image: busybox:1.37

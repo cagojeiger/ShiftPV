@@ -250,14 +250,32 @@ jobs:
         if: always()
         run: kind delete cluster --name shiftpv-mobility-e2e || true
 
-  kind-mobility-node-restart-e2e:
-    name: kind-mobility-node-restart-e2e
+  # The eight restart cases and the cleanup-Job retry tail are independent, so
+  # they run as one shard per job instead of one ~36 minute serialized sweep.
+  # Matrix jobs cannot carry the branch-ruleset check name, which is why the
+  # `kind-mobility-node-restart-e2e` aggregator below reports their result.
+  kind-mobility-node-restart-shard:
+    name: kind-mobility-node-restart-e2e (${{ matrix.shard }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: cases-1-2
+            cases: source,destination
+          - shard: cases-3-4
+            cases: copying-source,copying-destination
+          - shard: cases-5-6
+            cases: promoting-destination,committed-destination
+          - shard: cases-7-8
+            cases: cleaning-source,cleaning-destination
+          - shard: cleanup-job-retry
+            cases: ""
     env:
-      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
-      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
-      CLUSTER_NAME: shiftpv-mobility-node-restart-e2e
+      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.shard }}-kubeconfig
+      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.shard }}-kubeconfig
+      CLUSTER_NAME: shiftpv-node-restart-${{ matrix.shard }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -270,7 +288,9 @@ jobs:
       - name: Run node-container restart mobility E2E
         env:
           KEEP_CLUSTER: "1"
-          MOBILITY_NODE_RESTARTS_ONLY: "1"
+          MOBILITY_NODE_RESTARTS_ONLY: ${{ matrix.cases != '' && '1' || '0' }}
+          MOBILITY_NODE_RESTART_CASE: ${{ matrix.cases }}
+          CLEANUP_JOB_RETRY_ONLY: ${{ matrix.cases == '' && '1' || '0' }}
         run: ./test/e2e/kind/run.sh
 
       - name: Export failure diagnostics
@@ -279,11 +299,27 @@ jobs:
         with:
           cluster-name: ${{ env.CLUSTER_NAME }}
           diagnostics-dir: .tmp/ci-mobility-node-restart-diagnostics
-          artifact-name: kind-mobility-node-restart-e2e-diagnostics
+          artifact-name: kind-mobility-node-restart-e2e-${{ matrix.shard }}-diagnostics
 
       - name: Delete kind cluster
         if: always()
         run: kind delete cluster --name "${CLUSTER_NAME}" || true
+
+  # Keeps the check name the branch ruleset requires while the work itself runs
+  # in the shard matrix above.
+  kind-mobility-node-restart-e2e:
+    name: kind-mobility-node-restart-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: kind-mobility-node-restart-shard
+    if: always()
+    steps:
+      - name: Report shard result
+        env:
+          SHARD_RESULT: ${{ needs.kind-mobility-node-restart-shard.result }}
+        run: |
+          echo "node-restart shards: ${SHARD_RESULT}"
+          test "${SHARD_RESULT}" = success
 
   kind-upgrade-e2e:
     name: kind-upgrade-e2e

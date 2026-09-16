@@ -67,6 +67,7 @@ metadata:
 spec:
   nodeSelector:
     kubernetes.io/hostname: ${CAPACITY_NODE}
+  terminationGracePeriodSeconds: 1
   containers:
     - name: workload
       image: busybox:1.37

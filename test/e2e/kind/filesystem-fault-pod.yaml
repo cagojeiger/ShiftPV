@@ -4,6 +4,7 @@ metadata:
   name: shiftpv-filesystem-fault
 spec:
   restartPolicy: Never
+  terminationGracePeriodSeconds: 1
   nodeSelector:
     shiftpv.io/fault-node: "true"
   containers:

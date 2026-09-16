@@ -34,6 +34,7 @@ spec:
       labels:
         app: __NAMESPACE__
     spec:
+      terminationGracePeriodSeconds: 1
       containers:
         - name: writer
           image: busybox:1.37

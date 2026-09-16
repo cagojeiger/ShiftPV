@@ -51,7 +51,13 @@ VOLUME_DELETE_CLEANUP_ONLY=1 CLUSTER_NAME=shiftpv-delete-focused ./test/e2e/kind
 CLEANUP_JOB_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
 MOBILITY_FILESYSTEM_FAULTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-fs-focused ./test/e2e/kind/run.sh
 MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./test/e2e/kind/run.sh
+MOBILITY_NODE_RESTARTS_ONLY=1 MOBILITY_NODE_RESTART_CASE=source,destination \
+  CLUSTER_NAME=shiftpv-mobility-restart-cases ./test/e2e/kind/run.sh
 ```
+
+`MOBILITY_NODE_RESTART_CASE` takes one case or a comma/space-separated list out of `source`, `destination`,
+`copying-source`, `copying-destination`, `promoting-destination`, `committed-destination`, `cleaning-source`
+and `cleaning-destination`; CI runs those eight in parallel jobs instead of one serialized sweep.
 
 Each run owns a unique cluster name, kubeconfig, image tag and host directories. It removes exactly those
 resources on success or failure. `KEEP_CLUSTER=1` is for bounded diagnosis only.

@@ -462,45 +462,50 @@ helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--wait \
 	--timeout 5m
 
-case ${MOBILITY_NODE_RESTART_CASE:-all} in
-all)
-	run_case shiftpv-node-restart-source 'ShiftPV source node restart recovery' "${SOURCE_NODE}" SourceUnavailable
-	run_pre_copy_destination_restart_case shiftpv-node-restart-destination 'ShiftPV pre-copy destination node restart continuation'
-	run_copying_source_restart_case shiftpv-node-restart-copying-source 'ShiftPV Copying source restart recovery'
-	run_destination_restart_case shiftpv-node-restart-copying-destination 'ShiftPV Copying destination restart continuation' Copying "${SOURCE_NODE}"
-	run_destination_restart_case shiftpv-node-restart-promoting-destination 'ShiftPV Promoting destination restart continuation' Promoting "${SOURCE_NODE}"
-	run_destination_restart_case shiftpv-node-restart-committed-destination 'ShiftPV committed destination restart continuation' WaitingForDestinationPublish "${DESTINATION_NODE}"
-	run_cleaning_source_restart_case shiftpv-node-restart-cleaning-source 'ShiftPV CleaningSource source restart continuation' "${SOURCE_NODE}" ''
-	run_cleaning_source_restart_case shiftpv-node-restart-cleaning-destination 'ShiftPV CleaningSource destination restart continuation' "${DESTINATION_NODE}" DestinationUnavailable
-	;;
-source)
-	run_case shiftpv-node-restart-source 'ShiftPV source node restart recovery' "${SOURCE_NODE}" SourceUnavailable
-	;;
-destination)
-	run_pre_copy_destination_restart_case shiftpv-node-restart-destination 'ShiftPV pre-copy destination node restart continuation'
-	;;
-copying-source)
-	run_copying_source_restart_case shiftpv-node-restart-copying-source 'ShiftPV Copying source restart recovery'
-	;;
-copying-destination)
-	run_destination_restart_case shiftpv-node-restart-copying-destination 'ShiftPV Copying destination restart continuation' Copying "${SOURCE_NODE}"
-	;;
-promoting-destination)
-	run_destination_restart_case shiftpv-node-restart-promoting-destination 'ShiftPV Promoting destination restart continuation' Promoting "${SOURCE_NODE}"
-	;;
-committed-destination)
-	run_destination_restart_case shiftpv-node-restart-committed-destination 'ShiftPV committed destination restart continuation' WaitingForDestinationPublish "${DESTINATION_NODE}"
-	;;
-cleaning-source)
-	run_cleaning_source_restart_case shiftpv-node-restart-cleaning-source 'ShiftPV CleaningSource source restart continuation' "${SOURCE_NODE}" ''
-	;;
-cleaning-destination)
-	run_cleaning_source_restart_case shiftpv-node-restart-cleaning-destination 'ShiftPV CleaningSource destination restart continuation' "${DESTINATION_NODE}" DestinationUnavailable
-	;;
-*)
-	echo "unsupported MOBILITY_NODE_RESTART_CASE: ${MOBILITY_NODE_RESTART_CASE}" >&2
-	exit 1
-	;;
-esac
+ALL_CASES='source destination copying-source copying-destination promoting-destination committed-destination cleaning-source cleaning-destination'
+
+run_named_case() {
+	case $1 in
+	source)
+		run_case shiftpv-node-restart-source 'ShiftPV source node restart recovery' "${SOURCE_NODE}" SourceUnavailable
+		;;
+	destination)
+		run_pre_copy_destination_restart_case shiftpv-node-restart-destination 'ShiftPV pre-copy destination node restart continuation'
+		;;
+	copying-source)
+		run_copying_source_restart_case shiftpv-node-restart-copying-source 'ShiftPV Copying source restart recovery'
+		;;
+	copying-destination)
+		run_destination_restart_case shiftpv-node-restart-copying-destination 'ShiftPV Copying destination restart continuation' Copying "${SOURCE_NODE}"
+		;;
+	promoting-destination)
+		run_destination_restart_case shiftpv-node-restart-promoting-destination 'ShiftPV Promoting destination restart continuation' Promoting "${SOURCE_NODE}"
+		;;
+	committed-destination)
+		run_destination_restart_case shiftpv-node-restart-committed-destination 'ShiftPV committed destination restart continuation' WaitingForDestinationPublish "${DESTINATION_NODE}"
+		;;
+	cleaning-source)
+		run_cleaning_source_restart_case shiftpv-node-restart-cleaning-source 'ShiftPV CleaningSource source restart continuation' "${SOURCE_NODE}" ''
+		;;
+	cleaning-destination)
+		run_cleaning_source_restart_case shiftpv-node-restart-cleaning-destination 'ShiftPV CleaningSource destination restart continuation' "${DESTINATION_NODE}" DestinationUnavailable
+		;;
+	*)
+		echo "unsupported MOBILITY_NODE_RESTART_CASE: $1" >&2
+		exit 1
+		;;
+	esac
+}
+
+# Each case is independent, so CI splits them across jobs. The selector takes a
+# comma- or space-separated list; `all` keeps the full serialized sweep in the
+# order the cases were written.
+SELECTED_CASES=${MOBILITY_NODE_RESTART_CASE:-all}
+if [[ "${SELECTED_CASES}" == all ]]; then
+	SELECTED_CASES=${ALL_CASES}
+fi
+for selected_case in ${SELECTED_CASES//,/ }; do
+	run_named_case "${selected_case}"
+done
 
 echo 'ShiftPV mobility node-container restart recovery passed'

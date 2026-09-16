@@ -92,6 +92,7 @@ metadata:
   name: ${name}
 spec:
   restartPolicy: Never
+  terminationGracePeriodSeconds: 1
   containers:
     - name: writer
       image: busybox:1.37
