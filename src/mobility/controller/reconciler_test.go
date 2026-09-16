@@ -868,8 +868,30 @@ func TestObserveKeepsTerminatingPlacementReservedUntilNotFound(t *testing.T) {
 	}
 }
 
+// mobilityWalk is the one transaction TestObserveAndExecuteMobilityActions
+// drives, stage by stage. Every stage reads and advances the same live objects,
+// so the walk stays a single ordered scenario rather than independent cases.
+type mobilityWalk struct {
+	ctx        context.Context
+	volumeID   string
+	move       volumeapi.Move
+	observed   observation
+	repository *memoryRepository
+	client     *fake.Clientset
+	reconciler *Reconciler
+}
+
 func TestObserveAndExecuteMobilityActions(t *testing.T) {
-	ctx := context.Background()
+	walk := newMobilityWalk()
+	walk.observeAndLock(t)
+	walk.rejectUnknownActionAfterEviction(t)
+	walk.ensurePlacementOnDestination(t)
+	walk.ensureCopyOnlyAfterSourceReady(t)
+	walk.commitOwnerAndReleasePlacement(t)
+	walk.cleanupAndMarkSucceeded(t)
+}
+
+func newMobilityWalk() *mobilityWalk {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}
 	repository := &memoryRepository{
@@ -879,70 +901,94 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset(mobilityObjects(volumeID)...)
 	assignJobUIDs(client)
-	reconciler := newTestReconciler(client, repository, withTestCleanups())
+	return &mobilityWalk{
+		ctx: context.Background(), volumeID: volumeID, move: move,
+		repository: repository, client: client,
+		reconciler: newTestReconciler(client, repository, withTestCleanups()),
+	}
+}
 
-	observed, err := reconciler.observe(ctx, move)
+func (w *mobilityWalk) execute(t *testing.T, action fsm.Action) error {
+	t.Helper()
+	return w.reconciler.execute(w.ctx, &w.move, w.observed, fsm.Decision{Action: action})
+}
+
+func (w *mobilityWalk) observeAndLock(t *testing.T) {
+	t.Helper()
+	observed, err := w.reconciler.observe(w.ctx, w.move)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !observed.FSM.PreconditionsValid || len(observed.CandidateNodes) != 1 {
-		t.Fatalf("observation = %#v", observed)
+	w.observed = observed
+	if !w.observed.FSM.PreconditionsValid || len(w.observed.CandidateNodes) != 1 {
+		t.Fatalf("observation = %#v", w.observed)
 	}
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionLockVolume}); err != nil {
+	if err := w.execute(t, fsm.ActionLockVolume); err != nil {
 		t.Fatal(err)
 	}
-	if repository.volumes[volumeID].Phase != volumeapi.PhaseMoving || move.Status.ConsumerName != "consumer" {
-		t.Fatalf("locked state=%#v move=%#v", repository.volumes[volumeID], move)
+	if w.repository.volumes[w.volumeID].Phase != volumeapi.PhaseMoving || w.move.Status.ConsumerName != "consumer" {
+		t.Fatalf("locked state=%#v move=%#v", w.repository.volumes[w.volumeID], w.move)
 	}
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEvictConsumer}); err != nil {
+}
+
+func (w *mobilityWalk) rejectUnknownActionAfterEviction(t *testing.T) {
+	t.Helper()
+	if err := w.execute(t, fsm.ActionEvictConsumer); err != nil {
 		t.Fatal(err)
 	}
-	if !move.Status.EvictionRequested {
+	if !w.move.Status.EvictionRequested {
 		t.Fatal("eviction was not recorded")
 	}
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionWait}); err != nil {
+	if err := w.execute(t, fsm.ActionWait); err != nil {
 		t.Fatal(err)
 	}
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.Action("Unknown")}); err == nil {
+	if err := w.execute(t, fsm.Action("Unknown")); err == nil {
 		t.Fatal("unknown action was accepted")
 	}
+}
 
+func (w *mobilityWalk) ensurePlacementOnDestination(t *testing.T) {
+	t.Helper()
 	replacement := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "replacement", Namespace: "workload", UID: "replacement-uid"},
 		Spec:       corev1.PodSpec{SchedulingGates: []corev1.PodSchedulingGate{{Name: placementHoldName}}, Volumes: claimVolumes()},
 	}
-	if _, err := client.CoreV1().Pods("workload").Create(ctx, replacement, metav1.CreateOptions{}); err != nil {
+	if _, err := w.client.CoreV1().Pods("workload").Create(w.ctx, replacement, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	observed.Replacement = replacement
-	observed.Names = namesFor(move.Name)
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsurePlacement}); err != nil {
+	w.observed.Replacement = replacement
+	w.observed.Names = namesFor(w.move.Name)
+	if err := w.execute(t, fsm.ActionEnsurePlacement); err != nil {
 		t.Fatal(err)
 	}
-	placement, err := client.CoreV1().Pods("system").Get(ctx, observed.Names.PlacementPod, metav1.GetOptions{})
+	placement, err := w.client.CoreV1().Pods("system").Get(w.ctx, w.observed.Names.PlacementPod, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	placement.Spec.NodeName = "destination"
-	if _, err := client.CoreV1().Pods("system").Update(ctx, placement, metav1.UpdateOptions{}); err != nil {
+	if _, err := w.client.CoreV1().Pods("system").Update(w.ctx, placement, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	observed.Placement = placement
-	observed.DestinationNode = "destination"
-	move.Status.CapacityApproved = true
-	move.Status.DestinationPoolUID = "destination-pool-uid"
-	move.Status.SourceBytes = 1
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsureCopy}); err != nil {
+	w.observed.Placement = placement
+	w.observed.DestinationNode = "destination"
+	w.move.Status.CapacityApproved = true
+	w.move.Status.DestinationPoolUID = "destination-pool-uid"
+	w.move.Status.SourceBytes = 1
+}
+
+func (w *mobilityWalk) ensureCopyOnlyAfterSourceReady(t *testing.T) {
+	t.Helper()
+	if err := w.execute(t, fsm.ActionEnsureCopy); err != nil {
 		t.Fatal(err)
 	}
-	updated, _ := client.CoreV1().Pods("workload").Get(ctx, "replacement", metav1.GetOptions{})
+	updated, _ := w.client.CoreV1().Pods("workload").Get(w.ctx, "replacement", metav1.GetOptions{})
 	if !hasPlacementHold(updated) || updated.Spec.NodeSelector[corev1.LabelHostname] != "destination" {
 		t.Fatalf("replacement was not held and pinned: %#v", updated.Spec)
 	}
-	if _, err := client.BatchV1().Jobs("system").Get(ctx, observed.Names.CopyJob, metav1.GetOptions{}); err == nil {
+	if _, err := w.client.BatchV1().Jobs("system").Get(w.ctx, w.observed.Names.CopyJob, metav1.GetOptions{}); err == nil {
 		t.Fatal("copy Job was created before source readiness")
 	}
-	source, err := client.CoreV1().Pods("system").Get(ctx, observed.Names.SourcePod, metav1.GetOptions{})
+	source, err := w.client.CoreV1().Pods("system").Get(w.ctx, w.observed.Names.SourcePod, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -950,56 +996,64 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 		t.Fatalf("source HostPath = %q", got)
 	}
 	source.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
-	if _, err := client.CoreV1().Pods("system").UpdateStatus(ctx, source, metav1.UpdateOptions{}); err != nil {
+	if _, err := w.client.CoreV1().Pods("system").UpdateStatus(w.ctx, source, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsureCopy}); err != nil {
+	if err := w.execute(t, fsm.ActionEnsureCopy); err != nil {
 		t.Fatal(err)
 	}
-	copyJob, err := client.BatchV1().Jobs("system").Get(ctx, observed.Names.CopyJob, metav1.GetOptions{})
+	copyJob, err := w.client.BatchV1().Jobs("system").Get(w.ctx, w.observed.Names.CopyJob, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := copyJob.Spec.Template.Spec.Volumes[0].HostPath.Path; got != "/destination-pool" {
 		t.Fatalf("destination HostPath = %q", got)
 	}
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsurePromotion}); err != nil {
+}
+
+func (w *mobilityWalk) commitOwnerAndReleasePlacement(t *testing.T) {
+	t.Helper()
+	if err := w.execute(t, fsm.ActionEnsurePromotion); err != nil {
 		t.Fatal(err)
 	}
-	unpublished := repository.volumes[volumeID]
+	unpublished := w.repository.volumes[w.volumeID]
 	unpublished.PublishedNodes = nil // kubelet has completed the source unpublish.
-	repository.volumes[volumeID] = unpublished
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionCommitOwner}); err != nil {
+	w.repository.volumes[w.volumeID] = unpublished
+	if err := w.execute(t, fsm.ActionCommitOwner); err != nil {
 		t.Fatal(err)
 	}
-	if repository.volumes[volumeID].OwnerNode != "destination" {
-		t.Fatalf("owner was not committed: %#v", repository.volumes[volumeID])
+	if w.repository.volumes[w.volumeID].OwnerNode != "destination" {
+		t.Fatalf("owner was not committed: %#v", w.repository.volumes[w.volumeID])
 	}
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionDeletePlacement}); err != nil {
+	if err := w.execute(t, fsm.ActionDeletePlacement); err != nil {
 		t.Fatal(err)
 	}
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionReleasePlacement}); err != nil {
+	if err := w.execute(t, fsm.ActionReleasePlacement); err != nil {
 		t.Fatal(err)
 	}
-	updated, _ = client.CoreV1().Pods("workload").Get(ctx, "replacement", metav1.GetOptions{})
+	updated, _ := w.client.CoreV1().Pods("workload").Get(w.ctx, "replacement", metav1.GetOptions{})
 	if hasPlacementHold(updated) || updated.Annotations[placementAnnotationKey] != "owner" {
 		t.Fatalf("placement hold was not released as owner after commit: %#v", updated)
 	}
-	published := repository.volumes[volumeID]
+}
+
+func (w *mobilityWalk) cleanupAndMarkSucceeded(t *testing.T) {
+	t.Helper()
+	published := w.repository.volumes[w.volumeID]
 	published.PublishedNodes = []string{"destination"}
-	repository.volumes[volumeID] = published
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionEnsureCleanup}); err != nil {
+	w.repository.volumes[w.volumeID] = published
+	if err := w.execute(t, fsm.ActionEnsureCleanup); err != nil {
 		t.Fatal(err)
 	}
-	observed.Volume = repository.volumes[volumeID]
-	move.Status.Phase = string(fsm.PhaseCompleting)
-	if err := reconciler.execute(ctx, &move, observed, fsm.Decision{Action: fsm.ActionMarkSucceeded}); err != nil {
-		t.Fatalf("%v: move=%#v volume=%#v", err, move.Status, observed.Volume)
+	w.observed.Volume = w.repository.volumes[w.volumeID]
+	w.move.Status.Phase = string(fsm.PhaseCompleting)
+	if err := w.execute(t, fsm.ActionMarkSucceeded); err != nil {
+		t.Fatalf("%v: move=%#v volume=%#v", err, w.move.Status, w.observed.Volume)
 	}
-	if repository.volumes[volumeID].ActiveMove != "" {
-		t.Fatalf("active move was not cleared: %#v", repository.volumes[volumeID])
+	if w.repository.volumes[w.volumeID].ActiveMove != "" {
+		t.Fatalf("active move was not cleared: %#v", w.repository.volumes[w.volumeID])
 	}
-	if _, err := client.CoreV1().Secrets("system").Get(ctx, observed.Names.Secret, metav1.GetOptions{}); err == nil {
+	if _, err := w.client.CoreV1().Secrets("system").Get(w.ctx, w.observed.Names.Secret, metav1.GetOptions{}); err == nil {
 		t.Fatal("transfer Secret was not deleted")
 	}
 }
