@@ -4,6 +4,7 @@ metadata:
   name: shiftpv-fsgroup-e2e
 spec:
   restartPolicy: Never
+  terminationGracePeriodSeconds: 1
   securityContext:
     runAsNonRoot: true
     runAsUser: 10001

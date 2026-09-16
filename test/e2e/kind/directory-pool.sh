@@ -144,6 +144,7 @@ spec:
   nodeSelector:
     kubernetes.io/hostname: ${POOL_A_NODE}
   restartPolicy: Never
+  terminationGracePeriodSeconds: 1
   containers:
     - name: writer
       image: busybox:1.37
@@ -267,6 +268,7 @@ spec:
       labels:
         app: shiftpv-directory-mobility
     spec:
+      terminationGracePeriodSeconds: 1
       containers:
         - name: writer
           image: busybox:1.37

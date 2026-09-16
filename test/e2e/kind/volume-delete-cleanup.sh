@@ -74,6 +74,7 @@ spec:
   nodeSelector:
     kubernetes.io/hostname: ${NODE}
   restartPolicy: Never
+  terminationGracePeriodSeconds: 1
   containers:
     - name: writer
       image: busybox:1.37
