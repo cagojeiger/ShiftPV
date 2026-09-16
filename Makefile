@@ -1,4 +1,4 @@
-.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template linux-mount-integration kind-e2e kind-mobility-e2e kind-upgrade-e2e v04-model v04-kubernetes-primitives v04-filesystem-primitives
+.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template chart-render-diff linux-mount-integration kind-e2e kind-mobility-e2e kind-upgrade-e2e v04-model v04-kubernetes-primitives v04-filesystem-primitives
 
 CONTROLLER_VERSION_FILE ?= versions/controller
 NODE_VERSION_FILE ?= versions/node
@@ -110,6 +110,12 @@ kind-upgrade-e2e:
 
 helm-lint:
 	helm lint charts/shiftpv
+
+# Proves a chart refactor is render-neutral: templates the chart at BASE_REF and
+# at this checkout for every values combination the suites use and diffs the
+# bytes. Not part of verify, which has no base ref to compare against.
+chart-render-diff:
+	./build/ci/chart-render-diff.sh $(BASE_REF)
 
 # Chart render contracts live in ./test/helm as structural Go assertions, so a
 # broken contract names the flag or object instead of printing "Error 1".

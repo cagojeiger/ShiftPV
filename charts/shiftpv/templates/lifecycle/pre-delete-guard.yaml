@@ -29,9 +29,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ include "shiftpv.name" . }}
-        app.kubernetes.io/instance: {{ .Release.Name }}
-        app.kubernetes.io/component: uninstall-guard
+        {{- include "shiftpv.selectorLabels" (dict "root" . "component" "uninstall-guard") | nindent 8 }}
     spec:
       serviceAccountName: {{ include "shiftpv.controllerServiceAccount" . }}
       restartPolicy: Never
@@ -44,7 +42,7 @@ spec:
       {{- end }}
       containers:
         - name: uninstall-guard
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: "{{ include "shiftpv.controllerImage" . }}"
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           command: ["/shiftpv-uninstall-guard"]
           args:
@@ -60,11 +58,7 @@ spec:
             - --retry-interval=5s
             {{- end }}
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            runAsNonRoot: true
-            runAsUser: 65532
+            {{- include "shiftpv.containerSecurityContext" (dict "runAsNonRoot" true "runAsUser" 65532) | nindent 12 }}
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
