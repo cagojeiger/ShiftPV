@@ -9,7 +9,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.5.2.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.5.2.tgz
     version: 0.5.2
   - apiVersion: v2
     created: "2026-09-16T03:14:11.947349117Z"
@@ -19,7 +19,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.5.1.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.5.1.tgz
     version: 0.5.1
   - apiVersion: v2
     created: "2026-09-16T03:14:11.946468376Z"
@@ -29,7 +29,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.5.0.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.5.0.tgz
     version: 0.5.0
   - apiVersion: v2
     appVersion: 0.4.0
@@ -40,7 +40,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.4.0.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.4.0.tgz
     version: 0.4.0
   - apiVersion: v2
     appVersion: 0.3.1
@@ -51,7 +51,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.3.1.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.3.1.tgz
     version: 0.3.1
   - apiVersion: v2
     appVersion: 0.3.0
@@ -62,7 +62,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.3.0.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.3.0.tgz
     version: 0.3.0
   - apiVersion: v2
     appVersion: 0.1.11
@@ -73,7 +73,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.13.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.13.tgz
     version: 0.1.13
   - apiVersion: v2
     appVersion: 0.1.10
@@ -84,7 +84,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.12.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.12.tgz
     version: 0.1.12
   - apiVersion: v2
     appVersion: 0.1.9
@@ -95,7 +95,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.11.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.11.tgz
     version: 0.1.11
   - apiVersion: v2
     appVersion: 0.1.8
@@ -106,7 +106,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.10.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.10.tgz
     version: 0.1.10
   - apiVersion: v2
     appVersion: 0.1.8
@@ -117,7 +117,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.9.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.9.tgz
     version: 0.1.9
   - apiVersion: v2
     appVersion: 0.1.7
@@ -128,7 +128,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.8.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.8.tgz
     version: 0.1.8
   - apiVersion: v2
     appVersion: 0.1.7
@@ -139,7 +139,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.7.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.7.tgz
     version: 0.1.7
   - apiVersion: v2
     appVersion: 0.1.6
@@ -150,7 +150,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.6.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.6.tgz
     version: 0.1.6
   - apiVersion: v2
     appVersion: 0.1.5
@@ -161,7 +161,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.5.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.5.tgz
     version: 0.1.5
   - apiVersion: v2
     appVersion: 0.1.5
@@ -172,7 +172,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.4.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.4.tgz
     version: 0.1.4
   - apiVersion: v2
     appVersion: 0.1.4
@@ -183,7 +183,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.3.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.3.tgz
     version: 0.1.3
   - apiVersion: v2
     appVersion: 0.1.3
@@ -194,7 +194,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.2.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.2.tgz
     version: 0.1.2
   - apiVersion: v2
     appVersion: 0.1.2
@@ -205,7 +205,7 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.1.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.1.tgz
     version: 0.1.1
   - apiVersion: v2
     appVersion: 0.1.0
@@ -216,6 +216,6 @@ entries:
     name: shiftpv
     type: application
     urls:
-    - https://cagojeiger.github.io/ShiftPV/shiftpv-0.1.0.tgz
+    - https://project-jelly.github.io/ShiftPV/shiftpv-0.1.0.tgz
     version: 0.1.0
 generated: "2026-09-16T03:14:11.931539649Z"
