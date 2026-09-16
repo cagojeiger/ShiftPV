@@ -29,6 +29,26 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
+	secret := assertBootstrappedSecret(t, client)
+	assertMutatingConfiguration(t, client, secret.Data[caCertificateKey])
+	assertValidatingConfiguration(t, client, secret.Data[caCertificateKey])
+
+	serving, err := manager.GetCertificate(nil)
+	if err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+	if err := serving.Leaf.VerifyHostname("shiftpv-webhook.shiftpv-system.svc"); err != nil {
+		t.Fatalf("verify serving DNS name: %v", err)
+	}
+	if got := serving.Leaf.NotAfter.Sub(now); got != 90*24*time.Hour {
+		t.Fatalf("serving certificate validity = %s, want 90 days", got)
+	}
+}
+
+// assertBootstrappedSecret pins the material Bootstrap must have written and
+// the Service ownership that ties the Secret's lifetime to the install.
+func assertBootstrappedSecret(t *testing.T, client *fake.Clientset) *corev1.Secret {
+	t.Helper()
 	secret, err := client.CoreV1().Secrets("shiftpv-system").Get(context.Background(), "shiftpv-webhook-tls", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get Secret: %v", err)
@@ -41,7 +61,11 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].UID != types.UID("service-uid") {
 		t.Fatalf("Secret ownerReferences = %#v", secret.OwnerReferences)
 	}
+	return secret
+}
 
+func assertMutatingConfiguration(t *testing.T, client *fake.Clientset, caBundle []byte) {
+	t.Helper()
 	configuration, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), "shiftpv-mobility", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get MutatingWebhookConfiguration: %v", err)
@@ -49,12 +73,18 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 	if len(configuration.OwnerReferences) != 1 || configuration.OwnerReferences[0].UID != types.UID("driver-uid") {
 		t.Fatalf("webhook ownerReferences = %#v", configuration.OwnerReferences)
 	}
-	if len(configuration.Webhooks) != 1 || !bytes.Equal(configuration.Webhooks[0].ClientConfig.CABundle, secret.Data[caCertificateKey]) {
+	if len(configuration.Webhooks) != 1 || !bytes.Equal(configuration.Webhooks[0].ClientConfig.CABundle, caBundle) {
 		t.Fatalf("webhook CA bundle does not match Secret")
 	}
 	if got := configuration.Webhooks[0].ClientConfig.Service; got == nil || got.Name != "shiftpv-webhook" || got.Namespace != "shiftpv-system" {
 		t.Fatalf("webhook service reference = %#v", got)
 	}
+}
+
+// assertValidatingConfiguration pins the three lifecycle guards: the labelled
+// protected resources, the runtime custom resources, and their CRDs.
+func assertValidatingConfiguration(t *testing.T, client *fake.Clientset, caBundle []byte) {
+	t.Helper()
 	validation, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), "shiftpv-lifecycle", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get ValidatingWebhookConfiguration: %v", err)
@@ -62,20 +92,20 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 	if len(validation.Webhooks) != 3 {
 		t.Fatalf("validation webhooks = %d, want 3", len(validation.Webhooks))
 	}
-	assertValidationCABundles(t, validation, secret.Data[caCertificateKey])
+	assertValidationCABundles(t, validation, caBundle)
 	protected := findValidationWebhook(t, validation, validationWebhookName)
 	if protected.ObjectSelector == nil || protected.ObjectSelector.MatchLabels[protectedLabel] != "true" {
 		t.Fatalf("protected resource objectSelector = %#v", protected.ObjectSelector)
 	}
-	runtime := findValidationWebhook(t, validation, validationCRWebhookName)
-	if runtime.ObjectSelector != nil {
-		t.Fatalf("runtime CR objectSelector = %#v, want nil", runtime.ObjectSelector)
+	customResources := findValidationWebhook(t, validation, validationCRWebhookName)
+	if customResources.ObjectSelector != nil {
+		t.Fatalf("runtime CR objectSelector = %#v, want nil", customResources.ObjectSelector)
 	}
-	if len(runtime.Rules) != 2 || !reflect.DeepEqual(runtime.Rules[0].Operations, []admissionv1.OperationType{admissionv1.Delete}) ||
-		!reflect.DeepEqual(runtime.Rules[0].Rule.Resources, []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves"}) ||
-		!reflect.DeepEqual(runtime.Rules[1].Operations, []admissionv1.OperationType{admissionv1.Update}) ||
-		!reflect.DeepEqual(runtime.Rules[1].Rule.Resources, []string{"shiftpvpools"}) {
-		t.Fatalf("runtime CR rules = %#v", runtime.Rules)
+	if len(customResources.Rules) != 2 || !reflect.DeepEqual(customResources.Rules[0].Operations, []admissionv1.OperationType{admissionv1.Delete}) ||
+		!reflect.DeepEqual(customResources.Rules[0].Rule.Resources, []string{"shiftpvpools", "shiftpvvolumes", "shiftpvmoves"}) ||
+		!reflect.DeepEqual(customResources.Rules[1].Operations, []admissionv1.OperationType{admissionv1.Update}) ||
+		!reflect.DeepEqual(customResources.Rules[1].Rule.Resources, []string{"shiftpvpools"}) {
+		t.Fatalf("runtime CR rules = %#v", customResources.Rules)
 	}
 	crds := findValidationWebhook(t, validation, validationCRDWebhookName)
 	if crds.ObjectSelector != nil || len(crds.Rules) != 1 || !reflect.DeepEqual(crds.Rules[0].Rule.Resources, []string{"customresourcedefinitions"}) {
@@ -84,17 +114,6 @@ func TestBootstrapCreatesTrustedCertificateResources(t *testing.T) {
 	wantCRDCondition := "request.name in ['shiftpvpools.shiftpv.io', 'shiftpvvolumes.shiftpv.io', 'shiftpvmoves.shiftpv.io']"
 	if len(crds.MatchConditions) != 1 || crds.MatchConditions[0].Expression != wantCRDCondition {
 		t.Fatalf("CRD protection match conditions = %#v", crds.MatchConditions)
-	}
-
-	serving, err := manager.GetCertificate(nil)
-	if err != nil {
-		t.Fatalf("GetCertificate: %v", err)
-	}
-	if err := serving.Leaf.VerifyHostname("shiftpv-webhook.shiftpv-system.svc"); err != nil {
-		t.Fatalf("verify serving DNS name: %v", err)
-	}
-	if got := serving.Leaf.NotAfter.Sub(now); got != 90*24*time.Hour {
-		t.Fatalf("serving certificate validity = %s, want 90 days", got)
 	}
 }
 
