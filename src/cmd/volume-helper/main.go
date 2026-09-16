@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
@@ -369,85 +370,157 @@ func parseCleanupOptions(arguments []string) (cleanupOptions, error) {
 	return options, nil
 }
 
+// cleanupExecutor is the authorized executor binding a cleanup helper proved
+// before it is allowed to reclaim anything: the durable parent intent it read,
+// the controlling Job, and the exact Pod the intent is bound to.
+type cleanupExecutor struct {
+	approved        cleanupapi.Cleanup
+	jobName, jobUID string
+	pod             *corev1.Pod
+}
+
 func runCleanup(arguments []string) error {
 	options, err := parseCleanupOptions(arguments)
 	if err != nil {
 		return err
 	}
-	authorityIdentity, podName := options.authority, options.podName
-	config, err := rest.InClusterConfig()
+	dynamicClient, client, err := inClusterClients()
 	if err != nil {
-		return fmt.Errorf("load in-cluster configuration: %w", err)
-	}
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("create dynamic Kubernetes client: %w", err)
-	}
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("create Kubernetes client: %w", err)
+		return err
 	}
 	cleanups := &cleanupapi.Store{Client: dynamicClient}
 	registry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: options.poolReadinessStaleAfter}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	approved, err := cleanups.Get(ctx, authorityIdentity)
+	executor, err := authorizeCleanupExecutor(ctx, client, cleanups, options)
 	if err != nil {
-		return fmt.Errorf("read cleanup intent: %w", err)
+		return err
 	}
-	if approved.UID != authorityIdentity.UID || approved.Spec.Authority != authorityIdentity || approved.Spec.OperationID != options.operationID {
-		return fmt.Errorf("cleanup intent identity changed: %w", cleanupapi.ErrConflict)
-	}
-	pod, err := client.CoreV1().Pods(options.namespace).Get(ctx, podName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("read cleanup executor Pod: %w", err)
-	}
-	jobName, jobUID := "", ""
-	for _, owner := range pod.OwnerReferences {
-		if owner.Controller != nil && *owner.Controller && owner.Kind == "Job" {
-			jobName, jobUID = owner.Name, string(owner.UID)
-			break
-		}
-	}
-	if jobUID == "" || approved.Status.Phase != cleanupapi.PhaseRunning || approved.Status.Executor == nil ||
-		approved.Status.Executor.JobName != jobName || approved.Status.Executor.JobUID != jobUID ||
-		approved.Status.Executor.NodeName != approved.Spec.Target.NodeName || pod.Spec.NodeName != approved.Spec.Target.NodeName {
-		return fmt.Errorf("cleanup executor is not authorized")
-	}
-	job, err := client.BatchV1().Jobs(options.namespace).Get(ctx, jobName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("read cleanup executor Job: %w", err)
-	}
-	if string(job.UID) != jobUID || job.DeletionTimestamp != nil || !helperauth.OwnedByCleanupParent(job.OwnerReferences, authorityIdentity) {
-		return fmt.Errorf("cleanup Job is not owned by the exact parent: %w", volumeapi.ErrStateConflict)
-	}
-	if pod.UID == "" {
-		return fmt.Errorf("cleanup executor Pod has no UID")
-	}
-	executor := *approved.Status.Executor
-	if executor.PodUID != string(pod.UID) {
-		executor.PodUID = string(pod.UID)
-		if err := cleanups.UpdateStatus(ctx, approved, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &executor}); err != nil {
-			return fmt.Errorf("bind cleanup executor retry Pod: %w", err)
-		}
-		approved, err = cleanups.Get(ctx, authorityIdentity)
-		if err != nil {
-			return fmt.Errorf("read Pod-bound cleanup intent: %w", err)
-		}
-	}
-	if !helperauth.MatchesCleanupExecutor(approved.Status.Executor, jobName, jobUID, pod) {
-		return fmt.Errorf("cleanup executor does not match the exact running Pod")
-	}
+	approved := executor.approved
 	authority := helperauth.CleanupAuthority(cleanups, registry, helperauth.CleanupOptions{
-		Authority: authorityIdentity, Approved: approved, JobName: jobName, JobUID: jobUID, Pod: pod,
+		Authority: options.authority, Approved: approved, JobName: executor.jobName, JobUID: executor.jobUID, Pod: executor.pod,
 	})
 	localReceipt, digest, err := ownership.ReclaimWithResume(ctx, options.root, approved.Spec.Target, approved.Spec.OperationID, authority)
 	if err != nil {
 		return err
 	}
+	return recordCleanupReceipt(ctx, cleanups, executor, localReceipt, digest)
+}
+
+// authorizeCleanupExecutor reads the durable cleanup intent and proves this
+// process is the exact executor it approved, in the order the checks must run:
+// intent identity, executor Pod, controlling Job ownership, and the Pod binding
+// the intent carries.
+func authorizeCleanupExecutor(ctx context.Context, client kubernetes.Interface, cleanups *cleanupapi.Store, options cleanupOptions) (cleanupExecutor, error) {
+	authorityIdentity, podName := options.authority, options.podName
+	approved, err := cleanups.Get(ctx, authorityIdentity)
+	if err != nil {
+		return cleanupExecutor{}, fmt.Errorf("read cleanup intent: %w", err)
+	}
+	if intentIdentityChanged(approved, authorityIdentity, options.operationID) {
+		return cleanupExecutor{}, fmt.Errorf("cleanup intent identity changed: %w", cleanupapi.ErrConflict)
+	}
+	pod, err := client.CoreV1().Pods(options.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return cleanupExecutor{}, fmt.Errorf("read cleanup executor Pod: %w", err)
+	}
+	jobName, jobUID := controllingJobReference(pod.OwnerReferences)
+	if executorUnauthorized(approved, pod, jobUID, jobName) {
+		return cleanupExecutor{}, fmt.Errorf("cleanup executor is not authorized")
+	}
+	if err := verifyCleanupExecutorJob(ctx, client, options.namespace, jobName, jobUID, authorityIdentity); err != nil {
+		return cleanupExecutor{}, err
+	}
+	if pod.UID == "" {
+		return cleanupExecutor{}, fmt.Errorf("cleanup executor Pod has no UID")
+	}
+	approved, err = bindCleanupExecutorPod(ctx, cleanups, approved, pod, authorityIdentity)
+	if err != nil {
+		return cleanupExecutor{}, err
+	}
+	if !helperauth.MatchesCleanupExecutor(approved.Status.Executor, jobName, jobUID, pod) {
+		return cleanupExecutor{}, fmt.Errorf("cleanup executor does not match the exact running Pod")
+	}
+	return cleanupExecutor{approved: approved, jobName: jobName, jobUID: jobUID, pod: pod}, nil
+}
+
+// intentIdentityChanged reports whether the durable intent this helper read is
+// no longer the exact intent its arguments name.
+func intentIdentityChanged(approved cleanupapi.Cleanup, authorityIdentity cleanupapi.Authority, operationID string) bool {
+	return approved.UID != authorityIdentity.UID || approved.Spec.Authority != authorityIdentity || approved.Spec.OperationID != operationID
+}
+
+// executorUnauthorized reports whether the running Pod and its controlling Job
+// fail to match the executor the approved intent is running.
+func executorUnauthorized(approved cleanupapi.Cleanup, pod *corev1.Pod, jobUID, jobName string) bool {
+	return jobUID == "" || approved.Status.Phase != cleanupapi.PhaseRunning || approved.Status.Executor == nil ||
+		approved.Status.Executor.JobName != jobName || approved.Status.Executor.JobUID != jobUID ||
+		approved.Status.Executor.NodeName != approved.Spec.Target.NodeName || pod.Spec.NodeName != approved.Spec.Target.NodeName
+}
+
+// jobNotOwned reports whether the live Job is not the exact undeleted Job the
+// cleanup parent owns.
+func jobNotOwned(job *metav1.ObjectMeta, jobUID string, authorityIdentity cleanupapi.Authority) bool {
+	return string(job.UID) != jobUID || job.DeletionTimestamp != nil || !helperauth.OwnedByCleanupParent(job.OwnerReferences, authorityIdentity)
+}
+
+// rebindsPod reports whether the approved executor still names an earlier Pod
+// than the one running this cleanup.
+func rebindsPod(approved cleanupapi.Cleanup, pod *corev1.Pod) bool {
+	executor := *approved.Status.Executor
+	return executor.PodUID != string(pod.UID)
+}
+
+// controllingJobReference names the Job that controls the executor Pod, or
+// empty strings when no controlling Job owns it.
+func controllingJobReference(references []metav1.OwnerReference) (string, string) {
+	for _, owner := range references {
+		if owner.Controller != nil && *owner.Controller && owner.Kind == "Job" {
+			return owner.Name, string(owner.UID)
+		}
+	}
+	return "", ""
+}
+
+// verifyCleanupExecutorJob rechecks that the live controlling Job is the exact
+// undeleted Job the cleanup parent owns.
+func verifyCleanupExecutorJob(ctx context.Context, client kubernetes.Interface, namespace, jobName, jobUID string, authorityIdentity cleanupapi.Authority) error {
+	job, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("read cleanup executor Job: %w", err)
+	}
+	if jobNotOwned(&job.ObjectMeta, jobUID, authorityIdentity) {
+		return fmt.Errorf("cleanup Job is not owned by the exact parent: %w", volumeapi.ErrStateConflict)
+	}
+	return nil
+}
+
+// bindCleanupExecutorPod rebinds the durable intent to this retry Pod when the
+// approved executor still names an earlier one, and returns the intent the rest
+// of the cleanup must act on.
+func bindCleanupExecutorPod(ctx context.Context, cleanups *cleanupapi.Store, approved cleanupapi.Cleanup, pod *corev1.Pod, authorityIdentity cleanupapi.Authority) (cleanupapi.Cleanup, error) {
+	if !rebindsPod(approved, pod) {
+		return approved, nil
+	}
+	executor := *approved.Status.Executor
+	executor.PodUID = string(pod.UID)
+	if err := cleanups.UpdateStatus(ctx, approved, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &executor}); err != nil {
+		return cleanupapi.Cleanup{}, fmt.Errorf("bind cleanup executor retry Pod: %w", err)
+	}
+	bound, err := cleanups.Get(ctx, authorityIdentity)
+	if err != nil {
+		return cleanupapi.Cleanup{}, fmt.Errorf("read Pod-bound cleanup intent: %w", err)
+	}
+	return bound, nil
+}
+
+// recordCleanupReceipt publishes the local reclaim receipt for the parent
+// controller to verify.
+func recordCleanupReceipt(ctx context.Context, cleanups *cleanupapi.Store, executor cleanupExecutor, localReceipt ownership.Receipt, digest string) error {
+	approved := executor.approved
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	receipt := &cleanupapi.Receipt{
-		OperationID: approved.Spec.OperationID, ExecutorUID: jobUID, ObservedAt: now,
+		OperationID: approved.Spec.OperationID, ExecutorUID: executor.jobUID, ObservedAt: now,
 		Retired: localReceipt.Retired, Purged: localReceipt.Purged, LocalReceiptDigest: digest,
 	}
 	return cleanups.UpdateStatus(ctx, approved, cleanupapi.Status{
