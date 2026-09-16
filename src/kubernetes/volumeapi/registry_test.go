@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -1053,14 +1054,7 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 	}, pool("pool-a", "node-a"), moveObject)
 	registry := &Registry{Client: client}
 	seedReadyVolume(t, client, volumeID, "node-a")
-	createdVolume, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	createdVolume.SetUID("volume-uid")
-	if _, err := client.Resource(VolumeResource).Update(ctx, createdVolume, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	setVolumeUID(t, client, volumeID, "volume-uid")
 	current, err := registry.Get(ctx, volumeID)
 	if err != nil {
 		t.Fatal(err)
@@ -1098,14 +1092,19 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 	if err != nil || pools[0].MountPath != "/mnt/shiftpv" {
 		t.Fatalf("pools=%#v err=%v", pools, err)
 	}
-	volumeObject, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	volumeObject.SetUID("volume-uid")
-	if _, err := client.Resource(VolumeResource).Update(ctx, volumeObject, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+}
+
+// TestRegistryDeleteFencesOnExactUID covers the UID precondition that keeps a
+// stale delete from removing a recreated ShiftPVVolume.
+func TestRegistryDeleteFencesOnExactUID(t *testing.T) {
+	ctx := context.Background()
+	volumeID := "shiftpv-33333333333333333333333333333333"
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		VolumeResource: "ShiftPVVolumeList",
+	})
+	registry := &Registry{Client: client}
+	seedReadyVolume(t, client, volumeID, "node-a")
+	setVolumeUID(t, client, volumeID, "volume-uid")
 	client.PrependReactor("delete", "shiftpvvolumes", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		options := action.(k8stesting.DeleteAction).GetDeleteOptions()
 		if options.Preconditions == nil || options.Preconditions.UID == nil || string(*options.Preconditions.UID) != "volume-uid" {
@@ -1213,6 +1212,18 @@ func pool(name, nodeName string) *unstructured.Unstructured {
 			}},
 		},
 	}}
+}
+
+func setVolumeUID(t *testing.T, client *dynamicfake.FakeDynamicClient, volumeID, uid string) {
+	t.Helper()
+	object, err := client.Resource(VolumeResource).Get(context.Background(), volumeID, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.SetUID(types.UID(uid))
+	if _, err := client.Resource(VolumeResource).Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func seedReadyVolume(t *testing.T, client *dynamicfake.FakeDynamicClient, volumeID, ownerNode string) {

@@ -63,6 +63,13 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 	if cleanup.Status.Phase == cleanupapi.PhaseVerifying {
 		return r.resumeVerifying(ctx, cleanup, store, job)
 	}
+	return r.runCleanupExecutor(ctx, cleanup, store, job)
+}
+
+// runCleanupExecutor resolves exactly one suspended executor, binds it to the
+// journal, starts it, and waits for its API receipt. The phase is re-read once
+// more before binding, so a cleanup settled elsewhere still ends this call.
+func (r *Runner) runCleanupExecutor(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, job *batchv1.Job) (cleanupapi.Cleanup, error) {
 	created, err := r.ensureJob(ctx, store, cleanup, job)
 	if err != nil {
 		return cleanupapi.Cleanup{}, err
@@ -250,60 +257,17 @@ func cleanupJobOutcome(job *batchv1.Job) (complete bool, failure string, failed 
 }
 
 func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
-	if cleanup.Status.Executor == nil || cleanup.Status.Receipt == nil ||
-		cleanup.Status.Receipt.OperationID != cleanup.Spec.OperationID ||
-		cleanup.Status.Receipt.ExecutorUID != cleanup.Status.Executor.JobUID ||
-		!cleanup.Status.Receipt.Retired || !cleanup.Status.Receipt.Purged {
+	if !boundReceipt(cleanup) {
 		return cleanupapi.Cleanup{}, r.needsReview(ctx, store, cleanup, "ReceiptInvalid", "cleanup receipt does not match the durable executor and intent")
 	}
-	jobs := r.Client.BatchV1().Jobs(r.Namespace)
 	selector := labels.Set{cleanupNameLabel: cleanup.Name, cleanupUIDLabel: cleanup.UID}.AsSelector().String()
 	var result cleanupapi.Cleanup
 	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, r.Timeout, true, func(pollCtx context.Context) (bool, error) {
-		current, err := refreshCleanup(pollCtx, store, cleanup)
-		if err != nil {
-			return false, err
-		}
-		if current.Status.Phase == cleanupapi.PhaseCompleted || current.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
+		settled, current, pollErr := r.observeSettlement(pollCtx, cleanup, store, expected, selector)
+		if settled {
 			result = current
-			return true, nil
 		}
-		if current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Executor == nil || current.Status.Receipt == nil ||
-			!reflect.DeepEqual(current.Status.Executor, cleanup.Status.Executor) || !reflect.DeepEqual(current.Status.Receipt, cleanup.Status.Receipt) {
-			return false, cleanupapi.ErrConflict
-		}
-		job, getErr := jobs.Get(pollCtx, current.Status.Executor.JobName, metav1.GetOptions{})
-		if apierrors.IsNotFound(getErr) {
-			pods, listErr := r.Client.CoreV1().Pods(r.Namespace).List(pollCtx, metav1.ListOptions{LabelSelector: selector})
-			if listErr != nil {
-				return false, classifyKubernetesAPIError(listErr)
-			}
-			for index := range pods.Items {
-				if ownedByJob(&pods.Items[index], types.UID(current.Status.Executor.JobUID)) {
-					return false, nil
-				}
-			}
-			result = current
-			return true, nil
-		}
-		if getErr != nil {
-			return false, classifyKubernetesAPIError(getErr)
-		}
-		if string(job.UID) != current.Status.Executor.JobUID || !sameCleanupJob(job, expected) {
-			return false, r.needsReview(pollCtx, store, current, "ExecutorIdentityChanged", "cleanup executor differs from the durable cleanup status")
-		}
-		// First condition wins here, unlike cleanupJobOutcome: a receipt already
-		// exists, so a Complete recorded before a later Failed still resumes.
-		for _, condition := range job.Status.Conditions {
-			if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
-				return false, r.needsReview(pollCtx, store, current, "ExecutorFailed", fmt.Sprintf("cleanup Job failed after writing its receipt: %s", condition.Message))
-			}
-			if condition.Type == batchv1.JobComplete && condition.Status == corev1.ConditionTrue {
-				result = current
-				return true, nil
-			}
-		}
-		return false, nil
+		return settled, pollErr
 	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -312,6 +276,67 @@ func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup
 		return cleanupapi.Cleanup{}, fmt.Errorf("wait for cleanup executor settlement: %w", err)
 	}
 	return result, nil
+}
+
+// boundReceipt reports whether the durable receipt belongs to this intent's own
+// executor and already records a completed purge.
+func boundReceipt(cleanup cleanupapi.Cleanup) bool {
+	return cleanup.Status.Executor != nil && cleanup.Status.Receipt != nil &&
+		cleanup.Status.Receipt.OperationID == cleanup.Spec.OperationID &&
+		cleanup.Status.Receipt.ExecutorUID == cleanup.Status.Executor.JobUID &&
+		cleanup.Status.Receipt.Retired && cleanup.Status.Receipt.Purged
+}
+
+// observeSettlement performs one poll of a cleanup that already holds its API
+// receipt, reporting settlement together with the journal to return.
+func (r *Runner) observeSettlement(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job, selector string) (bool, cleanupapi.Cleanup, error) {
+	current, err := refreshCleanup(ctx, store, cleanup)
+	if err != nil {
+		return false, cleanupapi.Cleanup{}, err
+	}
+	if current.Status.Phase == cleanupapi.PhaseCompleted || current.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
+		return true, current, nil
+	}
+	if current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Executor == nil || current.Status.Receipt == nil ||
+		!reflect.DeepEqual(current.Status.Executor, cleanup.Status.Executor) || !reflect.DeepEqual(current.Status.Receipt, cleanup.Status.Receipt) {
+		return false, cleanupapi.Cleanup{}, cleanupapi.ErrConflict
+	}
+	job, getErr := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, current.Status.Executor.JobName, metav1.GetOptions{})
+	if apierrors.IsNotFound(getErr) {
+		return r.settleWithoutExecutor(ctx, current, selector)
+	}
+	if getErr != nil {
+		return false, cleanupapi.Cleanup{}, classifyKubernetesAPIError(getErr)
+	}
+	if string(job.UID) != current.Status.Executor.JobUID || !sameCleanupJob(job, expected) {
+		return false, cleanupapi.Cleanup{}, r.needsReview(ctx, store, current, "ExecutorIdentityChanged", "cleanup executor differs from the durable cleanup status")
+	}
+	// First condition wins here, unlike cleanupJobOutcome: a receipt already
+	// exists, so a Complete recorded before a later Failed still resumes.
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+			return false, cleanupapi.Cleanup{}, r.needsReview(ctx, store, current, "ExecutorFailed", fmt.Sprintf("cleanup Job failed after writing its receipt: %s", condition.Message))
+		}
+		if condition.Type == batchv1.JobComplete && condition.Status == corev1.ConditionTrue {
+			return true, current, nil
+		}
+	}
+	return false, cleanupapi.Cleanup{}, nil
+}
+
+// settleWithoutExecutor settles a cleanup whose Job is already gone, unless one
+// of that Job's own Pods is still around and could still write.
+func (r *Runner) settleWithoutExecutor(ctx context.Context, current cleanupapi.Cleanup, selector string) (bool, cleanupapi.Cleanup, error) {
+	pods, listErr := r.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if listErr != nil {
+		return false, cleanupapi.Cleanup{}, classifyKubernetesAPIError(listErr)
+	}
+	for index := range pods.Items {
+		if ownedByJob(&pods.Items[index], types.UID(current.Status.Executor.JobUID)) {
+			return false, cleanupapi.Cleanup{}, nil
+		}
+	}
+	return true, current, nil
 }
 
 func ownedByJob(pod *corev1.Pod, uid types.UID) bool {

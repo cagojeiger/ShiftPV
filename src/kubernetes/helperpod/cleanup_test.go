@@ -42,33 +42,7 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 		}
 		return true, job, nil
 	})
-	receiptWritten := false
-	client.PrependReactor("get", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		if !receiptWritten {
-			current, err := cleanups.Get(ctx, cleanup.Spec.Authority)
-			if err != nil {
-				return true, nil, err
-			}
-			bound := *current.Status.Executor
-			bound.PodUID = "pod-uid"
-			if err := cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &bound}); err != nil {
-				return true, nil, err
-			}
-			current, err = cleanups.Get(ctx, cleanup.Spec.Authority)
-			if err != nil {
-				return true, nil, err
-			}
-			receipt := &cleanupapi.Receipt{
-				OperationID: current.Spec.OperationID, ExecutorUID: current.Status.Executor.JobUID,
-				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: testCleanupReceiptDigest,
-			}
-			if err := cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: current.Status.Executor, Receipt: receipt}); err != nil {
-				return true, nil, err
-			}
-			receiptWritten = true
-		}
-		return false, nil, nil
-	})
+	writeReceiptOnFirstJobGet(client, cleanups, cleanup)
 	runner := validRunner(client)
 	runner.ServiceAccountName = "shiftpv-controller"
 	runner.PoolReadinessStaleAfter = 7 * time.Minute
@@ -83,22 +57,65 @@ func TestCleanupRunnerBindsExactJobAndWaitsForReceipt(t *testing.T) {
 	if result.Status.Phase != cleanupapi.PhaseVerifying || result.Status.Receipt == nil || created == nil {
 		t.Fatalf("result=%#v job=%#v", result, created)
 	}
-	container := created.Spec.Template.Spec.Containers[0]
-	if created.Name != cleanup.Name+"-effect" || created.Spec.Template.Spec.NodeName != cleanup.Spec.Target.NodeName ||
-		created.Spec.Template.Spec.ServiceAccountName != "shiftpv-controller" || container.Command[0] != "/shiftpv-volume-helper" ||
-		created.Spec.BackoffLimit == nil || *created.Spec.BackoffLimit < 1 || created.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever ||
-		!strings.Contains(strings.Join(container.Args, " "), "--authority-kind=ShiftPVVolume") ||
-		!strings.Contains(strings.Join(container.Args, " "), "--authority-name="+cleanup.Spec.Authority.Name) ||
-		!strings.Contains(strings.Join(container.Args, " "), "--authority-uid="+cleanup.Spec.Authority.UID) ||
-		len(created.OwnerReferences) != 1 || created.OwnerReferences[0].UID != types.UID(cleanup.Spec.Authority.UID) {
-		t.Fatalf("cleanup Job identity=%#v", created)
-	}
+	assertCleanupJobIdentity(t, created, cleanup, "shiftpv-controller")
 	started, err := client.BatchV1().Jobs(runner.Namespace).Get(ctx, created.Name, metav1.GetOptions{})
 	if err != nil || started.Spec.Suspend == nil || *started.Spec.Suspend {
 		t.Fatalf("bound cleanup Job was not started: suspend=%v err=%v", started.Spec.Suspend, err)
 	}
 	if second, err := runner.Reclaim(ctx, result, cleanups); err != nil || second.Status.Phase != cleanupapi.PhaseVerifying {
 		t.Fatalf("retry=%#v err=%v", second, err)
+	}
+}
+
+// writeReceiptOnFirstJobGet makes the first read of the executor Job observe a
+// cleanup whose Pod has already bound itself and written its API receipt.
+func writeReceiptOnFirstJobGet(client *fake.Clientset, cleanups *cleanupapi.Store, cleanup cleanupapi.Cleanup) {
+	ctx := context.Background()
+	receiptWritten := false
+	client.PrependReactor("get", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if receiptWritten {
+			return false, nil, nil
+		}
+		current, err := cleanups.Get(ctx, cleanup.Spec.Authority)
+		if err != nil {
+			return true, nil, err
+		}
+		bound := *current.Status.Executor
+		bound.PodUID = "pod-uid"
+		if err := cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &bound}); err != nil {
+			return true, nil, err
+		}
+		current, err = cleanups.Get(ctx, cleanup.Spec.Authority)
+		if err != nil {
+			return true, nil, err
+		}
+		receipt := &cleanupapi.Receipt{
+			OperationID: current.Spec.OperationID, ExecutorUID: current.Status.Executor.JobUID,
+			ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: testCleanupReceiptDigest,
+		}
+		if err := cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: current.Status.Executor, Receipt: receipt}); err != nil {
+			return true, nil, err
+		}
+		receiptWritten = true
+		return false, nil, nil
+	})
+}
+
+// assertCleanupJobIdentity pins the exact executor the approved effect names:
+// its node, service account, command, retry budget, authority arguments, and
+// the single owner reference that ties it to the cleanup parent.
+func assertCleanupJobIdentity(t *testing.T, created *batchv1.Job, cleanup cleanupapi.Cleanup, serviceAccount string) {
+	t.Helper()
+	container := created.Spec.Template.Spec.Containers[0]
+	arguments := strings.Join(container.Args, " ")
+	if created.Name != cleanup.Name+"-effect" || created.Spec.Template.Spec.NodeName != cleanup.Spec.Target.NodeName ||
+		created.Spec.Template.Spec.ServiceAccountName != serviceAccount || container.Command[0] != "/shiftpv-volume-helper" ||
+		created.Spec.BackoffLimit == nil || *created.Spec.BackoffLimit < 1 || created.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever ||
+		!strings.Contains(arguments, "--authority-kind=ShiftPVVolume") ||
+		!strings.Contains(arguments, "--authority-name="+cleanup.Spec.Authority.Name) ||
+		!strings.Contains(arguments, "--authority-uid="+cleanup.Spec.Authority.UID) ||
+		len(created.OwnerReferences) != 1 || created.OwnerReferences[0].UID != types.UID(cleanup.Spec.Authority.UID) {
+		t.Fatalf("cleanup Job identity=%#v", created)
 	}
 }
 

@@ -57,18 +57,9 @@ func TestReclaimIsIdentityBoundIdempotentAndDoesNotFollowSymlinks(t *testing.T) 
 	userData := filepath.Join(root, "operator-data", "preserve")
 	foreignVolume := filepath.Join(root, "volumes", "shiftpv-ffffffffffffffffffffffffffffffff", "preserve")
 	foreignIncoming := filepath.Join(root, ".shiftpv", "incoming", "unrecorded-copy", "preserve")
-	for _, path := range []string{userData, foreignVolume, foreignIncoming} {
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("preserve"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	writePreserved(t, userData, foreignVolume, foreignIncoming)
 	external := filepath.Join(t.TempDir(), "preserve")
-	if err := os.WriteFile(external, []byte("preserve"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writePreserved(t, external)
 	if err := os.Symlink(external, filepath.Join(dataset, "link")); err != nil {
 		t.Fatal(err)
 	}
@@ -87,24 +78,10 @@ func TestReclaimIsIdentityBoundIdempotentAndDoesNotFollowSymlinks(t *testing.T) 
 	if _, err := os.Stat(dataset); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dataset remains: %v", err)
 	}
-	for _, marker := range []string{
+	assertAbsent(t, "settled copy marker",
 		filepath.Join(root, ".shiftpv", copyMarker(identity.CopyID)),
-		filepath.Join(root, ".shiftpv", "placements", placementMarker(identity.CopyID)),
-	} {
-		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("settled copy marker remains at %s: %v", marker, err)
-		}
-	}
-	data, err := os.ReadFile(external)
-	if err != nil || string(data) != "preserve" {
-		t.Fatal("symlink target changed")
-	}
-	for _, path := range []string{userData, foreignVolume, foreignIncoming} {
-		data, err := os.ReadFile(path)
-		if err != nil || string(data) != "preserve" {
-			t.Fatalf("non-target data changed at %s: data=%q err=%v", path, data, err)
-		}
-	}
+		filepath.Join(root, ".shiftpv", "placements", placementMarker(identity.CopyID)))
+	assertPreserved(t, external, userData, foreignVolume, foreignIncoming)
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		t.Fatalf("Pool root changed: info=%v err=%v", info, err)
 	}
@@ -210,5 +187,37 @@ func TestReclaimIncomingPreservesServingCopyOfSameVolume(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(servingPath, "payload")); err != nil || string(data) != "preserve" {
 		t.Fatalf("serving copy changed: data=%q err=%v", data, err)
+	}
+}
+
+// writePreserved seeds files that a reclaim must leave byte-for-byte intact.
+func writePreserved(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("preserve"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func assertPreserved(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != "preserve" {
+			t.Fatalf("non-target data changed at %s: data=%q err=%v", path, data, err)
+		}
+	}
+}
+
+func assertAbsent(t *testing.T, what string, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s remains at %s: %v", what, path, err)
+		}
 	}
 }

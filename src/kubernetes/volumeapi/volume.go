@@ -62,34 +62,77 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, requestName, owner
 		return State{}, fmt.Errorf("read ShiftPVVolume creation intent: %w", err)
 	}
 
-	installationID, err := r.InstallationID(ctx)
+	installationID, pool, err := r.freshCreationPlacement(ctx, volumeID, ownerNode)
 	if err != nil {
 		return State{}, err
-	}
-	pool, err := r.ReadyPoolForNode(ctx, ownerNode)
-	if err != nil {
-		return State{}, err
-	}
-	if PoolHasServingVolume(pool, volumeID) {
-		return State{}, fmt.Errorf("%w: Pool %q already contains volume %q", ErrPoolCopyConflict, pool.Name, volumeID)
 	}
 	if create {
-		object, err = resource.Create(ctx, &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": "shiftpv.io/v1alpha1",
-			"kind":       "ShiftPVVolume",
-			"metadata":   map[string]any{"name": volumeID, "finalizers": []any{VolumeProtectionFinalizer}},
-			"spec":       map[string]any{"volumeID": volumeID, "requestName": requestName, "initialNode": ownerNode, "capacityBytes": capacityBytes},
-		}}, metav1.CreateOptions{})
+		object, err = resource.Create(ctx, newVolumeObject(volumeID, requestName, ownerNode, capacityBytes), metav1.CreateOptions{})
 	}
 	if err != nil {
 		return State{}, fmt.Errorf("begin ShiftPVVolume creation: %w", err)
 	}
+	copy, operationID, err := initialServingCopy(object, pool, installationID, volumeID, ownerNode)
+	if err != nil {
+		return State{}, err
+	}
+	state, err := stateFrom(object)
+	if err != nil {
+		return State{}, err
+	}
+	if state.Phase == "" {
+		state, err = r.recordCreationIntent(ctx, volumeID, State{
+			UID:                 string(object.GetUID()),
+			RequestName:         requestName,
+			CapacityBytes:       capacityBytes,
+			InitialNode:         ownerNode,
+			Phase:               PhasePending,
+			OwnerNode:           ownerNode,
+			CreationOperationID: operationID,
+			CurrentCopy:         &copy,
+		})
+		if err != nil {
+			return State{}, err
+		}
+	}
+	return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes)
+}
+
+// freshCreationPlacement resolves the installation and the Ready Pool that a
+// first serving copy may be placed into.
+func (r *Registry) freshCreationPlacement(ctx context.Context, volumeID, ownerNode string) (string, Pool, error) {
+	installationID, err := r.InstallationID(ctx)
+	if err != nil {
+		return "", Pool{}, err
+	}
+	pool, err := r.ReadyPoolForNode(ctx, ownerNode)
+	if err != nil {
+		return "", Pool{}, err
+	}
+	if PoolHasServingVolume(pool, volumeID) {
+		return "", Pool{}, fmt.Errorf("%w: Pool %q already contains volume %q", ErrPoolCopyConflict, pool.Name, volumeID)
+	}
+	return installationID, pool, nil
+}
+
+func newVolumeObject(volumeID, requestName, ownerNode string, capacityBytes int64) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1",
+		"kind":       "ShiftPVVolume",
+		"metadata":   map[string]any{"name": volumeID, "finalizers": []any{VolumeProtectionFinalizer}},
+		"spec":       map[string]any{"volumeID": volumeID, "requestName": requestName, "initialNode": ownerNode, "capacityBytes": capacityBytes},
+	}}
+}
+
+// initialServingCopy builds the exact identity the first serving copy carries,
+// together with the durable creation operation derived from the object UID.
+func initialServingCopy(object *unstructured.Unstructured, pool Pool, installationID, volumeID, ownerNode string) (volume.CopyIdentity, string, error) {
 	if object.GetUID() == "" || pool.UID == "" {
-		return State{}, fmt.Errorf("%w: Kubernetes object identity is missing", ErrStateConflict)
+		return volume.CopyIdentity{}, "", fmt.Errorf("%w: Kubernetes object identity is missing", ErrStateConflict)
 	}
 	operationID, err := CreationOperationID(string(object.GetUID()))
 	if err != nil {
-		return State{}, fmt.Errorf("%w: %v", ErrStateConflict, err)
+		return volume.CopyIdentity{}, "", fmt.Errorf("%w: %v", ErrStateConflict, err)
 	}
 	copy := volume.CopyIdentity{
 		InstallationID: installationID,
@@ -102,48 +145,30 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, requestName, owner
 		Role:           volume.RoleServing,
 	}
 	if err := copy.Validate(); err != nil {
-		return State{}, fmt.Errorf("build creation identity: %w", err)
+		return volume.CopyIdentity{}, "", fmt.Errorf("build creation identity: %w", err)
 	}
-	state, err := stateFrom(object)
-	if err != nil {
+	return copy, operationID, nil
+}
+
+// recordCreationIntent publishes the creation intent exactly once. A concurrent
+// writer that already recorded a phase wins, and its state is read back.
+func (r *Registry) recordCreationIntent(ctx context.Context, volumeID string, next State) (State, error) {
+	if err := r.mutateState(ctx, volumeID, func(current State) (State, error) {
+		if current.UID != next.UID {
+			return State{}, fmt.Errorf("%w: ShiftPVVolume %q UID changed from %q to %q", ErrStateConflict, volumeID, next.UID, current.UID)
+		}
+		if current.Phase != "" {
+			return current, nil
+		}
+		return next, nil
+	}); err != nil {
 		return State{}, err
 	}
-	if state.Phase == "" {
-		next := State{
-			UID:                 string(object.GetUID()),
-			RequestName:         requestName,
-			CapacityBytes:       capacityBytes,
-			InitialNode:         ownerNode,
-			Phase:               PhasePending,
-			OwnerNode:           ownerNode,
-			CreationOperationID: operationID,
-			CurrentCopy:         &copy,
-		}
-		if err := r.mutateState(ctx, volumeID, func(current State) (State, error) {
-			if current.UID != next.UID {
-				return State{}, fmt.Errorf("%w: ShiftPVVolume %q UID changed from %q to %q", ErrStateConflict, volumeID, next.UID, current.UID)
-			}
-			if current.Phase != "" {
-				return current, nil
-			}
-			return next, nil
-		}); err != nil {
-			return State{}, err
-		}
-		state, err = r.Get(ctx, volumeID)
-		if err != nil {
-			return State{}, err
-		}
-	}
-	return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes)
+	return r.Get(ctx, volumeID)
 }
 
 func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstructured, state State, volumeID, requestName, ownerNode string, capacityBytes int64) (State, error) {
-	if object == nil || object.GetUID() == "" || state.UID != string(object.GetUID()) || state.OwnerNode != ownerNode ||
-		state.RequestName != requestName || state.InitialNode != ownerNode || state.CapacityBytes != capacityBytes ||
-		state.CurrentCopy == nil || state.CurrentCopy.Validate() != nil || state.CurrentCopy.VolumeID != volumeID ||
-		state.CurrentCopy.VolumeUID != state.UID || state.CurrentCopy.NodeName != ownerNode || state.CurrentCopy.Role != volume.RoleServing ||
-		(state.Phase != PhasePending && state.Phase != PhaseReady) {
+	if !sameCreationIntent(object, state, volumeID, requestName, ownerNode, capacityBytes) {
 		return State{}, fmt.Errorf("%w: volume creation identity changed", ErrStateConflict)
 	}
 	operationID, err := CreationOperationID(state.UID)
@@ -154,17 +179,47 @@ func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstru
 	if err != nil {
 		return State{}, err
 	}
-	pool, err := r.PoolForNode(ctx, ownerNode)
+	pool, err := r.protectedCreationPool(ctx, ownerNode)
 	if err != nil {
 		return State{}, err
-	}
-	if pool.DeletionTimestamp != nil || !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
-		return State{}, fmt.Errorf("%w: creation Pool protection is unavailable", ErrPoolNotReady)
 	}
 	if state.CurrentCopy.InstallationID != installationID || state.CurrentCopy.PoolName != pool.Name || state.CurrentCopy.PoolUID != pool.UID {
 		return State{}, fmt.Errorf("%w: volume creation Pool identity changed", ErrStateConflict)
 	}
 	return state, nil
+}
+
+// sameCreationIntent reports whether the live state still describes the exact
+// creation this call was asked to resume.
+func sameCreationIntent(object *unstructured.Unstructured, state State, volumeID, requestName, ownerNode string, capacityBytes int64) bool {
+	if object == nil || object.GetUID() == "" || state.UID != string(object.GetUID()) {
+		return false
+	}
+	if state.OwnerNode != ownerNode || state.RequestName != requestName || state.InitialNode != ownerNode || state.CapacityBytes != capacityBytes {
+		return false
+	}
+	if state.Phase != PhasePending && state.Phase != PhaseReady {
+		return false
+	}
+	return servingCopyFor(state.CurrentCopy, volumeID, state.UID, ownerNode)
+}
+
+func servingCopyFor(copy *volume.CopyIdentity, volumeID, volumeUID, nodeName string) bool {
+	return copy != nil && copy.Validate() == nil && copy.VolumeID == volumeID &&
+		copy.VolumeUID == volumeUID && copy.NodeName == nodeName && copy.Role == volume.RoleServing
+}
+
+// protectedCreationPool reads the owner's Pool and requires the live protection
+// finalizer, so an in-flight creation cannot outlive its Pool.
+func (r *Registry) protectedCreationPool(ctx context.Context, ownerNode string) (Pool, error) {
+	pool, err := r.PoolForNode(ctx, ownerNode)
+	if err != nil {
+		return Pool{}, err
+	}
+	if pool.DeletionTimestamp != nil || !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
+		return Pool{}, fmt.Errorf("%w: creation Pool protection is unavailable", ErrPoolNotReady)
+	}
+	return pool, nil
 }
 
 func (r *Registry) CompleteCreate(ctx context.Context, volumeID, uid string, copy volume.CopyIdentity) error {
@@ -197,25 +252,7 @@ func (r *Registry) BeginDelete(ctx context.Context, volumeID, uid string, copy v
 		return State{}, ErrStateConflict
 	}
 	err := r.mutateState(ctx, volumeID, func(current State) (State, error) {
-		if current.UID != uid || current.OwnerNode != copy.NodeName || current.CurrentCopy == nil || *current.CurrentCopy != copy ||
-			current.ActiveMove != "" || len(current.PublishedNodes) != 0 {
-			return State{}, ErrStateConflict
-		}
-		switch current.Phase {
-		case PhaseReady:
-			if current.DeletionOperationID != "" {
-				return State{}, ErrStateConflict
-			}
-			current.Phase = PhaseDeleting
-			current.DeletionOperationID = operationID
-		case PhaseDeleting:
-			if current.DeletionOperationID != operationID {
-				return State{}, ErrStateConflict
-			}
-		default:
-			return State{}, ErrStateConflict
-		}
-		return current, nil
+		return fenceForDeletion(current, uid, operationID, copy)
 	})
 	if err != nil {
 		return State{}, err
@@ -228,6 +265,30 @@ func (r *Registry) BeginDelete(ctx context.Context, volumeID, uid string, copy v
 		return State{}, ErrStateConflict
 	}
 	return state, nil
+}
+
+// fenceForDeletion admits exactly one deletion operation per live copy and is
+// idempotent only for the operation that already owns the fence.
+func fenceForDeletion(current State, uid, operationID string, copy volume.CopyIdentity) (State, error) {
+	if current.UID != uid || current.OwnerNode != copy.NodeName || current.CurrentCopy == nil || *current.CurrentCopy != copy ||
+		current.ActiveMove != "" || len(current.PublishedNodes) != 0 {
+		return State{}, ErrStateConflict
+	}
+	switch current.Phase {
+	case PhaseReady:
+		if current.DeletionOperationID != "" {
+			return State{}, ErrStateConflict
+		}
+		current.Phase = PhaseDeleting
+		current.DeletionOperationID = operationID
+	case PhaseDeleting:
+		if current.DeletionOperationID != operationID {
+			return State{}, ErrStateConflict
+		}
+	default:
+		return State{}, ErrStateConflict
+	}
+	return current, nil
 }
 
 func (r *Registry) Get(ctx context.Context, volumeID string) (State, error) {

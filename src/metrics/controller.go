@@ -75,25 +75,50 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 		staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 	}
 	values := c.poolSamples(pools, volumes, moves, staleAfter)
+	values = append(values, volumePhaseSamples(volumes)...)
+	moveValues, err := movePhaseSamples(volumes, moves)
+	if err != nil {
+		return err
+	}
+	values = append(values, moveValues...)
+	cleanupValues, cleanupContracts, err := c.cleanupPhaseSamples(ctx)
+	if err != nil {
+		return err
+	}
+	values = append(values, cleanupValues...)
+	values = append(values, copyObservationSamples(pools, volumes, moves, cleanupContracts)...)
+	c.Exporter.Cache.update("metadata", values, true)
+	return nil
+}
+
+func volumePhaseSamples(volumes map[string]volumeapi.State) []sample {
 	counts := make(map[string]int)
 	for _, state := range volumes {
 		counts[bounded(state.Phase, volumePhases)]++
 	}
+	var values []sample
 	for _, phase := range volumePhases {
 		values = append(values, sample{"volumes", float64(counts[phase]), []string{phase}})
 	}
+	return values
+}
+
+// movePhaseSamples counts one Move per volume that names an active Move, plus
+// the Completing Moves that the volume no longer points at. A volume naming a
+// Move that does not exist or belongs to another volume is a broken link.
+func movePhaseSamples(volumes map[string]volumeapi.State, moves []volumeapi.Move) ([]sample, error) {
 	active := make(map[string]volumeapi.Move, len(moves))
 	for _, move := range moves {
 		active[move.Name] = move
 	}
-	counts = make(map[string]int)
+	counts := make(map[string]int)
 	for id, state := range volumes {
 		if state.ActiveMove == "" {
 			continue
 		}
 		move, exists := active[state.ActiveMove]
 		if !exists || move.Spec.VolumeID != id {
-			return fmt.Errorf("active Move link is incomplete")
+			return nil, fmt.Errorf("active Move link is incomplete")
 		}
 		counts[bounded(move.Status.Phase, movePhases)]++
 	}
@@ -103,16 +128,23 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 			counts["Completing"]++
 		}
 	}
+	var values []sample
 	for _, phase := range movePhases {
 		values = append(values, sample{"moves", float64(counts[phase]), []string{phase}})
 	}
+	return values, nil
+}
+
+// cleanupPhaseSamples also returns the listed journals, which the copy
+// observation classification needs. A journal with no phase counts as Pending.
+func (c *Controller) cleanupPhaseSamples(ctx context.Context) ([]sample, []cleanupapi.Cleanup, error) {
 	cleanupCounts := map[string]int{}
 	cleanupPhases := []string{cleanupapi.PhasePending, cleanupapi.PhaseRunning, cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence, cleanupapi.PhaseNeedsReview, cleanupapi.PhaseCompleted, "Unknown"}
 	var cleanupContracts []cleanupapi.Cleanup
 	if c.Cleanups != nil {
 		cleanups, err := c.Cleanups.List(ctx)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		cleanupContracts = cleanups
 		for _, request := range cleanups {
@@ -123,12 +155,11 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 			cleanupCounts[bounded(phase, cleanupPhases)]++
 		}
 	}
+	var values []sample
 	for _, state := range cleanupPhases {
 		values = append(values, sample{"cleanup_requests", float64(cleanupCounts[state]), []string{state}})
 	}
-	values = append(values, copyObservationSamples(pools, volumes, moves, cleanupContracts)...)
-	c.Exporter.Cache.update("metadata", values, true)
-	return nil
+	return values, cleanupContracts, nil
 }
 
 func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, staleAfter time.Duration) []sample {
@@ -166,6 +197,30 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 }
 
 func copyObservationSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, cleanups []cleanupapi.Cleanup) []sample {
+	authority := copyAuthority(volumes, moves, cleanups)
+	counts := map[string]int{}
+	for _, pool := range pools {
+		if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.Truncated {
+			counts["NeedsReview"]++
+		}
+		if pool.Status.Inventory == nil {
+			continue
+		}
+		for _, observed := range pool.Status.Inventory.Copies {
+			counts[observationState(observed, authority)]++
+		}
+	}
+	var values []sample
+	for _, state := range []string{"Current", "InFlight", "CleanupTarget", "OrphanPreserved", "Missing", "NeedsReview"} {
+		values = append(values, sample{"copy_observations", float64(counts[state]), []string{state}})
+	}
+	return values
+}
+
+// copyAuthority maps every copy identity the API still vouches for to the
+// reason it is expected on disk. Later claims deliberately win over earlier
+// ones: a cleanup target outranks an in-flight copy, which outranks current.
+func copyAuthority(volumes map[string]volumeapi.State, moves []volumeapi.Move, cleanups []cleanupapi.Cleanup) map[volume.CopyIdentity]string {
 	authority := map[volume.CopyIdentity]string{}
 	for _, state := range volumes {
 		if state.CurrentCopy != nil {
@@ -188,33 +243,19 @@ func copyObservationSamples(pools []volumeapi.Pool, volumes map[string]volumeapi
 			authority[request.Spec.Target] = "CleanupTarget"
 		}
 	}
-	counts := map[string]int{}
-	for _, pool := range pools {
-		if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.Truncated {
-			counts["NeedsReview"]++
-		}
-		if pool.Status.Inventory == nil {
-			continue
-		}
-		for _, observed := range pool.Status.Inventory.Copies {
-			if observed.Identity == nil || observed.Problem != "" {
-				counts["NeedsReview"]++
-				continue
-			}
-			if !observed.Present {
-				counts["Missing"]++
-				continue
-			}
-			state, exists := authority[*observed.Identity]
-			if !exists {
-				state = "OrphanPreserved"
-			}
-			counts[state]++
-		}
+	return authority
+}
+
+// observationState classifies one scanner observation against live authority.
+func observationState(observed volumeapi.CopyObservation, authority map[volume.CopyIdentity]string) string {
+	if observed.Identity == nil || observed.Problem != "" {
+		return "NeedsReview"
 	}
-	var values []sample
-	for _, state := range []string{"Current", "InFlight", "CleanupTarget", "OrphanPreserved", "Missing", "NeedsReview"} {
-		values = append(values, sample{"copy_observations", float64(counts[state]), []string{state}})
+	if !observed.Present {
+		return "Missing"
 	}
-	return values
+	if state, exists := authority[*observed.Identity]; exists {
+		return state
+	}
+	return "OrphanPreserved"
 }

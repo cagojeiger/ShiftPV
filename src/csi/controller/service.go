@@ -72,26 +72,9 @@ type Service struct {
 }
 
 func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	if req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "name is required")
-	}
-	if err := validateCapabilities(req.GetVolumeCapabilities()); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	if err := validateParameters(req.GetParameters()); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	capacity, err := requestedCapacity(req.GetCapacityRange())
+	request, err := parseCreateRequest(req)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	nodeName, err := selectedNode(req.GetAccessibilityRequirements())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	id, err := volume.IDFromName(req.GetName())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
 	if err := s.validate(); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -103,13 +86,13 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		}
 		defer leave()
 	}
-	unlock := s.lifecycles.Lock(id)
+	unlock := s.lifecycles.Lock(request.id)
 	defer unlock()
-	if err := s.ensureNoCleanupFence(ctx, id); err != nil {
+	if err := s.ensureNoCleanupFence(ctx, request.id); err != nil {
 		return nil, err
 	}
 
-	state, beginErr := s.beginCreate(ctx, id, req.GetName(), nodeName, capacity)
+	state, beginErr := s.beginCreate(ctx, request.id, request.name, request.nodeName, request.capacity)
 	if beginErr != nil {
 		if errors.Is(beginErr, volumeapi.ErrPoolCopyConflict) {
 			return nil, status.Error(codes.FailedPrecondition, beginErr.Error())
@@ -119,31 +102,73 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		}
 		return nil, kubernetesAPIError("record volume creation intent", beginErr)
 	}
-	if state.CurrentCopy == nil {
-		return nil, status.Error(codes.FailedPrecondition, "volume creation has no copy identity")
-	}
-	if createErr := s.Operator.CreateCopy(ctx, *state.CurrentCopy); createErr != nil {
-		return nil, directoryOperationError("prepare identified volume directory", createErr)
-	}
-	if completeErr := s.Volumes.CompleteCreate(ctx, id, state.UID, *state.CurrentCopy); completeErr != nil {
-		return nil, kubernetesAPIError("complete volume creation", completeErr)
-	}
-	if finalizeErr := s.Operator.FinalizeCreate(ctx, *state.CurrentCopy); finalizeErr != nil {
-		return nil, directoryOperationError("settle volume creation helper", finalizeErr)
+	if err := s.createServingCopy(ctx, request.id, state); err != nil {
+		return nil, err
 	}
 	poolNodes, poolErr := s.Volumes.PoolNodes(ctx)
 	if poolErr != nil {
 		return nil, kubernetesAPIError("list volume topology", poolErr)
 	}
-	if !slices.Contains(poolNodes, nodeName) {
-		return nil, status.Errorf(codes.FailedPrecondition, "selected node %q has no registered ShiftPVPool", nodeName)
+	if !slices.Contains(poolNodes, request.nodeName) {
+		return nil, status.Errorf(codes.FailedPrecondition, "selected node %q has no registered ShiftPVPool", request.nodeName)
 	}
-	accessibleNodes, err := s.accessibleNodes(ctx, req.GetParameters(), nodeName, poolNodes)
+	accessibleNodes, err := s.accessibleNodes(ctx, req.GetParameters(), request.nodeName, poolNodes)
 	if err != nil {
 		return nil, err
 	}
 
-	return volumeResponse(id, nodeName, accessibleNodes, capacity), nil
+	return volumeResponse(request.id, request.nodeName, accessibleNodes, request.capacity), nil
+}
+
+// createRequest is the exact volume identity a validated CSI request names.
+type createRequest struct {
+	id       string
+	name     string
+	nodeName string
+	capacity int64
+}
+
+func parseCreateRequest(req *csi.CreateVolumeRequest) (createRequest, error) {
+	if req.GetName() == "" {
+		return createRequest{}, status.Error(codes.InvalidArgument, "name is required")
+	}
+	if err := validateCapabilities(req.GetVolumeCapabilities()); err != nil {
+		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validateParameters(req.GetParameters()); err != nil {
+		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
+	}
+	capacity, err := requestedCapacity(req.GetCapacityRange())
+	if err != nil {
+		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
+	}
+	nodeName, err := selectedNode(req.GetAccessibilityRequirements())
+	if err != nil {
+		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
+	}
+	id, err := volume.IDFromName(req.GetName())
+	if err != nil {
+		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
+	}
+	return createRequest{id: id, name: req.GetName(), nodeName: nodeName, capacity: capacity}, nil
+}
+
+// createServingCopy performs the node-local create effect and records its
+// completion, in the order a crashed create must be able to resume from.
+func (s *Service) createServingCopy(ctx context.Context, id string, state volumeapi.State) error {
+	if state.CurrentCopy == nil {
+		return status.Error(codes.FailedPrecondition, "volume creation has no copy identity")
+	}
+	if createErr := s.Operator.CreateCopy(ctx, *state.CurrentCopy); createErr != nil {
+		return directoryOperationError("prepare identified volume directory", createErr)
+	}
+	if completeErr := s.Volumes.CompleteCreate(ctx, id, state.UID, *state.CurrentCopy); completeErr != nil {
+		return kubernetesAPIError("complete volume creation", completeErr)
+	}
+	if finalizeErr := s.Operator.FinalizeCreate(ctx, *state.CurrentCopy); finalizeErr != nil {
+		return directoryOperationError("settle volume creation helper", finalizeErr)
+	}
+	return nil
 }
 
 func (s *Service) ensureNoCleanupFence(ctx context.Context, volumeID string) error {
@@ -186,24 +211,12 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 	}
 	unlock := s.lifecycles.Lock(req.GetVolumeId())
 	defer unlock()
-	volumeStateExists := false
-	var volumeState volumeapi.State
-	state, stateErr := s.Volumes.Get(ctx, req.GetVolumeId())
-	if stateErr != nil && !apierrors.IsNotFound(stateErr) {
-		return nil, kubernetesAPIError("read volume state", stateErr)
+	volumeState, exists, stateErr := s.deletableState(ctx, req.GetVolumeId())
+	if stateErr != nil {
+		return nil, stateErr
 	}
-	if stateErr == nil {
-		volumeStateExists = true
-		volumeState = state
-	}
-	if !volumeStateExists {
+	if !exists {
 		return &csi.DeleteVolumeResponse{}, nil
-	}
-	if volumeState.OwnerNode == "" {
-		return nil, status.Error(codes.FailedPrecondition, "volume has no owner node")
-	}
-	if volumeState.UID == "" || volumeState.CurrentCopy == nil || volumeState.CurrentCopy.Role != volume.RoleServing {
-		return nil, status.Error(codes.FailedPrecondition, "identified volume state is required for cleanup")
 	}
 	fenced, fenceErr := s.Volumes.BeginDelete(ctx, req.GetVolumeId(), volumeState.UID, *volumeState.CurrentCopy)
 	if fenceErr != nil {
@@ -212,39 +225,8 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 		}
 		return nil, kubernetesAPIError("fence volume deletion", fenceErr)
 	}
-	intent, ensureErr := s.Cleanups.Ensure(ctx, cleanupapi.Spec{
-		OperationID: fenced.DeletionOperationID,
-		Target:      *fenced.CurrentCopy,
-		Reason:      "VolumeDelete",
-		Authority: cleanupapi.Authority{
-			Kind: "ShiftPVVolume", Name: req.GetVolumeId(), UID: fenced.UID,
-		},
-	})
-	if ensureErr != nil {
-		return nil, kubernetesAPIError("record volume cleanup intent", ensureErr)
-	}
-	cleanup := intent
-	if cleanup.Status.Phase == cleanupapi.PhasePending || cleanup.Status.Phase == cleanupapi.PhaseRunning {
-		cleanup, ensureErr = s.CleanupOperator.Reclaim(ctx, cleanup, s.Cleanups)
-		if ensureErr != nil {
-			return nil, directoryOperationError("reclaim identified volume copy", ensureErr)
-		}
-	}
-	if cleanup.Status.Phase == cleanupapi.PhaseNeedsReview {
-		return nil, status.Errorf(codes.FailedPrecondition, "cleanup %q requires review: %s", cleanup.Name, cleanup.Status.Message)
-	}
-	if cleanup.Status.Phase != cleanupapi.PhaseVerifying && cleanup.Status.Phase != cleanupapi.PhaseConfirmingAbsence && cleanup.Status.Phase != cleanupapi.PhaseCompleted {
-		return nil, status.Errorf(codes.FailedPrecondition, "cleanup is phase=%q", cleanup.Status.Phase)
-	}
-	cleanup, settled, settleErr := s.Cleanups.ReconcileAbsence(ctx, cleanup)
-	if settleErr != nil {
-		if errors.Is(settleErr, cleanupapi.ErrConflict) {
-			return nil, status.Errorf(codes.FailedPrecondition, "verify exact cleanup absence: %v", settleErr)
-		}
-		return nil, kubernetesAPIError("verify exact cleanup absence", settleErr)
-	}
-	if !settled || cleanup.Status.Phase != cleanupapi.PhaseCompleted {
-		return nil, status.Errorf(codes.Unavailable, "cleanup %q is waiting for a fresh post-receipt Pool absence proof", cleanup.Name)
+	if err := s.settleVolumeCleanup(ctx, req.GetVolumeId(), fenced); err != nil {
+		return nil, err
 	}
 	if err := s.Volumes.Delete(ctx, req.GetVolumeId(), fenced.UID); err != nil {
 		return nil, kubernetesAPIError("delete volume state", err)
@@ -253,6 +235,65 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 		return nil, kubernetesAPIError("release settled volume cleanup protection", err)
 	}
 	return &csi.DeleteVolumeResponse{}, nil
+}
+
+// deletableState reads the live volume state and reports whether a deletion
+// still has work to do. An absent object is an already completed deletion.
+func (s *Service) deletableState(ctx context.Context, volumeID string) (volumeapi.State, bool, error) {
+	state, stateErr := s.Volumes.Get(ctx, volumeID)
+	if stateErr != nil && !apierrors.IsNotFound(stateErr) {
+		return volumeapi.State{}, false, kubernetesAPIError("read volume state", stateErr)
+	}
+	if stateErr != nil {
+		return volumeapi.State{}, false, nil
+	}
+	if state.OwnerNode == "" {
+		return volumeapi.State{}, false, status.Error(codes.FailedPrecondition, "volume has no owner node")
+	}
+	if state.UID == "" || state.CurrentCopy == nil || state.CurrentCopy.Role != volume.RoleServing {
+		return volumeapi.State{}, false, status.Error(codes.FailedPrecondition, "identified volume state is required for cleanup")
+	}
+	return state, true, nil
+}
+
+// settleVolumeCleanup records the cleanup intent, runs the node-local effect
+// while it is still pending, and requires a fresh post-receipt absence proof
+// before the caller may remove the volume's durable state.
+func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenced volumeapi.State) error {
+	cleanup, ensureErr := s.Cleanups.Ensure(ctx, cleanupapi.Spec{
+		OperationID: fenced.DeletionOperationID,
+		Target:      *fenced.CurrentCopy,
+		Reason:      "VolumeDelete",
+		Authority: cleanupapi.Authority{
+			Kind: "ShiftPVVolume", Name: volumeID, UID: fenced.UID,
+		},
+	})
+	if ensureErr != nil {
+		return kubernetesAPIError("record volume cleanup intent", ensureErr)
+	}
+	if cleanup.Status.Phase == cleanupapi.PhasePending || cleanup.Status.Phase == cleanupapi.PhaseRunning {
+		cleanup, ensureErr = s.CleanupOperator.Reclaim(ctx, cleanup, s.Cleanups)
+		if ensureErr != nil {
+			return directoryOperationError("reclaim identified volume copy", ensureErr)
+		}
+	}
+	if cleanup.Status.Phase == cleanupapi.PhaseNeedsReview {
+		return status.Errorf(codes.FailedPrecondition, "cleanup %q requires review: %s", cleanup.Name, cleanup.Status.Message)
+	}
+	if cleanup.Status.Phase != cleanupapi.PhaseVerifying && cleanup.Status.Phase != cleanupapi.PhaseConfirmingAbsence && cleanup.Status.Phase != cleanupapi.PhaseCompleted {
+		return status.Errorf(codes.FailedPrecondition, "cleanup is phase=%q", cleanup.Status.Phase)
+	}
+	cleanup, settled, settleErr := s.Cleanups.ReconcileAbsence(ctx, cleanup)
+	if settleErr != nil {
+		if errors.Is(settleErr, cleanupapi.ErrConflict) {
+			return status.Errorf(codes.FailedPrecondition, "verify exact cleanup absence: %v", settleErr)
+		}
+		return kubernetesAPIError("verify exact cleanup absence", settleErr)
+	}
+	if !settled || cleanup.Status.Phase != cleanupapi.PhaseCompleted {
+		return status.Errorf(codes.Unavailable, "cleanup %q is waiting for a fresh post-receipt Pool absence proof", cleanup.Name)
+	}
+	return nil
 }
 
 func (s *Service) ControllerGetCapabilities(context.Context, *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {

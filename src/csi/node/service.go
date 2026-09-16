@@ -125,40 +125,19 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	if err := s.Binder.Unpublish(req.GetTargetPath()); err != nil {
 		return nil, status.Errorf(codes.Internal, "unmount target: %v", err)
 	}
-	state, err := s.Volumes.Get(ctx, req.GetVolumeId())
-	if apierrors.IsNotFound(err) {
-		return &csi.NodeUnpublishVolumeResponse{}, nil
-	}
+	target, reconcile, err := s.unpublishTarget(ctx, req.GetVolumeId())
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "read volume state before unpublish: %v", err)
+		return nil, err
 	}
-	if state.CurrentCopy == nil || state.CurrentCopy.Role != volume.RoleServing {
-		return nil, status.Error(codes.FailedPrecondition, "identified serving copy is required for unpublish")
-	}
-	if state.CurrentCopy.NodeName != s.NodeName {
+	if !reconcile {
 		return &csi.NodeUnpublishVolumeResponse{}, nil
-	}
-	copy := *state.CurrentCopy
-	pool, poolRoot, err := s.poolRoot(ctx)
-	if err != nil {
-		if publication.PoolIdentityUnavailable(err) {
-			return &csi.NodeUnpublishVolumeResponse{}, nil
-		}
-		return nil, status.Errorf(codes.Unavailable, "resolve node pool after unpublish: %v", err)
-	}
-	if !publication.CopyMatchesPool(copy, pool) {
-		return &csi.NodeUnpublishVolumeResponse{}, nil
-	}
-	source, err := volume.Path(poolRoot, req.GetVolumeId())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	enteredLock, err := s.publisher().Unpublish(ctx, publication.UnpublishRequest{
 		VolumeID: req.GetVolumeId(),
-		Source:   source,
-		PoolRoot: poolRoot,
-		StateUID: state.UID,
-		Copy:     copy,
+		Source:   target.source,
+		PoolRoot: target.poolRoot,
+		StateUID: target.stateUID,
+		Copy:     target.copy,
 	})
 	if err != nil {
 		if errors.Is(err, publication.ErrIdentityUnavailable) || !enteredLock &&
@@ -168,6 +147,50 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 		return nil, publicationError("unpublish", err, enteredLock)
 	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
+}
+
+// unpublishTarget is the exact live copy whose publication state this node
+// still owns and must reconcile after the target mount is gone.
+type unpublishTarget struct {
+	copy     volume.CopyIdentity
+	poolRoot string
+	source   string
+	stateUID string
+}
+
+// unpublishTarget reports false when nothing on this node remains to
+// reconcile: the volume is gone, owned elsewhere, or this Pool no longer
+// carries the copy. Those are all already-unpublished, not failures.
+func (s *Service) unpublishTarget(ctx context.Context, volumeID string) (unpublishTarget, bool, error) {
+	state, err := s.Volumes.Get(ctx, volumeID)
+	if apierrors.IsNotFound(err) {
+		return unpublishTarget{}, false, nil
+	}
+	if err != nil {
+		return unpublishTarget{}, false, status.Errorf(codes.Unavailable, "read volume state before unpublish: %v", err)
+	}
+	if state.CurrentCopy == nil || state.CurrentCopy.Role != volume.RoleServing {
+		return unpublishTarget{}, false, status.Error(codes.FailedPrecondition, "identified serving copy is required for unpublish")
+	}
+	if state.CurrentCopy.NodeName != s.NodeName {
+		return unpublishTarget{}, false, nil
+	}
+	copy := *state.CurrentCopy
+	pool, poolRoot, err := s.poolRoot(ctx)
+	if err != nil {
+		if publication.PoolIdentityUnavailable(err) {
+			return unpublishTarget{}, false, nil
+		}
+		return unpublishTarget{}, false, status.Errorf(codes.Unavailable, "resolve node pool after unpublish: %v", err)
+	}
+	if !publication.CopyMatchesPool(copy, pool) {
+		return unpublishTarget{}, false, nil
+	}
+	source, err := volume.Path(poolRoot, volumeID)
+	if err != nil {
+		return unpublishTarget{}, false, status.Error(codes.InvalidArgument, err.Error())
+	}
+	return unpublishTarget{copy: copy, poolRoot: poolRoot, source: source, stateUID: state.UID}, true, nil
 }
 
 // publicationError maps one publication failure to its gRPC status. enteredLock

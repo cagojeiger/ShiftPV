@@ -92,39 +92,9 @@ func (h *Handler) MutatePod(ctx context.Context, namespace string, pod *corev1.P
 	if h.Client == nil || h.Volumes == nil {
 		return nil, fmt.Errorf("mobility admission is not configured")
 	}
-	var state *volumeapi.State
-	for _, volume := range pod.Spec.Volumes {
-		if volume.PersistentVolumeClaim == nil {
-			continue
-		}
-		claim, err := h.Client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, volume.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return nil, fmt.Errorf("read PVC %s/%s: %w", namespace, volume.PersistentVolumeClaim.ClaimName, err)
-		}
-		if claim.Spec.VolumeName == "" {
-			continue
-		}
-		persistentVolume, err := h.Client.CoreV1().PersistentVolumes().Get(ctx, claim.Spec.VolumeName, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return nil, fmt.Errorf("read PV %s: %w", claim.Spec.VolumeName, err)
-		}
-		if persistentVolume.Spec.CSI == nil || persistentVolume.Spec.CSI.Driver != DriverName {
-			continue
-		}
-		if state != nil {
-			return nil, fmt.Errorf("multiple bound ShiftPV volumes are unsupported")
-		}
-		current, err := h.Volumes.Get(ctx, persistentVolume.Spec.CSI.VolumeHandle)
-		if err != nil {
-			return nil, fmt.Errorf("read ShiftPVVolume %s: %w", persistentVolume.Spec.CSI.VolumeHandle, err)
-		}
-		state = &current
+	state, err := h.boundShiftPVState(ctx, namespace, pod)
+	if err != nil {
+		return nil, err
 	}
 	if state == nil {
 		return nil, nil
@@ -147,9 +117,62 @@ func (h *Handler) MutatePod(ctx context.Context, namespace string, pod *corev1.P
 		if namespaceObject.Labels[MobilityNamespaceLabel] == "enabled" {
 			return holdPlacement(pod), nil
 		}
-		return pinToOwner(pod, state.OwnerNode)
 	}
 	return pinToOwner(pod, state.OwnerNode)
+}
+
+// boundShiftPVState resolves the single ShiftPV volume this Pod is bound to. A
+// Pod with none is not this webhook's concern; more than one is unsupported.
+func (h *Handler) boundShiftPVState(ctx context.Context, namespace string, pod *corev1.Pod) (*volumeapi.State, error) {
+	var state *volumeapi.State
+	for _, podVolume := range pod.Spec.Volumes {
+		if podVolume.PersistentVolumeClaim == nil {
+			continue
+		}
+		handle, bound, err := h.shiftPVHandle(ctx, namespace, podVolume.PersistentVolumeClaim.ClaimName)
+		if err != nil {
+			return nil, err
+		}
+		if !bound {
+			continue
+		}
+		if state != nil {
+			return nil, fmt.Errorf("multiple bound ShiftPV volumes are unsupported")
+		}
+		current, err := h.Volumes.Get(ctx, handle)
+		if err != nil {
+			return nil, fmt.Errorf("read ShiftPVVolume %s: %w", handle, err)
+		}
+		state = &current
+	}
+	return state, nil
+}
+
+// shiftPVHandle returns the ShiftPV volume handle one claim is bound to. It
+// reports false when the claim is unbound or backed by another driver; a claim
+// or PV that has already disappeared is likewise not this webhook's concern.
+func (h *Handler) shiftPVHandle(ctx context.Context, namespace, claimName string) (string, bool, error) {
+	claim, err := h.Client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read PVC %s/%s: %w", namespace, claimName, err)
+	}
+	if claim.Spec.VolumeName == "" {
+		return "", false, nil
+	}
+	persistentVolume, err := h.Client.CoreV1().PersistentVolumes().Get(ctx, claim.Spec.VolumeName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read PV %s: %w", claim.Spec.VolumeName, err)
+	}
+	if persistentVolume.Spec.CSI == nil || persistentVolume.Spec.CSI.Driver != DriverName {
+		return "", false, nil
+	}
+	return persistentVolume.Spec.CSI.VolumeHandle, true, nil
 }
 
 func NodeReady(node *corev1.Node) bool {

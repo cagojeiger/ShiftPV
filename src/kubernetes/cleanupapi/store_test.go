@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -167,20 +168,7 @@ func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	cleanup, err := store.Ensure(context.Background(), testSpec("ShiftPVVolume", testVolumeID, "volume-uid", "VolumeDelete"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor := &Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: "worker-a"}
-	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseRunning, Executor: executor}); err != nil {
-		t.Fatal(err)
-	}
-	cleanup, _ = store.Get(context.Background(), cleanup.Spec.Authority)
-	receipt := &Receipt{OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID, ObservedAt: testNow(), Retired: true, Purged: true, LocalReceiptDigest: testReceiptDigest}
-	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
-		t.Fatal(err)
-	}
-	cleanup, _ = store.Get(context.Background(), cleanup.Spec.Authority)
+	cleanup := verifyingCleanup(t, store)
 	confirming, complete, err := store.ReconcileAbsence(context.Background(), cleanup)
 	if err != nil || complete || confirming.Status.Phase != PhaseConfirmingAbsence || confirming.Status.AbsenceProof.RequiredGeneration != 4 {
 		t.Fatalf("confirming=%#v complete=%v err=%v", confirming, complete, err)
@@ -188,19 +176,12 @@ func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
 	if _, complete, err = store.ReconcileAbsence(context.Background(), confirming); err != nil || complete {
 		t.Fatalf("stale observation completed=%v err=%v", complete, err)
 	}
-	currentPool, err := client.Resource(volumeapi.PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := unstructured.SetNestedField(currentPool.Object, int64(4), "status", "observedGeneration"); err != nil {
-		t.Fatal(err)
-	}
-	if err := unstructured.SetNestedSlice(currentPool.Object, []any{copyObservationMap(testCopy(), true)}, "status", "inventory", "copies"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Resource(volumeapi.PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	updatePoolStatus(t, client, func(pool *unstructured.Unstructured) error {
+		if err := unstructured.SetNestedField(pool.Object, int64(4), "status", "observedGeneration"); err != nil {
+			return err
+		}
+		return unstructured.SetNestedSlice(pool.Object, []any{copyObservationMap(testCopy(), true)}, "status", "inventory", "copies")
+	})
 	if _, complete, err = store.ReconcileAbsence(context.Background(), confirming); err != nil || complete {
 		t.Fatalf("present target completed=%v err=%v", complete, err)
 	}
@@ -219,31 +200,117 @@ func TestReconcileAbsenceUsesPostReceiptPoolGeneration(t *testing.T) {
 		}()},
 	} {
 		t.Run(name, func(t *testing.T) {
-			currentPool, err := client.Resource(volumeapi.PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := unstructured.SetNestedSlice(currentPool.Object, observations, "status", "inventory", "copies"); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := client.Resource(volumeapi.PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
-				t.Fatal(err)
-			}
+			setPoolCopies(t, client, observations)
 			if _, complete, err := store.ReconcileAbsence(context.Background(), confirming); err != nil || complete {
 				t.Fatalf("ambiguous inventory completed=%v err=%v", complete, err)
 			}
 		})
 	}
-	currentPool, _ = client.Resource(volumeapi.PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
-	if err := unstructured.SetNestedSlice(currentPool.Object, []any{copyObservationMap(testCopy(), false)}, "status", "inventory", "copies"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Resource(volumeapi.PoolResource).UpdateStatus(context.Background(), currentPool, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	setPoolCopies(t, client, []any{copyObservationMap(testCopy(), false)})
 	settled, complete, err := store.ReconcileAbsence(context.Background(), confirming)
 	if err != nil || !complete || settled.Status.Phase != PhaseCompleted || settled.Status.AbsenceProof == nil || !settled.Status.AbsenceProof.Absent {
 		t.Fatalf("settled=%#v complete=%v err=%v", settled, complete, err)
+	}
+}
+
+// TestUpdateStatusKeepsResolvedObservationAcrossConflictRetries pins that a
+// conflict retry republishes the observation the FIRST attempt resolved.
+//
+// UpdateStatus fills the observation fields the caller left open once, and
+// carries that resolved status across retries. Re-resolving them on every
+// attempt would publish an observedGeneration the caller never observed and a
+// lastTransitionTime later than the transition it describes, which is a silent
+// change to what the journal means rather than to whether the write succeeds.
+func TestUpdateStatusKeepsResolvedObservationAcrossConflictRetries(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		conflicts int
+	}{
+		{"one conflict", 1},
+		{"two conflicts", 2},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			parent := testParent("ShiftPVVolume", testVolumeID, "volume-uid", volumeapi.VolumeProtectionFinalizer)
+			store, client := testStore(parent)
+			// An advancing clock and a generation that moves between attempts are
+			// what make a re-resolved observation observable at all.
+			readings := 0
+			store.Now = func() time.Time {
+				readings++
+				return time.Unix(1_700_000_100+int64(readings), 0).UTC()
+			}
+			cleanup, err := store.Ensure(context.Background(), testSpec("ShiftPVVolume", testVolumeID, "volume-uid", "VolumeDelete"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstGeneration := currentParentGeneration(t, client)
+			wantTime := time.Unix(1_700_000_100+int64(readings)+1, 0).UTC().Format(time.RFC3339Nano)
+
+			remaining := testCase.conflicts
+			client.PrependReactor("update", "shiftpvvolumes", func(action ktesting.Action) (bool, runtime.Object, error) {
+				if action.(ktesting.UpdateAction).GetSubresource() != "status" || remaining <= 0 {
+					return false, nil, nil
+				}
+				remaining--
+				bumpParentGeneration(t, client)
+				return true, nil, apierrors.NewConflict(
+					schema.GroupResource{Group: "shiftpv.io", Resource: "shiftpvvolumes"}, testVolumeID, errors.New("injected"))
+			})
+
+			executor := &Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", NodeName: "worker-a"}
+			before := readings
+			if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseRunning, Executor: executor}); err != nil {
+				t.Fatalf("retried update: %v", err)
+			}
+			if remaining != 0 {
+				t.Fatalf("%d injected conflicts were never consumed", remaining)
+			}
+			settled, err := store.Get(context.Background(), cleanup.Spec.Authority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settled.Status.ObservedGeneration != firstGeneration {
+				t.Fatalf("republished observedGeneration = %d, want the first attempt's %d",
+					settled.Status.ObservedGeneration, firstGeneration)
+			}
+			if settled.Status.LastTransitionTime != wantTime {
+				t.Fatalf("republished lastTransitionTime = %q, want the first attempt's %q",
+					settled.Status.LastTransitionTime, wantTime)
+			}
+			if used := readings - before; used != 1 {
+				t.Fatalf("clock was read %d times across %d conflicts, want exactly 1", used, testCase.conflicts)
+			}
+			if later := currentParentGeneration(t, client); later == firstGeneration {
+				t.Fatalf("fixture never moved the generation between attempts: still %d", later)
+			}
+		})
+	}
+}
+
+func currentParentGeneration(t *testing.T, client *fake.FakeDynamicClient) int64 {
+	t.Helper()
+	object, err := client.Resource(volumeapi.VolumeResource).Get(context.Background(), testVolumeID, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return object.GetGeneration()
+}
+
+// bumpParentGeneration moves the parent generation without going through the
+// reactor chain, so the next attempt reads a generation the first never saw.
+func bumpParentGeneration(t *testing.T, client *fake.FakeDynamicClient) {
+	t.Helper()
+	object, err := client.Tracker().Get(volumeapi.VolumeResource, "", testVolumeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed, ok := object.(*unstructured.Unstructured)
+	if !ok {
+		t.Fatalf("parent is %T, want *unstructured.Unstructured", object)
+	}
+	typed.SetGeneration(typed.GetGeneration() + 1)
+	if err := client.Tracker().Update(volumeapi.VolumeResource, typed, ""); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -334,6 +401,48 @@ func TestSpecAcceptsMoveRollbackOnlyOnMoveParent(t *testing.T) {
 	if err := spec.Validate(); err == nil {
 		t.Fatal("Move rollback accepted a Volume parent")
 	}
+}
+
+// verifyingCleanup drives a fresh journal to Verifying behind a Pod-bound
+// executor and its API receipt, the precondition absence reconciliation needs.
+func verifyingCleanup(t *testing.T, store *Store) Cleanup {
+	t.Helper()
+	cleanup, err := store.Ensure(context.Background(), testSpec("ShiftPVVolume", testVolumeID, "volume-uid", "VolumeDelete"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &Executor{JobName: cleanup.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: "worker-a"}
+	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseRunning, Executor: executor}); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, _ = store.Get(context.Background(), cleanup.Spec.Authority)
+	receipt := &Receipt{OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID, ObservedAt: testNow(), Retired: true, Purged: true, LocalReceiptDigest: testReceiptDigest}
+	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, _ = store.Get(context.Background(), cleanup.Spec.Authority)
+	return cleanup
+}
+
+func updatePoolStatus(t *testing.T, client *fake.FakeDynamicClient, mutate func(*unstructured.Unstructured) error) {
+	t.Helper()
+	pool, err := client.Resource(volumeapi.PoolResource).Get(context.Background(), "pool-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mutate(pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Resource(volumeapi.PoolResource).UpdateStatus(context.Background(), pool, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setPoolCopies(t *testing.T, client *fake.FakeDynamicClient, observations []any) {
+	t.Helper()
+	updatePoolStatus(t, client, func(pool *unstructured.Unstructured) error {
+		return unstructured.SetNestedSlice(pool.Object, observations, "status", "inventory", "copies")
+	})
 }
 
 func testStore(objects ...runtime.Object) (*Store, *fake.FakeDynamicClient) {
