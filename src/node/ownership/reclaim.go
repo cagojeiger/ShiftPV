@@ -46,81 +46,127 @@ func reclaimWithState(
 		return Receipt{}, "", err
 	}
 	defer lock.Close()
-	var completed Receipt
-	if err := store.readMarker(operationMarker("receipt", operationID), &completed); err == nil {
-		if completed.OperationID != operationID || completed.Target != target || !completed.Retired || !completed.Purged {
-			return Receipt{}, "", ErrIdentity
-		}
-		if err := authority(ctx, true); err != nil {
-			return Receipt{}, "", err
-		}
-		if err := store.verifyAbsent(target); err != nil {
-			return Receipt{}, "", err
-		}
-		if err := store.removeCopyMetadata(target, completed.Device, completed.Inode); err != nil {
-			return Receipt{}, "", fmt.Errorf("finish cleanup metadata: %w", err)
-		}
-		digest, digestErr := receiptDigest(completed)
-		return completed, digest, digestErr
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if replayed, completed, digest, replayErr := store.replayReclaimReceipt(ctx, target, operationID, authority); replayed {
+		return completed, digest, replayErr
+	}
+	intent, effectStarted, err := store.prepareReclaimIntent(ctx, target, operationID, authority)
+	if err != nil {
 		return Receipt{}, "", err
 	}
-	intent, intentExists, err := store.localIntent(target, operationID)
+	if err := store.applyReclaimEffect(ctx, target, intent, effectStarted, authority, preflight, purge); err != nil {
+		return Receipt{}, "", err
+	}
+	return store.settleReclaim(target, operationID, intent)
+}
+
+// replayReclaimReceipt reports whether this exact cleanup already has a durable
+// receipt; the caller then returns the replayed outcome unchanged.
+func (s *Store) replayReclaimReceipt(ctx context.Context, target volume.CopyIdentity, operationID string, authority func(context.Context, bool) error) (bool, Receipt, string, error) {
+	var completed Receipt
+	if err := s.readMarker(operationMarker("receipt", operationID), &completed); err == nil {
+		if completed.OperationID != operationID || completed.Target != target || !completed.Retired || !completed.Purged {
+			return true, Receipt{}, "", ErrIdentity
+		}
+		if err := authority(ctx, true); err != nil {
+			return true, Receipt{}, "", err
+		}
+		if err := s.verifyAbsent(target); err != nil {
+			return true, Receipt{}, "", err
+		}
+		if err := s.removeCopyMetadata(target, completed.Device, completed.Inode); err != nil {
+			return true, Receipt{}, "", fmt.Errorf("finish cleanup metadata: %w", err)
+		}
+		digest, digestErr := receiptDigest(completed)
+		return true, completed, digest, digestErr
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return true, Receipt{}, "", err
+	}
+	return false, Receipt{}, "", nil
+}
+
+// prepareReclaimIntent reads any journaled effect, checks API authority against
+// what that journal already permits, and returns the intent to apply.
+func (s *Store) prepareReclaimIntent(ctx context.Context, target volume.CopyIdentity, operationID string, authority func(context.Context, bool) error) (localIntent, bool, error) {
+	intent, intentExists, err := s.localIntent(target, operationID)
 	if err != nil {
-		return Receipt{}, "", fmt.Errorf("read local cleanup intent: %w", err)
+		return localIntent{}, false, fmt.Errorf("read local cleanup intent: %w", err)
 	}
 	effectStarted := false
 	if intentExists {
-		effectStarted, err = store.cleanupEffectStarted(target, intent)
+		effectStarted, err = s.cleanupEffectStarted(target, intent)
 		if err != nil {
-			return Receipt{}, "", fmt.Errorf("inspect local cleanup effect: %w", err)
+			return localIntent{}, false, fmt.Errorf("inspect local cleanup effect: %w", err)
 		}
 	}
 	if err := authority(ctx, effectStarted); err != nil {
-		return Receipt{}, "", err
+		return localIntent{}, false, err
 	}
-	if !effectStarted {
-		if err := store.checkMarker(copyMarker(target.CopyID), target); err != nil {
-			return Receipt{}, "", fmt.Errorf("verify copy identity: %w", err)
-		}
-		placement, err := store.readPlacement(target.CopyID)
-		if err != nil || placement.Identity != target {
-			return Receipt{}, "", fmt.Errorf("verify copy placement: %w", errors.Join(err, ErrIdentity))
-		}
-		if intentExists {
-			if intent.Device != placement.Device || intent.Inode != placement.Inode {
-				return Receipt{}, "", ErrIdentity
-			}
-		} else {
-			intent, err = store.ensureLocalIntent(target, operationID, placement)
-			if err != nil {
-				return Receipt{}, "", fmt.Errorf("persist local cleanup intent: %w", err)
-			}
-		}
+	if effectStarted {
+		return intent, true, nil
 	}
+	intent, err = s.confirmFreshReclaimTarget(target, operationID, intent, intentExists)
+	return intent, false, err
+}
+
+// confirmFreshReclaimTarget proves the untouched copy still is the recorded one
+// and journals the intent that the destructive effect will replay from.
+func (s *Store) confirmFreshReclaimTarget(target volume.CopyIdentity, operationID string, intent localIntent, intentExists bool) (localIntent, error) {
+	if err := s.checkMarker(copyMarker(target.CopyID), target); err != nil {
+		return localIntent{}, fmt.Errorf("verify copy identity: %w", err)
+	}
+	placement, err := s.readPlacement(target.CopyID)
+	if err != nil || placement.Identity != target {
+		return localIntent{}, fmt.Errorf("verify copy placement: %w", errors.Join(err, ErrIdentity))
+	}
+	if intentExists {
+		if intent.Device != placement.Device || intent.Inode != placement.Inode {
+			return localIntent{}, ErrIdentity
+		}
+		return intent, nil
+	}
+	journaled, err := s.ensureLocalIntent(target, operationID, placement)
+	if err != nil {
+		return localIntent{}, fmt.Errorf("persist local cleanup intent: %w", err)
+	}
+	return journaled, nil
+}
+
+// applyReclaimEffect rechecks authority immediately before the destructive
+// effect and then retires and purges the journaled inode.
+func (s *Store) applyReclaimEffect(
+	ctx context.Context, target volume.CopyIdentity, intent localIntent, effectStarted bool,
+	authority func(context.Context, bool) error, preflight func(*Store) error,
+	purge func(context.Context, *Store, localIntent) error,
+) error {
 	if err := ctx.Err(); err != nil {
-		return Receipt{}, "", err
+		return err
 	}
 	if err := authority(ctx, effectStarted); err != nil {
-		return Receipt{}, "", fmt.Errorf("recheck cleanup authority before filesystem effect: %w", err)
+		return fmt.Errorf("recheck cleanup authority before filesystem effect: %w", err)
 	}
-	if err := preflight(store); err != nil {
-		return Receipt{}, "", fmt.Errorf("verify safe purge support: %w", err)
+	if err := preflight(s); err != nil {
+		return fmt.Errorf("verify safe purge support: %w", err)
 	}
-	if err := store.retire(target, intent); err != nil {
-		return Receipt{}, "", fmt.Errorf("retire cleanup target: %w", err)
+	if err := s.retire(target, intent); err != nil {
+		return fmt.Errorf("retire cleanup target: %w", err)
 	}
-	if err := purge(ctx, store, intent); err != nil {
-		return Receipt{}, "", fmt.Errorf("purge retired target: %w", err)
+	if err := purge(ctx, s, intent); err != nil {
+		return fmt.Errorf("purge retired target: %w", err)
 	}
+	return nil
+}
+
+// settleReclaim persists the receipt, proves the target is gone and drops the
+// copy metadata the receipt supersedes.
+func (s *Store) settleReclaim(target volume.CopyIdentity, operationID string, intent localIntent) (Receipt, string, error) {
 	receipt := Receipt{OperationID: operationID, Target: target, Device: intent.Device, Inode: intent.Inode, Retired: true, Purged: true}
-	if err := store.ensureMarker(operationMarker("receipt", operationID), receipt); err != nil {
+	if err := s.ensureMarker(operationMarker("receipt", operationID), receipt); err != nil {
 		return Receipt{}, "", fmt.Errorf("persist local cleanup receipt: %w", err)
 	}
-	if err := store.verifyAbsent(target); err != nil {
+	if err := s.verifyAbsent(target); err != nil {
 		return Receipt{}, "", fmt.Errorf("verify cleanup absence: %w", err)
 	}
-	if err := store.removeCopyMetadata(target, receipt.Device, receipt.Inode); err != nil {
+	if err := s.removeCopyMetadata(target, receipt.Device, receipt.Inode); err != nil {
 		return Receipt{}, "", fmt.Errorf("finish cleanup metadata: %w", err)
 	}
 	digest, err := receiptDigest(receipt)
