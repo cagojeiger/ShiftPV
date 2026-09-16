@@ -159,7 +159,10 @@ test "$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.metadata.finalizers[0]}
 test "$(kubectl get "shiftpvpool/${POOL}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')" = PoolDeregistering
 
 docker exec "${NODE}" umount "${MOUNT_TARGET}"
-docker exec "${NODE}" rmdir "${MOUNT_TARGET}"
+# The probe lives under the kubelet pods directory so it looks like a real pod
+# mount; once unmounted, kubelet housekeeping may remove the orphaned pod
+# directory before this rmdir runs. Either outcome leaves no mount behind.
+docker exec "${NODE}" sh -c 'rmdir "$1" 2>/dev/null || ! test -e "$1"' _ "${MOUNT_TARGET}"
 MOUNTED=0
 wait_for_inventory_publication false
 sleep 35
