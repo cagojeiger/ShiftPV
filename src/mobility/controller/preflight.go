@@ -31,53 +31,17 @@ func (r *Reconciler) preflight(ctx context.Context, observed *observation) (stri
 	if err != nil || reason != "" {
 		return reason, err
 	}
-	if len(pvcNames(pod.Spec)) != 1 {
-		return "MultiplePVCsUnsupported", nil
-	}
-	if reason := unsupportedPlacement(pod.Spec); reason != "" {
+	if reason := unsupportedConsumerPlacement(pod.Spec, template.Spec); reason != "" {
 		return reason, nil
 	}
-	if reason := unsupportedPlacement(template.Spec); reason != "" {
+	live := placementProbePod(pod, template, observed.Volume.OwnerNode)
+	pvAffinity, reason := requiredPVAffinity(observed.PV)
+	if reason != "" {
 		return reason, nil
 	}
-	if template.Spec.NodeName != "" {
-		return "ExplicitNodeNameUnsupported", nil
-	}
-	// A controller's template is the source of the next Pod, not the scheduler's
-	// assigned nodeName on the current Pod. Preserve all other live constraints.
-	live := pod.DeepCopy()
-	if live.Annotations[placementAnnotationKey] == "owner" &&
-		template.Spec.NodeSelector[corev1.LabelHostname] == "" &&
-		live.Spec.NodeSelector[corev1.LabelHostname] == observed.Volume.OwnerNode {
-		delete(live.Spec.NodeSelector, corev1.LabelHostname)
-	}
-	liveAffinity := nodeaffinity.GetRequiredNodeAffinity(live)
-	templateAffinity := nodeaffinity.GetRequiredNodeAffinity(&corev1.Pod{Spec: template.Spec})
-	var pvAffinity *nodeaffinity.NodeSelector
-	if observed.PV.Spec.NodeAffinity != nil && observed.PV.Spec.NodeAffinity.Required != nil {
-		pvAffinity, err = nodeaffinity.NewNodeSelector(observed.PV.Spec.NodeAffinity.Required)
-		if err != nil {
-			return "InvalidPVNodeAffinity", nil
-		}
-	}
-	var candidates []string
-	for _, nodeName := range observed.CandidateNodes {
-		node, err := r.Client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			continue
-		}
-		if err != nil {
-			return "", fmt.Errorf("preflight destination Node: %w", err)
-		}
-		liveMatch, liveErr := liveAffinity.Match(node)
-		templateMatch, templateErr := templateAffinity.Match(node)
-		if liveErr != nil || templateErr != nil {
-			return "InvalidNodeAffinity", nil
-		}
-		if admission.NodeReady(node) && !node.Spec.Unschedulable && liveMatch && templateMatch &&
-			(pvAffinity == nil || pvAffinity.Match(node)) && toleratesPlacement(live.Spec, node) && toleratesPlacement(template.Spec, node) {
-			candidates = append(candidates, nodeName)
-		}
+	candidates, reason, err := r.compatibleDestinations(ctx, observed.CandidateNodes, live, template, pvAffinity)
+	if err != nil || reason != "" {
+		return reason, err
 	}
 	if len(candidates) == 0 {
 		return "NoCompatibleDestination", nil
@@ -85,6 +49,84 @@ func (r *Reconciler) preflight(ctx context.Context, observed *observation) (stri
 	sort.Strings(candidates)
 	observed.CandidateNodes = candidates
 	return r.preflightPDB(ctx, pod)
+}
+
+// unsupportedConsumerPlacement reports the first placement constraint that
+// ShiftPV cannot reproduce on a destination node, checking the live Pod before
+// the controller template.
+func unsupportedConsumerPlacement(pod, template corev1.PodSpec) string {
+	if len(pvcNames(pod)) != 1 {
+		return "MultiplePVCsUnsupported"
+	}
+	if reason := unsupportedPlacement(pod); reason != "" {
+		return reason
+	}
+	if reason := unsupportedPlacement(template); reason != "" {
+		return reason
+	}
+	if template.NodeName != "" {
+		return "ExplicitNodeNameUnsupported"
+	}
+	return ""
+}
+
+// placementProbePod copies the live consumer for scheduling checks. A
+// controller's template is the source of the next Pod, not the scheduler's
+// assigned nodeName on the current Pod. Preserve all other live constraints.
+func placementProbePod(pod *corev1.Pod, template *corev1.PodTemplateSpec, ownerNode string) *corev1.Pod {
+	live := pod.DeepCopy()
+	if live.Annotations[placementAnnotationKey] == "owner" &&
+		template.Spec.NodeSelector[corev1.LabelHostname] == "" &&
+		live.Spec.NodeSelector[corev1.LabelHostname] == ownerNode {
+		delete(live.Spec.NodeSelector, corev1.LabelHostname)
+	}
+	return live
+}
+
+// requiredPVAffinity compiles the PersistentVolume's required node affinity, or
+// reports the rejection reason for one the scheduler could not parse either.
+func requiredPVAffinity(pv *corev1.PersistentVolume) (*nodeaffinity.NodeSelector, string) {
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		return nil, ""
+	}
+	selector, err := nodeaffinity.NewNodeSelector(pv.Spec.NodeAffinity.Required)
+	if err != nil {
+		return nil, "InvalidPVNodeAffinity"
+	}
+	return selector, ""
+}
+
+// compatibleDestinations reads each candidate Node in order and keeps the ones
+// that satisfy every live and template placement constraint.
+func (r *Reconciler) compatibleDestinations(ctx context.Context, candidateNodes []string, live *corev1.Pod,
+	template *corev1.PodTemplateSpec, pvAffinity *nodeaffinity.NodeSelector) ([]string, string, error) {
+	liveAffinity := nodeaffinity.GetRequiredNodeAffinity(live)
+	templateAffinity := nodeaffinity.GetRequiredNodeAffinity(&corev1.Pod{Spec: template.Spec})
+	var candidates []string
+	for _, nodeName := range candidateNodes {
+		node, err := r.Client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("preflight destination Node: %w", err)
+		}
+		liveMatch, liveErr := liveAffinity.Match(node)
+		templateMatch, templateErr := templateAffinity.Match(node)
+		if liveErr != nil || templateErr != nil {
+			return nil, "InvalidNodeAffinity", nil
+		}
+		if schedulableDestination(node, live.Spec, template.Spec, liveMatch, templateMatch, pvAffinity) {
+			candidates = append(candidates, nodeName)
+		}
+	}
+	return candidates, "", nil
+}
+
+func schedulableDestination(node *corev1.Node, live, template corev1.PodSpec, liveMatch, templateMatch bool,
+	pvAffinity *nodeaffinity.NodeSelector) bool {
+	return admission.NodeReady(node) && !node.Spec.Unschedulable && liveMatch && templateMatch &&
+		(pvAffinity == nil || pvAffinity.Match(node)) && toleratesPlacement(live, node) && toleratesPlacement(template, node)
 }
 
 func (r *Reconciler) consumerTemplate(ctx context.Context, pod *corev1.Pod) (*corev1.PodTemplateSpec, string, error) {
