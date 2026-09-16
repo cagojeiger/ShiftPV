@@ -5,11 +5,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shiftpv.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "shiftpv.fullname" . }}-helper
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "shiftpv.helperServiceAccount" . }}
-    namespace: {{ .Release.Namespace }}
+{{ include "shiftpv.bindingBody" (dict
+  "root" .
+  "kind" "Role"
+  "name" (printf "%s-helper" (include "shiftpv.fullname" .))
+  "serviceAccount" (include "shiftpv.helperServiceAccount" .)) }}

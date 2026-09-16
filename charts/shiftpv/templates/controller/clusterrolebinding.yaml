@@ -4,11 +4,8 @@ metadata:
   name: {{ include "shiftpv.fullname" . }}-provisioner
   labels:
     {{- include "shiftpv.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "shiftpv.fullname" . }}-provisioner
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "shiftpv.controllerServiceAccount" . }}
-    namespace: {{ .Release.Namespace }}
+{{ include "shiftpv.bindingBody" (dict
+  "root" .
+  "kind" "ClusterRole"
+  "name" (printf "%s-provisioner" (include "shiftpv.fullname" .))
+  "serviceAccount" (include "shiftpv.controllerServiceAccount" .)) }}

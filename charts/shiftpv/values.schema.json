@@ -1,7 +1,61 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {"type": "object", "additionalProperties": {"type": ["string", "number"]}},
+        "limits": {"type": "object", "additionalProperties": {"type": ["string", "number"]}}
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "serviceAccountRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "name"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string"}
+      }
+    },
+    "sidecar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image"],
+      "properties": {
+        "image": {"type": "string", "minLength": 1},
+        "resources": {"$ref": "#/definitions/resources"}
+      }
+    }
+  },
   "properties": {
+    "global": {
+      "type": "object",
+      "description": "Reserved for Helm's parent-chart globals; this chart reads none of them"
+    },
+    "nameOverride": {"type": "string"},
+    "fullnameOverride": {"type": "string"},
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {"name": {"type": "string", "minLength": 1}}
+      }
+    },
     "metrics": {
       "type": "object",
       "additionalProperties": false,
@@ -43,23 +97,18 @@
     },
     "controller": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["replicas", "image"],
       "properties": {
         "replicas": {"type": "integer", "const": 1},
         "logLevel": {"type": "integer", "minimum": 0},
-        "image": {
-          "type": "object",
-          "required": ["repository", "tag", "pullPolicy"],
-          "properties": {
-            "repository": {"type": "string", "minLength": 1},
-            "tag": {"type": "string", "minLength": 1},
-            "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
-          }
-        }
+        "image": {"$ref": "#/definitions/image"},
+        "resources": {"$ref": "#/definitions/resources"}
       }
     },
     "mobility": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["enabled", "interval", "journalRetention", "webhookPort", "helperImage"],
       "properties": {
         "enabled": {"type": "boolean"},
@@ -71,6 +120,7 @@
     },
     "node": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["kubeletRootDir", "image"],
       "properties": {
         "kubeletRootDir": {
@@ -79,29 +129,27 @@
           "description": "Host kubelet state root shared by every selected Node Plugin node"
         },
         "logLevel": {"type": "integer", "minimum": 0},
-        "image": {
-          "type": "object",
-          "required": ["repository", "tag", "pullPolicy"],
-          "properties": {
-            "repository": {"type": "string", "minLength": 1},
-            "tag": {"type": "string", "minLength": 1},
-            "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
-          }
-        }
+        "image": {"$ref": "#/definitions/image"},
+        "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+        "tolerations": {"type": "array", "items": {"type": "object"}},
+        "resources": {"$ref": "#/definitions/resources"}
       }
     },
     "helperPod": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["image", "timeout"],
       "properties": {
         "image": {"type": "string"},
         "timeout": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
         "resources": {
           "type": "object",
+          "additionalProperties": false,
           "required": ["requests", "limits"],
           "properties": {
             "requests": {
               "type": "object",
+              "additionalProperties": false,
               "required": ["cpu", "memory"],
               "properties": {
                 "cpu": {"type": "string", "minLength": 1},
@@ -110,6 +158,7 @@
             },
             "limits": {
               "type": "object",
+              "additionalProperties": false,
               "required": ["cpu", "memory"],
               "properties": {
                 "cpu": {"type": "string", "minLength": 1},
@@ -122,10 +171,23 @@
     },
     "poolReadiness": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["interval", "staleAfter"],
       "properties": {
         "interval": {"type": "string", "pattern": "^[1-9][0-9]*(s|m)$"},
         "staleAfter": {"type": "string", "pattern": "^[1-9][0-9]*(s|m)$"}
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uninstallMode"],
+      "properties": {
+        "uninstallMode": {
+          "type": "string",
+          "minLength": 1,
+          "description": "helm or argocd; the pre-delete guard rejects any other value with a named error"
+        }
       }
     },
     "storageClass": {
@@ -148,6 +210,26 @@
         "name": {"type": "string", "minLength": 1},
         "defaultClass": {"const": false},
         "reclaimPolicy": {"const": "Retain"}
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controller", "helper", "node"],
+      "properties": {
+        "controller": {"$ref": "#/definitions/serviceAccountRef"},
+        "helper": {"$ref": "#/definitions/serviceAccountRef"},
+        "node": {"$ref": "#/definitions/serviceAccountRef"}
+      }
+    },
+    "sidecars": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provisioner", "registrar", "livenessProbe"],
+      "properties": {
+        "provisioner": {"$ref": "#/definitions/sidecar"},
+        "registrar": {"$ref": "#/definitions/sidecar"},
+        "livenessProbe": {"$ref": "#/definitions/sidecar"}
       }
     }
   }
