@@ -81,169 +81,45 @@ func Decide(current Phase, observation Observation) (Decision, error) {
 	if !known(current) {
 		return Decision{}, fmt.Errorf("unknown mobility phase %q", current)
 	}
-	if terminal(current) {
-		return Decision{Next: current, Action: ActionWait}, nil
+	// These three preludes run in this order before any phase-specific rule,
+	// and each one owns the decision outright when it fires.
+	if decision, guarded, err := lifecycleGuard(current, observation); guarded {
+		return decision, err
 	}
-	if current == PhaseCompleting {
-		if observation.CompletionReady {
-			return transition(current, PhaseSucceeded, ActionMarkSucceeded, "")
-		}
-		return transition(current, current, ActionWait, "CompletionAuthorityMismatch")
+	if decision, guarded, err := authorityGuard(current, observation); guarded {
+		return decision, err
 	}
-	if observation.SourceAuthorityInvalid {
-		return blockedWith(observation, "SourceAuthorityInvalid"), nil
-	}
-	if beforeCommit(current) && !observation.OwnerCommitted && !observation.SourceHealthy {
-		return blockedWith(observation, "SourceUnavailable"), nil
-	}
-	// A related but looser pre-eviction window is derived from Move status by
-	// preEviction in src/mobility/controller/preflight.go; they are not the same
-	// predicate, so do not unify them blindly.
-	if observation.PreflightDeferred && (current == PhasePending || current == PhaseLocking ||
-		(current == PhaseEvicting && !observation.EvictionRequested)) {
-		return transition(current, current, ActionWait, observation.UnsafeReason)
+	if decision, guarded, err := preflightGuard(current, observation); guarded {
+		return decision, err
 	}
 
 	switch current {
 	case PhasePending:
-		if !observation.PreconditionsValid {
-			return transition(current, current, ActionWait, reasonOr(observation.UnsafeReason, "PreconditionFailed"))
-		}
-		return transition(current, PhaseLocking, ActionLockVolume, "")
+		return decidePending(current, observation)
 	case PhaseLocking:
-		if observation.VolumeLocked {
-			return transition(current, PhaseEvicting, ActionEvictConsumer, "")
-		}
-		return transition(current, PhaseLocking, ActionLockVolume, "")
+		return decideLocking(current, observation)
 	case PhaseEvicting:
-		if !observation.ConsumerExists {
-			return transition(current, PhaseWaitingForUnpublish, ActionWait, "")
-		}
-		if observation.EvictionRequested {
-			return transition(current, PhaseEvicting, ActionWait, "")
-		}
-		return transition(current, PhaseEvicting, ActionEvictConsumer, "")
+		return decideEvicting(current, observation)
 	case PhaseWaitingForUnpublish:
-		if observation.PublishedOnSource {
-			return transition(current, current, ActionWait, "")
-		}
-		return transition(current, PhaseWaitingForReplacement, ActionWait, "")
+		return decideWaitingForUnpublish(current, observation)
 	case PhaseWaitingForReplacement:
-		if !observation.ReplacementExists {
-			return transition(current, current, ActionWait, "")
-		}
-		if !observation.ReplacementHeld {
-			return blockedWith(observation, "PlacementHoldLost"), nil
-		}
-		return transition(current, PhaseWaitingForDestination, ActionEnsurePlacement, "")
+		return decideWaitingForReplacement(current, observation)
 	case PhaseWaitingForDestination:
-		// Intentionally not destinationGuard: no placement exists yet, so an
-		// unavailable destination is not a wait condition here and a blocked one
-		// reports DestinationUnavailable rather than InvalidDestination.
-		if observation.DestinationBlocked {
-			return blockedWith(observation, "DestinationUnavailable"), nil
-		}
-		if !observation.ReplacementExists {
-			return transition(current, current, ActionWait, "")
-		}
-		if !observation.ReplacementHeld {
-			return blockedWith(observation, "PlacementHoldLost"), nil
-		}
-		if !observation.DestinationScheduled {
-			return transition(current, current, ActionEnsurePlacement, "")
-		}
-		if observation.DestinationUnavailable {
-			return transition(current, PhaseWaitingForCapacity, ActionWait, "DestinationUnavailable")
-		}
-		return transition(current, PhaseWaitingForCapacity, ActionEnsureCapacity, "")
+		return decideWaitingForDestination(current, observation)
 	case PhaseWaitingForCapacity:
-		if decision, guarded, err := destinationGuard(current, observation); guarded {
-			return decision, err
-		}
-		if observation.CapacityBlocked {
-			return blockedWith(observation, "DestinationCapacityInsufficient"), nil
-		}
-		if observation.CapacityApproved {
-			return transition(current, PhaseCopying, ActionEnsureCopy, "")
-		}
-		return transition(current, current, ActionEnsureCapacity, "")
+		return decideWaitingForCapacity(current, observation)
 	case PhaseCopying:
-		if decision, guarded, err := destinationGuard(current, observation); guarded {
-			return decision, err
-		}
-		if observation.CopyFailed {
-			return blockedWith(observation, "CopyFailed"), nil
-		}
-		if decision, guarded, err := placementGuard(current, observation); guarded {
-			return decision, err
-		}
-		if observation.CopyComplete {
-			return transition(current, PhasePromoting, ActionEnsurePromotion, "")
-		}
-		return transition(current, current, ActionEnsureCopy, "")
+		return decideCopying(current, observation)
 	case PhasePromoting:
-		if decision, guarded, err := destinationGuard(current, observation); guarded {
-			return decision, err
-		}
-		if observation.PromotionFailed {
-			return blockedWith(observation, "PromotionFailed"), nil
-		}
-		if decision, guarded, err := placementGuard(current, observation); guarded {
-			return decision, err
-		}
-		if observation.PromotionComplete {
-			return transition(current, PhaseCommitting, ActionCommitOwner, "")
-		}
-		return transition(current, current, ActionEnsurePromotion, "")
+		return decidePromoting(current, observation)
 	case PhaseCommitting:
-		if observation.OwnerCommitted {
-			// Authority already moved, so a blocked destination can no longer
-			// invalidate it; only an unavailable one delays releasing the hold.
-			if observation.DestinationUnavailable {
-				return transition(current, current, ActionWait, "DestinationUnavailable")
-			}
-			return transition(current, PhaseReleasingDestination, ActionDeletePlacement, "")
-		}
-		if decision, guarded, err := destinationGuard(current, observation); guarded {
-			return decision, err
-		}
-		if decision, guarded, err := placementGuard(current, observation); guarded {
-			return decision, err
-		}
-		return transition(current, current, ActionCommitOwner, "")
+		return decideCommitting(current, observation)
 	case PhaseReleasingDestination:
-		if observation.DestinationUnavailable {
-			return transition(current, current, ActionWait, "DestinationUnavailable")
-		}
-		if observation.PlacementExists {
-			return transition(current, current, ActionDeletePlacement, "")
-		}
-		if observation.ReplacementExists && observation.ReplacementHeld {
-			return transition(current, PhaseWaitingForDestinationPublish, ActionReleasePlacement, "")
-		}
-		return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
+		return decideReleasingDestination(current, observation)
 	case PhaseWaitingForDestinationPublish:
-		if observation.CleanupFailed {
-			return blockedWith(observation, "CleanupFailed"), nil
-		}
-		if observation.DestinationUnavailable {
-			return transition(current, current, ActionWait, "DestinationUnavailable")
-		}
-		if !observation.PublishedOnDestination {
-			return transition(current, current, ActionWait, "")
-		}
-		return transition(current, PhaseCleaningSource, ActionEnsureCleanup, "")
+		return decideWaitingForDestinationPublish(current, observation)
 	case PhaseCleaningSource:
-		if observation.DestinationUnavailable {
-			return transition(current, current, ActionWait, "DestinationUnavailable")
-		}
-		if observation.CleanupFailed {
-			return blockedWith(observation, "CleanupFailed"), nil
-		}
-		if observation.CleanupComplete {
-			return transition(current, PhaseCompleting, ActionConfirmCleanup, "")
-		}
-		return transition(current, current, ActionEnsureCleanup, "")
+		return decideCleaningSource(current, observation)
 	default:
 		return Decision{}, fmt.Errorf("mobility phase %q has no decision rule", current)
 	}
