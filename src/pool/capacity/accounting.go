@@ -14,6 +14,21 @@ func ReservedBytes(volumes map[string]volumeapi.State, moves []volumeapi.Move, n
 	if nodeName == "" {
 		return 0, fmt.Errorf("node name is required")
 	}
+	total, err := ownedBytes(volumes, nodeName)
+	if err != nil {
+		return 0, err
+	}
+	for _, move := range moves {
+		if total, err = addMoveHold(total, move, volumes, nodeName); err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
+// ownedBytes counts the capacity of every Volume this node currently owns. An
+// ownerless or zero-capacity Volume anywhere makes the whole total unusable.
+func ownedBytes(volumes map[string]volumeapi.State, nodeName string) (int64, error) {
 	var total int64
 	for volumeID, state := range volumes {
 		if state.OwnerNode == "" {
@@ -31,41 +46,46 @@ func ReservedBytes(volumes map[string]volumeapi.State, moves []volumeapi.Move, n
 		}
 		total = next
 	}
-	for _, move := range moves {
-		if volumeapi.MoveCleanupSettled(move) {
-			continue
+	return total, nil
+}
+
+// addMoveHold adds the temporary holds one unsettled Move places on this node:
+// the destination reservation taken before the owner commits, and the source
+// copy still retained after it.
+func addMoveHold(total int64, move volumeapi.Move, volumes map[string]volumeapi.State, nodeName string) (int64, error) {
+	if volumeapi.MoveCleanupSettled(move) {
+		return total, nil
+	}
+	state, exists := volumes[move.Spec.VolumeID]
+	if !exists {
+		if move.Status.CapacityApproved {
+			return 0, fmt.Errorf("move %q has no volume state", move.Name)
 		}
-		state, exists := volumes[move.Spec.VolumeID]
-		if !exists {
-			if move.Status.CapacityApproved {
-				return 0, fmt.Errorf("move %q has no volume state", move.Name)
-			}
-			continue
+		return total, nil
+	}
+	if state.ActiveMove != move.Name {
+		if move.Status.CapacityApproved {
+			return 0, fmt.Errorf("move %q is not the active Move for volume %q", move.Name, move.Spec.VolumeID)
 		}
-		if state.ActiveMove != move.Name {
-			if move.Status.CapacityApproved {
-				return 0, fmt.Errorf("move %q is not the active Move for volume %q", move.Name, move.Spec.VolumeID)
-			}
-			continue
+		return total, nil
+	}
+	if state.CapacityBytes <= 0 {
+		return 0, fmt.Errorf("move %q has invalid volume capacity", move.Name)
+	}
+	if move.Status.CapacityApproved && move.Status.DestinationNode == nodeName && state.OwnerNode != nodeName {
+		next, err := add(total, state.CapacityBytes)
+		if err != nil {
+			return 0, err
 		}
-		if state.CapacityBytes <= 0 {
-			return 0, fmt.Errorf("move %q has invalid volume capacity", move.Name)
+		total = next
+	}
+	if move.Status.CapacityApproved && move.Status.DestinationNode == state.OwnerNode &&
+		move.Spec.SourceNode == nodeName && move.Spec.SourceNode != state.OwnerNode {
+		next, err := add(total, state.CapacityBytes)
+		if err != nil {
+			return 0, err
 		}
-		if move.Status.CapacityApproved && move.Status.DestinationNode == nodeName && state.OwnerNode != nodeName {
-			next, err := add(total, state.CapacityBytes)
-			if err != nil {
-				return 0, err
-			}
-			total = next
-		}
-		if move.Status.CapacityApproved && move.Status.DestinationNode == state.OwnerNode &&
-			move.Spec.SourceNode == nodeName && move.Spec.SourceNode != state.OwnerNode {
-			next, err := add(total, state.CapacityBytes)
-			if err != nil {
-				return 0, err
-			}
-			total = next
-		}
+		total = next
 	}
 	return total, nil
 }
