@@ -10,6 +10,10 @@ controller:
 
 mobility:
   helperImage: shiftpv:dev
+  # The suite cordons nodes and then waits for move discovery. At the 30s chart
+  # default every such wait sits up to one full tick from its own timeout; the
+  # mobility suites already pass 10s for the same reason.
+  interval: 10s
 
 helperPod:
   image: shiftpv:dev
