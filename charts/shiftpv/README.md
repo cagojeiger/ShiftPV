@@ -25,7 +25,7 @@ storage operator가 준비해야 한다.
 version과 image digest를 사용한다.
 
 ```bash
-helm repo add shiftpv https://cagojeiger.github.io/ShiftPV
+helm repo add shiftpv https://project-jelly.github.io/ShiftPV
 helm repo update shiftpv
 helm install shiftpv shiftpv/shiftpv \
   --namespace shiftpv-system \

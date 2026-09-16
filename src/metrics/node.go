@@ -1,8 +1,8 @@
 package metrics
 
 import (
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/pool/readiness"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/pool/readiness"
 )
 
 // ObservePool reuses the existing probe's statfs result, including on a full or read-only filesystem.

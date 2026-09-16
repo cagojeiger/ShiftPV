@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
-	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
+	uninstallcheck "github.com/project-jelly/ShiftPV/src/lifecycle/uninstall"
 )
 
 type fakeChecker struct {

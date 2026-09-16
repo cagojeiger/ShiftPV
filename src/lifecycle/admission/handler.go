@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
+	uninstallcheck "github.com/project-jelly/ShiftPV/src/lifecycle/uninstall"
 )
 
 type Checker interface {

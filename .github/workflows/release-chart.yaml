@@ -119,7 +119,7 @@ jobs:
             cp "${RUNNER_TEMP}/chart/${package}" chart-repository/
           fi
           helm repo index chart-repository \
-            --url https://cagojeiger.github.io/ShiftPV
+            --url https://project-jelly.github.io/ShiftPV
           touch chart-repository/.nojekyll
 
       - name: Publish chart repository
@@ -147,7 +147,7 @@ jobs:
             gh release create "${TAG}" \
               --target "${RELEASE_SHA}" \
               --title "shiftpv Helm chart v${VERSION}" \
-              --notes "Install with: helm repo add shiftpv https://cagojeiger.github.io/ShiftPV" \
+              --notes "Install with: helm repo add shiftpv https://project-jelly.github.io/ShiftPV" \
               --latest=false \
               "${RUNNER_TEMP}/chart/shiftpv-${VERSION}.tgz" \
               "${RUNNER_TEMP}/chart/shiftpv-${VERSION}.tgz.sha256"
@@ -159,7 +159,7 @@ jobs:
         run: |
           for attempt in $(seq 1 30); do
             helm repo remove shiftpv >/dev/null 2>&1 || true
-            if helm repo add shiftpv https://cagojeiger.github.io/ShiftPV >/dev/null 2>&1 && \
+            if helm repo add shiftpv https://project-jelly.github.io/ShiftPV >/dev/null 2>&1 && \
               helm repo update shiftpv >/dev/null 2>&1 && \
               helm show chart shiftpv/shiftpv --version "${VERSION}" >/dev/null 2>&1; then
               helm show chart shiftpv/shiftpv --version "${VERSION}"

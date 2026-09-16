@@ -12,9 +12,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
-	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	uninstallcheck "github.com/project-jelly/ShiftPV/src/lifecycle/uninstall"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
 
 type Repository interface {

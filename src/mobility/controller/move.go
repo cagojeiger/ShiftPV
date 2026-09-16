@@ -5,8 +5,8 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/cagojeiger/ShiftPV/src/mobility/fsm"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 )
 
 func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) error {

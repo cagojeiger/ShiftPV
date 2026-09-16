@@ -9,9 +9,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
-	uninstallcheck "github.com/cagojeiger/ShiftPV/src/lifecycle/uninstall"
-	poolcapacity "github.com/cagojeiger/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	uninstallcheck "github.com/project-jelly/ShiftPV/src/lifecycle/uninstall"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
 
 type memoryPools struct {

@@ -318,7 +318,7 @@ func TestChartRender(t *testing.T) {
 		{
 			name: "default images and service accounts",
 			assert: func(t *testing.T, c chart) {
-				defaultImage := "ghcr.io/cagojeiger/shiftpv-controller:" + controllerImageTag(t)
+				defaultImage := "ghcr.io/project-jelly/shiftpv-controller:" + controllerImageTag(t)
 				args := c.controllerArgs(t)
 				wantArg(t, "helper image tracks the controller tag", args, "--helper-image="+defaultImage)
 				wantArg(t, "mobility helper image tracks the controller tag", args, "--mobility-helper-image="+defaultImage)

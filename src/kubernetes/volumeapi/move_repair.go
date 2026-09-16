@@ -3,7 +3,7 @@ package volumeapi
 import (
 	"time"
 
-	"github.com/cagojeiger/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 // PoolReadyForActiveMoveRepairAt admits only the two filesystem states that a

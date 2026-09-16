@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cagojeiger/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
 func TestReservedBytesCountsVolumeOwnerCapacity(t *testing.T) {
