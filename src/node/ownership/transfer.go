@@ -156,11 +156,8 @@ func (s *Store) VerifyIncoming(identity volume.CopyIdentity) error {
 // PromoteIncoming atomically publishes the sealed incoming inode as the new
 // serving copy and persists a receipt before returning success.
 func PromoteIncoming(ctx context.Context, root string, incomingIdentity, servingIdentity volume.CopyIdentity, operationID string, authority func(context.Context) error) error {
-	if authority == nil || !volume.ValidIdentityToken(operationID) || incomingIdentity.Validate() != nil || servingIdentity.Validate() != nil ||
-		incomingIdentity.Role != volume.RoleIncoming || servingIdentity.Role != volume.RoleServing || incomingIdentity.CopyID == servingIdentity.CopyID ||
-		incomingIdentity.InstallationID != servingIdentity.InstallationID || incomingIdentity.PoolName != servingIdentity.PoolName || incomingIdentity.PoolUID != servingIdentity.PoolUID ||
-		incomingIdentity.VolumeID != servingIdentity.VolumeID || incomingIdentity.VolumeUID != servingIdentity.VolumeUID || incomingIdentity.NodeName != servingIdentity.NodeName {
-		return ErrIdentity
+	if err := validatePromotionRequest(incomingIdentity, servingIdentity, operationID, authority); err != nil {
+		return err
 	}
 	if err := authority(ctx); err != nil {
 		return err
@@ -179,30 +176,11 @@ func PromoteIncoming(ctx context.Context, root string, incomingIdentity, serving
 		return err
 	}
 	receiptName := operationMarker("promotion-receipt", operationID)
-	var receipt transferReceipt
-	if err := store.readMarker(receiptName, &receipt); err == nil {
-		if receipt.OperationID != operationID || receipt.Identity != servingIdentity {
-			return ErrIdentity
-		}
-		if err := store.VerifyServing(servingIdentity); err != nil {
-			return err
-		}
-		return store.removeCopyMetadata(incomingIdentity, receipt.Device, receipt.Inode)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+	if replayed, replayErr := store.replayPromotionReceipt(receiptName, operationID, incomingIdentity, servingIdentity); replayed {
+		return replayErr
 	}
-	if err := store.checkMarker(copyMarker(incomingIdentity.CopyID), incomingIdentity); err != nil {
-		return err
-	}
-	incomingPlacement, err := store.readPlacement(incomingIdentity.CopyID)
-	if err != nil || incomingPlacement.Identity != incomingIdentity {
-		return errors.Join(err, ErrIdentity)
-	}
-	intent := transferIntent{OperationID: operationID, Incoming: incomingIdentity, Destination: servingIdentity, Device: incomingPlacement.Device, Inode: incomingPlacement.Inode}
-	if err := store.ensureMarker(operationMarker("promotion", operationID), intent); err != nil {
-		return err
-	}
-	if err := store.ensureMarker(copyMarker(servingIdentity.CopyID), servingIdentity); err != nil {
+	intent, err := store.journalPromotion(operationID, incomingIdentity, servingIdentity)
+	if err != nil {
 		return err
 	}
 	incoming, err := unix.Openat(int(store.control.Fd()), "incoming", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -215,46 +193,125 @@ func PromoteIncoming(ctx context.Context, root string, incomingIdentity, serving
 		return err
 	}
 	defer unix.Close(volumes)
-	if source, sourceErr := openIdentityDirectory(incoming, incomingIdentity.CopyID, localIntent{Device: intent.Device, Inode: intent.Inode}); sourceErr == nil {
-		unix.Close(source)
-		if target, targetErr := unix.Openat(volumes, servingIdentity.VolumeID, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0); targetErr == nil {
-			unix.Close(target)
-			return ErrIdentity
-		} else if !errors.Is(targetErr, unix.ENOENT) {
-			return targetErr
-		}
-		if err := renameDirectory(incoming, incomingIdentity.CopyID, volumes, servingIdentity.VolumeID); err != nil {
-			return err
-		}
-	} else if !errors.Is(sourceErr, unix.ENOENT) {
-		return sourceErr
+	if err := publishPromotedDirectory(incoming, volumes, intent, incomingIdentity, servingIdentity); err != nil {
+		return err
 	}
-	target, err := unix.Openat(volumes, servingIdentity.VolumeID, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	servingPlacement, err := store.sealPromotedPlacement(incoming, volumes, intent, servingIdentity)
 	if err != nil {
 		return err
+	}
+	return store.commitPromotion(ctx, receiptName, operationID, incomingIdentity, servingIdentity, servingPlacement, authority)
+}
+
+// validatePromotionRequest rejects every promotion whose two identities are not
+// the same copy pair of the same volume on the same node.
+func validatePromotionRequest(incomingIdentity, servingIdentity volume.CopyIdentity, operationID string, authority func(context.Context) error) error {
+	if authority == nil || !volume.ValidIdentityToken(operationID) || incomingIdentity.Validate() != nil || servingIdentity.Validate() != nil ||
+		incomingIdentity.Role != volume.RoleIncoming || servingIdentity.Role != volume.RoleServing || incomingIdentity.CopyID == servingIdentity.CopyID ||
+		incomingIdentity.InstallationID != servingIdentity.InstallationID || incomingIdentity.PoolName != servingIdentity.PoolName || incomingIdentity.PoolUID != servingIdentity.PoolUID ||
+		incomingIdentity.VolumeID != servingIdentity.VolumeID || incomingIdentity.VolumeUID != servingIdentity.VolumeUID || incomingIdentity.NodeName != servingIdentity.NodeName {
+		return ErrIdentity
+	}
+	return nil
+}
+
+// replayPromotionReceipt reports whether a receipt of this exact promotion is
+// already durable; the caller then returns the replayed outcome unchanged.
+func (s *Store) replayPromotionReceipt(receiptName, operationID string, incomingIdentity, servingIdentity volume.CopyIdentity) (bool, error) {
+	var receipt transferReceipt
+	if err := s.readMarker(receiptName, &receipt); err == nil {
+		if receipt.OperationID != operationID || receipt.Identity != servingIdentity {
+			return true, ErrIdentity
+		}
+		if err := s.VerifyServing(servingIdentity); err != nil {
+			return true, err
+		}
+		return true, s.removeCopyMetadata(incomingIdentity, receipt.Device, receipt.Inode)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return true, err
+	}
+	return false, nil
+}
+
+// journalPromotion proves the sealed incoming inode and persists the intent and
+// the destination copy identity before any directory moves.
+func (s *Store) journalPromotion(operationID string, incomingIdentity, servingIdentity volume.CopyIdentity) (transferIntent, error) {
+	if err := s.checkMarker(copyMarker(incomingIdentity.CopyID), incomingIdentity); err != nil {
+		return transferIntent{}, err
+	}
+	incomingPlacement, err := s.readPlacement(incomingIdentity.CopyID)
+	if err != nil || incomingPlacement.Identity != incomingIdentity {
+		return transferIntent{}, errors.Join(err, ErrIdentity)
+	}
+	intent := transferIntent{OperationID: operationID, Incoming: incomingIdentity, Destination: servingIdentity, Device: incomingPlacement.Device, Inode: incomingPlacement.Inode}
+	if err := s.ensureMarker(operationMarker("promotion", operationID), intent); err != nil {
+		return transferIntent{}, err
+	}
+	if err := s.ensureMarker(copyMarker(servingIdentity.CopyID), servingIdentity); err != nil {
+		return transferIntent{}, err
+	}
+	return intent, nil
+}
+
+// publishPromotedDirectory moves the journaled incoming inode into place. A
+// missing source means the move already happened before an interruption.
+func publishPromotedDirectory(incoming, volumes int, intent transferIntent, incomingIdentity, servingIdentity volume.CopyIdentity) error {
+	source, sourceErr := openIdentityDirectory(incoming, incomingIdentity.CopyID, localIntent{Device: intent.Device, Inode: intent.Inode})
+	if sourceErr != nil {
+		if !errors.Is(sourceErr, unix.ENOENT) {
+			return sourceErr
+		}
+		return nil
+	}
+	unix.Close(source)
+	if target, targetErr := unix.Openat(volumes, servingIdentity.VolumeID, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0); targetErr == nil {
+		unix.Close(target)
+		return ErrIdentity
+	} else if !errors.Is(targetErr, unix.ENOENT) {
+		return targetErr
+	}
+	return renameDirectory(incoming, incomingIdentity.CopyID, volumes, servingIdentity.VolumeID)
+}
+
+// sealPromotedPlacement proves the published directory is the journaled inode
+// and makes that placement durable.
+func (s *Store) sealPromotedPlacement(incoming, volumes int, intent transferIntent, servingIdentity volume.CopyIdentity) (placement, error) {
+	target, err := unix.Openat(volumes, servingIdentity.VolumeID, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return placement{}, err
 	}
 	servingPlacement, err := placementFor(target, servingIdentity)
 	unix.Close(target)
 	if err != nil || servingPlacement.Device != intent.Device || servingPlacement.Inode != intent.Inode {
-		return errors.Join(err, ErrIdentity)
+		return placement{}, errors.Join(err, ErrIdentity)
 	}
-	if err := store.ensurePlacementMarker(servingIdentity.CopyID, servingPlacement); err != nil {
+	if err := s.ensurePlacementMarker(servingIdentity.CopyID, servingPlacement); err != nil {
+		return placement{}, err
+	}
+	if err := errors.Join(unix.Fsync(volumes), unix.Fsync(incoming), s.root.Sync(), s.control.Sync()); err != nil {
+		return placement{}, err
+	}
+	return servingPlacement, nil
+}
+
+// commitPromotion persists the receipt under live authority and then drops the
+// superseded incoming metadata.
+func (s *Store) commitPromotion(
+	ctx context.Context, receiptName, operationID string,
+	incomingIdentity, servingIdentity volume.CopyIdentity, servingPlacement placement,
+	authority func(context.Context) error,
+) error {
+	if err := authority(ctx); err != nil {
 		return err
 	}
-	if err := errors.Join(unix.Fsync(volumes), unix.Fsync(incoming), store.root.Sync(), store.control.Sync()); err != nil {
+	receipt := transferReceipt{OperationID: operationID, Identity: servingIdentity, Device: servingPlacement.Device, Inode: servingPlacement.Inode}
+	if err := s.ensureMarker(receiptName, receipt); err != nil {
 		return err
 	}
 	if err := authority(ctx); err != nil {
 		return err
 	}
-	receipt = transferReceipt{OperationID: operationID, Identity: servingIdentity, Device: servingPlacement.Device, Inode: servingPlacement.Inode}
-	if err := store.ensureMarker(receiptName, receipt); err != nil {
-		return err
-	}
-	if err := authority(ctx); err != nil {
-		return err
-	}
-	if err := store.removeCopyMetadata(incomingIdentity, receipt.Device, receipt.Inode); err != nil {
+	if err := s.removeCopyMetadata(incomingIdentity, receipt.Device, receipt.Inode); err != nil {
 		return fmt.Errorf("finish promotion metadata: %w", err)
 	}
 	return authority(ctx)
