@@ -17,6 +17,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
@@ -42,90 +44,89 @@ import (
 
 var version = "dev"
 
-func main() {
-	var storageClassNames flagvalue.Names
-	var (
-		endpoint                 = flag.String("endpoint", "unix:///run/csi/csi.sock", "CSI Unix socket endpoint")
-		namespace                = flag.String("namespace", os.Getenv("POD_NAMESPACE"), "namespace for helper Pods and controller state")
-		helperImage              = flag.String("helper-image", "busybox:1.37", "directory helper Pod image")
-		helperWait               = flag.Duration("helper-timeout", 2*time.Minute, "helper Pod completion timeout")
-		helperCPURequest         = flag.String("helper-cpu-request", "10m", "helper Pod CPU request")
-		helperMemoryRequest      = flag.String("helper-memory-request", "16Mi", "helper Pod memory request")
-		helperCPULimit           = flag.String("helper-cpu-limit", "100m", "helper Pod CPU limit")
-		helperMemoryLimit        = flag.String("helper-memory-limit", "64Mi", "helper Pod memory limit")
-		helperServiceAccount     = flag.String("helper-service-account", "", "service account used by identity-aware helper Pods")
-		poolReadinessStaleAfter  = flag.Duration("pool-readiness-stale-after", 3*time.Minute, "maximum age of a successful node Pool readiness probe")
-		mobilityEnabled          = flag.Bool("mobility-enabled", true, "run the automatic cordon mobility reconciler and admission webhook")
-		mobilityInterval         = flag.Duration("mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
-		moveJournalRetention     = flag.Duration("move-journal-retention", mobilitycontroller.DefaultMoveJournalRetention, "minimum retention for settled terminal ShiftPVMove journals")
-		mobilityImage            = flag.String("mobility-helper-image", "shiftpv-rsync-helper:dev", "rsync mobility helper image")
-		webhookAddress           = flag.String("webhook-listen-address", ":9443", "mobility admission HTTPS listen address")
-		webhookService           = flag.String("webhook-service-name", "shiftpv-webhook", "mobility admission Service name")
-		webhookSecret            = flag.String("webhook-tls-secret-name", "shiftpv-webhook-tls", "managed mobility admission TLS Secret name")
-		webhookConfiguration     = flag.String("webhook-configuration-name", "shiftpv-mobility", "managed MutatingWebhookConfiguration name")
-		validationConfiguration  = flag.String("validation-webhook-configuration-name", "shiftpv-lifecycle", "managed lifecycle ValidatingWebhookConfiguration name")
-		controllerServiceAccount = flag.String("controller-service-account", "shiftpv-controller", "trusted controller service account for runtime ShiftPV resource deletion")
-		uninstallPermitName      = flag.String("uninstall-permit-name", "shiftpv-uninstall-permit", "trusted uninstall permit ConfigMap name")
-		metricsAddress           = flag.String("metrics-listen-address", "", "metrics HTTP address; empty disables observation")
-		metricsInterval          = flag.Duration("metrics-snapshot-interval", 30*time.Second, "read-only metrics metadata interval")
-	)
-	flag.Var(&storageClassNames, "storage-class-name", "repeatable StorageClass name protected from unsafe driver deletion")
+// config is the operator-supplied controller configuration. Every field is
+// bound directly to the flag of the same purpose, so the flag names, defaults
+// and help text stay exactly where they were declared.
+type config struct {
+	storageClassNames                         flagvalue.Names
+	endpoint, namespace, helperImage          string
+	helperWait                                time.Duration
+	helperCPURequest, helperMemoryRequest     string
+	helperCPULimit, helperMemoryLimit         string
+	helperServiceAccount                      string
+	poolReadinessStaleAfter                   time.Duration
+	mobilityEnabled                           bool
+	mobilityInterval, moveJournalRetention    time.Duration
+	mobilityImage                             string
+	webhookAddress, webhookService            string
+	webhookSecret, webhookConfiguration       string
+	validationConfiguration                   string
+	controllerServiceAccount, uninstallPermit string
+	metricsAddress                            string
+	metricsInterval                           time.Duration
+}
+
+// parseFlags declares the controller command line, parses it, and rejects the
+// durations no component can run with.
+func parseFlags() config {
+	var cfg config
+	flag.StringVar(&cfg.endpoint, "endpoint", "unix:///run/csi/csi.sock", "CSI Unix socket endpoint")
+	flag.StringVar(&cfg.namespace, "namespace", os.Getenv("POD_NAMESPACE"), "namespace for helper Pods and controller state")
+	flag.StringVar(&cfg.helperImage, "helper-image", "busybox:1.37", "directory helper Pod image")
+	flag.DurationVar(&cfg.helperWait, "helper-timeout", 2*time.Minute, "helper Pod completion timeout")
+	flag.StringVar(&cfg.helperCPURequest, "helper-cpu-request", "10m", "helper Pod CPU request")
+	flag.StringVar(&cfg.helperMemoryRequest, "helper-memory-request", "16Mi", "helper Pod memory request")
+	flag.StringVar(&cfg.helperCPULimit, "helper-cpu-limit", "100m", "helper Pod CPU limit")
+	flag.StringVar(&cfg.helperMemoryLimit, "helper-memory-limit", "64Mi", "helper Pod memory limit")
+	flag.StringVar(&cfg.helperServiceAccount, "helper-service-account", "", "service account used by identity-aware helper Pods")
+	flag.DurationVar(&cfg.poolReadinessStaleAfter, "pool-readiness-stale-after", 3*time.Minute, "maximum age of a successful node Pool readiness probe")
+	flag.BoolVar(&cfg.mobilityEnabled, "mobility-enabled", true, "run the automatic cordon mobility reconciler and admission webhook")
+	flag.DurationVar(&cfg.mobilityInterval, "mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
+	flag.DurationVar(&cfg.moveJournalRetention, "move-journal-retention", mobilitycontroller.DefaultMoveJournalRetention, "minimum retention for settled terminal ShiftPVMove journals")
+	flag.StringVar(&cfg.mobilityImage, "mobility-helper-image", "shiftpv-rsync-helper:dev", "rsync mobility helper image")
+	flag.StringVar(&cfg.webhookAddress, "webhook-listen-address", ":9443", "mobility admission HTTPS listen address")
+	flag.StringVar(&cfg.webhookService, "webhook-service-name", "shiftpv-webhook", "mobility admission Service name")
+	flag.StringVar(&cfg.webhookSecret, "webhook-tls-secret-name", "shiftpv-webhook-tls", "managed mobility admission TLS Secret name")
+	flag.StringVar(&cfg.webhookConfiguration, "webhook-configuration-name", "shiftpv-mobility", "managed MutatingWebhookConfiguration name")
+	flag.StringVar(&cfg.validationConfiguration, "validation-webhook-configuration-name", "shiftpv-lifecycle", "managed lifecycle ValidatingWebhookConfiguration name")
+	flag.StringVar(&cfg.controllerServiceAccount, "controller-service-account", "shiftpv-controller", "trusted controller service account for runtime ShiftPV resource deletion")
+	flag.StringVar(&cfg.uninstallPermit, "uninstall-permit-name", "shiftpv-uninstall-permit", "trusted uninstall permit ConfigMap name")
+	flag.StringVar(&cfg.metricsAddress, "metrics-listen-address", "", "metrics HTTP address; empty disables observation")
+	flag.DurationVar(&cfg.metricsInterval, "metrics-snapshot-interval", 30*time.Second, "read-only metrics metadata interval")
+	flag.Var(&cfg.storageClassNames, "storage-class-name", "repeatable StorageClass name protected from unsafe driver deletion")
 	klog.InitFlags(nil)
 	flag.Parse()
-	if *poolReadinessStaleAfter <= 0 {
+	if cfg.poolReadinessStaleAfter <= 0 {
 		klog.Fatalf("pool readiness stale duration must be positive")
 	}
-	if *moveJournalRetention < time.Hour {
+	if cfg.moveJournalRetention < time.Hour {
 		klog.Fatalf("move journal retention must be at least one hour")
 	}
+	return cfg
+}
 
+func main() {
+	cfg := parseFlags()
 	clients := wiring.InCluster(fatal)
 	config, client, dynamicClient := clients.Config, clients.Typed, clients.Dynamic
-	admissionConfig := rest.CopyConfig(config)
-	admissionConfig.QPS = 50
-	admissionConfig.Burst = 100
-	admissionClients := wiring.ForConfig(admissionConfig, "lifecycle admission", fatal)
+	admissionClients := wiring.ForConfig(admissionRESTConfig(config), "lifecycle admission", fatal)
 	admissionClient, admissionDynamicClient := admissionClients.Typed, admissionClients.Dynamic
-	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter}
+	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
 	cleanupStore := &cleanupapi.Store{Client: dynamicClient}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	var exporter *metrics.Exporter
-	if *metricsAddress != "" && *metricsInterval > 0 {
-		exporter = metrics.New("metadata")
-		exporter.Start(ctx, *metricsAddress)
-		observer, metricsErr := exporter.NewController(config, *metricsInterval, *poolReadinessStaleAfter)
-		if metricsErr != nil {
-			klog.Errorf("metrics inventory disabled: %v", metricsErr)
-		} else {
-			go observer.Run(ctx)
-		}
-	}
-	permitStore := &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName}
+	exporter := startMetrics(ctx, cfg, config)
+	permitStore := &uninstallcheck.PermitStore{Client: admissionClient, Namespace: cfg.namespace, Name: cfg.uninstallPermit, CSIDriver: admission.DriverName}
 	quiesceGate := &uninstallcheck.QuiesceGate{Store: permitStore, Interval: 200 * time.Millisecond}
 	if err := wiring.BootstrapWithRetry(ctx, "uninstall quiesce state", quiesceGate.Bootstrap); err != nil {
 		klog.Fatalf("bootstrap uninstall quiesce gate: %v", err)
 	}
-	operator := &helperpod.Runner{
-		Client: client, Namespace: *namespace, ServiceAccountName: *helperServiceAccount, Pools: volumeRegistry, Image: *helperImage, Timeout: *helperWait,
-		PoolReadinessStaleAfter: *poolReadinessStaleAfter,
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU: mustQuantity("helper CPU request", *helperCPURequest), corev1.ResourceMemory: mustQuantity("helper memory request", *helperMemoryRequest),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU: mustQuantity("helper CPU limit", *helperCPULimit), corev1.ResourceMemory: mustQuantity("helper memory limit", *helperMemoryLimit),
-			},
-		},
-	}
+	operator := newHelperRunner(cfg, client, volumeRegistry)
 	poolLocks := &poolcapacity.Locker{}
-	lifecycleChecker := &uninstallcheck.Checker{
-		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient, PoolReadinessStaleAfter: *poolReadinessStaleAfter}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassNames: storageClassNames.Values("shiftpv"), Namespace: *namespace,
-		InventoryMaxAge: *poolReadinessStaleAfter,
-	}
+	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	controllerService := &controllercsi.Service{
-		Client: client, Namespace: *namespace, Operator: operator, Volumes: volumeRegistry,
+		Client: client, Namespace: cfg.namespace, Operator: operator, Volumes: volumeRegistry,
 		CapacityPools: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
 		Cleanups: cleanupStore, CleanupOperator: operator,
 	}
@@ -135,20 +136,94 @@ func main() {
 	go func() { errCh <- quiesceGate.Run(ctx) }()
 	go func() { errCh <- poolLifecycleReconciler.Run(ctx) }()
 	go func() {
-		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {
+		errCh <- csiserver.ServeContext(ctx, cfg.endpoint, func(server *grpc.Server) {
 			csi.RegisterIdentityServer(server, identityService)
 			csi.RegisterControllerServer(server, controllerService)
 		}, exporter.ServerOptions()...)
 	}()
 
-	certificateManager := &webhookcertificate.Manager{Client: client, ValidationGate: quiesceGate, Config: webhookcertificate.Config{
-		Namespace:                   *namespace,
-		SecretName:                  *webhookSecret,
-		ServiceName:                 *webhookService,
-		ConfigurationName:           *webhookConfiguration,
-		ValidationConfigurationName: *validationConfiguration,
+	certificateManager := newCertificateManager(cfg, client, quiesceGate)
+	if err := wiring.BootstrapWithRetry(ctx, "mobility webhook certificate prerequisites", certificateManager.Bootstrap); err != nil {
+		klog.Fatalf("bootstrap mobility webhook certificate: %v", err)
+	}
+	go func() { errCh <- certificateManager.Run(ctx) }()
+	stopMobility := startMobility(ctx, cfg, mobilityComponents{
+		client: client, dynamicClient: dynamicClient, volumes: volumeRegistry, operator: operator,
+		poolLocks: poolLocks, cleanups: cleanupStore, exporter: exporter, errCh: errCh,
+	})
+	defer stopMobility()
+	webhookServer := newWebhookServer(cfg, client, admissionClient, volumeRegistry, lifecycleChecker, certificateManager)
+	go serveWebhook(webhookServer, cfg.webhookAddress, errCh)
+
+	klog.Infof("starting ShiftPV controller %s", version)
+	awaitShutdown(ctx, errCh, stop)
+	shutdownWebhook(webhookServer)
+}
+
+// admissionRESTConfig is the higher-throughput configuration the lifecycle
+// admission clients run with.
+func admissionRESTConfig(restConfig *rest.Config) *rest.Config {
+	admissionConfig := rest.CopyConfig(restConfig)
+	admissionConfig.QPS = 50
+	admissionConfig.Burst = 100
+	return admissionConfig
+}
+
+// startMetrics starts the metrics endpoint and inventory observer when the
+// operator configured an address and interval, and reports the exporter the
+// rest of the controller observes through.
+func startMetrics(ctx context.Context, cfg config, restConfig *rest.Config) *metrics.Exporter {
+	if cfg.metricsAddress == "" || cfg.metricsInterval <= 0 {
+		return nil
+	}
+	exporter := metrics.New("metadata")
+	exporter.Start(ctx, cfg.metricsAddress)
+	observer, metricsErr := exporter.NewController(restConfig, cfg.metricsInterval, cfg.poolReadinessStaleAfter)
+	if metricsErr != nil {
+		klog.Errorf("metrics inventory disabled: %v", metricsErr)
+	} else {
+		go observer.Run(ctx)
+	}
+	return exporter
+}
+
+// newHelperRunner builds the helper Pod operator with the operator-configured
+// image, timeout and resource envelope.
+func newHelperRunner(cfg config, client kubernetes.Interface, pools *volumeapi.Registry) *helperpod.Runner {
+	return &helperpod.Runner{
+		Client: client, Namespace: cfg.namespace, ServiceAccountName: cfg.helperServiceAccount, Pools: pools, Image: cfg.helperImage, Timeout: cfg.helperWait,
+		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU: mustQuantity("helper CPU request", cfg.helperCPURequest), corev1.ResourceMemory: mustQuantity("helper memory request", cfg.helperMemoryRequest),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU: mustQuantity("helper CPU limit", cfg.helperCPULimit), corev1.ResourceMemory: mustQuantity("helper memory limit", cfg.helperMemoryLimit),
+			},
+		},
+	}
+}
+
+// newLifecycleChecker builds the uninstall safety checker the Pool lifecycle
+// reconciler and the delete-validating webhook share.
+func newLifecycleChecker(cfg config, admissionClient kubernetes.Interface, admissionDynamicClient dynamic.Interface) *uninstallcheck.Checker {
+	return &uninstallcheck.Checker{
+		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassNames: cfg.storageClassNames.Values("shiftpv"), Namespace: cfg.namespace,
+		InventoryMaxAge: cfg.poolReadinessStaleAfter,
+	}
+}
+
+// newCertificateManager builds the managed webhook serving certificate and
+// configuration reconciler.
+func newCertificateManager(cfg config, client kubernetes.Interface, validationGate *uninstallcheck.QuiesceGate) *webhookcertificate.Manager {
+	return &webhookcertificate.Manager{Client: client, ValidationGate: validationGate, Config: webhookcertificate.Config{
+		Namespace:                   cfg.namespace,
+		SecretName:                  cfg.webhookSecret,
+		ServiceName:                 cfg.webhookService,
+		ConfigurationName:           cfg.webhookConfiguration,
+		ValidationConfigurationName: cfg.validationConfiguration,
 		OwnerCSIDriver:              admission.DriverName,
-		AdmissionEnabled:            *mobilityEnabled,
+		AdmissionEnabled:            cfg.mobilityEnabled,
 		Interval:                    time.Minute,
 		ServingValidity:             90 * 24 * time.Hour,
 		ServingRenewBefore:          30 * 24 * time.Hour,
@@ -156,46 +231,74 @@ func main() {
 		CARenewBefore:               365 * 24 * time.Hour,
 		Now:                         time.Now,
 	}}
-	if err := wiring.BootstrapWithRetry(ctx, "mobility webhook certificate prerequisites", certificateManager.Bootstrap); err != nil {
-		klog.Fatalf("bootstrap mobility webhook certificate: %v", err)
-	}
-	go func() { errCh <- certificateManager.Run(ctx) }()
-	if *mobilityEnabled {
-		eventScheme := runtime.NewScheme()
-		if err := corev1.AddToScheme(eventScheme); err != nil {
-			klog.Fatalf("register Kubernetes Event scheme: %v", err)
-		}
-		eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
-		defer eventBroadcaster.Shutdown()
-		eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
-		eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
-		wake := mobilitycontroller.WatchEvents(ctx, client, dynamicClient, *namespace)
-		reconciler := &mobilitycontroller.Reconciler{Client: client, Repository: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, Namespace: *namespace, HelperImage: *mobilityImage, ServiceAccountName: *helperServiceAccount, Cleanups: cleanupStore, CleanupOperator: operator, Interval: *mobilityInterval, MoveJournalRetention: *moveJournalRetention, PoolReadinessStaleAfter: *poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
-		if exporter != nil {
-			exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
-			reconciler.ObserveDiscovery = exporter.ObserveDiscovery
-		}
-		go func() { errCh <- reconciler.Run(ctx) }()
-	}
-	mux := http.NewServeMux()
-	mux.Handle("/mutate", &admission.Handler{Client: client, Volumes: volumeRegistry})
-	mux.Handle("/validate-delete", &lifecycleadmission.Handler{Checker: lifecycleChecker,
-		Permit:            &uninstallcheck.PermitStore{Client: admissionClient, Namespace: *namespace, Name: *uninstallPermitName, CSIDriver: admission.DriverName},
-		TrustedController: "system:serviceaccount:" + *namespace + ":" + *controllerServiceAccount})
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
-	webhookServer := &http.Server{Addr: *webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}
-	go func() {
-		listener, err := net.Listen("tcp", *webhookAddress)
-		if err == nil {
-			err = webhookServer.Serve(tls.NewListener(listener, webhookServer.TLSConfig))
-		}
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-		errCh <- err
-	}()
+}
 
-	klog.Infof("starting ShiftPV controller %s", version)
+// mobilityComponents are the already-built collaborators the mobility
+// reconciler runs on.
+type mobilityComponents struct {
+	client        kubernetes.Interface
+	dynamicClient dynamic.Interface
+	volumes       *volumeapi.Registry
+	operator      *helperpod.Runner
+	poolLocks     *poolcapacity.Locker
+	cleanups      *cleanupapi.Store
+	exporter      *metrics.Exporter
+	errCh         chan error
+}
+
+// startMobility starts the automatic cordon mobility reconciler when it is
+// enabled and reports the shutdown the caller must defer; when mobility is
+// disabled nothing is started and the shutdown does nothing.
+func startMobility(ctx context.Context, cfg config, components mobilityComponents) func() {
+	if !cfg.mobilityEnabled {
+		return func() {}
+	}
+	eventScheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(eventScheme); err != nil {
+		klog.Fatalf("register Kubernetes Event scheme: %v", err)
+	}
+	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: components.client.CoreV1().Events("")})
+	eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
+	wake := mobilitycontroller.WatchEvents(ctx, components.client, components.dynamicClient, cfg.namespace)
+	reconciler := &mobilitycontroller.Reconciler{Client: components.client, Repository: components.volumes, CapacityProbe: components.operator, PoolLocks: components.poolLocks, Namespace: cfg.namespace, HelperImage: cfg.mobilityImage, ServiceAccountName: cfg.helperServiceAccount, Cleanups: components.cleanups, CleanupOperator: components.operator, Interval: cfg.mobilityInterval, MoveJournalRetention: cfg.moveJournalRetention, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
+	if components.exporter != nil {
+		components.exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
+		reconciler.ObserveDiscovery = components.exporter.ObserveDiscovery
+	}
+	go func() { components.errCh <- reconciler.Run(ctx) }()
+	return eventBroadcaster.Shutdown
+}
+
+// newWebhookServer builds the admission HTTPS server serving the mobility
+// mutation, the lifecycle delete validation and the health endpoint.
+func newWebhookServer(cfg config, client kubernetes.Interface, admissionClient kubernetes.Interface, volumes *volumeapi.Registry,
+	lifecycleChecker *uninstallcheck.Checker, certificateManager *webhookcertificate.Manager) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/mutate", &admission.Handler{Client: client, Volumes: volumes})
+	mux.Handle("/validate-delete", &lifecycleadmission.Handler{Checker: lifecycleChecker,
+		Permit:            &uninstallcheck.PermitStore{Client: admissionClient, Namespace: cfg.namespace, Name: cfg.uninstallPermit, CSIDriver: admission.DriverName},
+		TrustedController: "system:serviceaccount:" + cfg.namespace + ":" + cfg.controllerServiceAccount})
+	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
+	return &http.Server{Addr: cfg.webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}
+}
+
+// serveWebhook serves the admission endpoint until it is shut down, reporting a
+// clean shutdown as no failure.
+func serveWebhook(webhookServer *http.Server, address string, errCh chan error) {
+	listener, err := net.Listen("tcp", address)
+	if err == nil {
+		err = webhookServer.Serve(tls.NewListener(listener, webhookServer.TLSConfig))
+	}
+	if errors.Is(err, http.ErrServerClosed) {
+		err = nil
+	}
+	errCh <- err
+}
+
+// awaitShutdown blocks until a signal arrives or the first component stops,
+// stopping the remaining components on a component failure.
+func awaitShutdown(ctx context.Context, errCh chan error, stop context.CancelFunc) {
 	select {
 	case <-ctx.Done():
 	case err := <-errCh:
@@ -204,6 +307,10 @@ func main() {
 		}
 		stop()
 	}
+}
+
+// shutdownWebhook drains the admission server on the shared shutdown budget.
+func shutdownWebhook(webhookServer *http.Server) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := webhookServer.Shutdown(shutdownCtx); err != nil {
