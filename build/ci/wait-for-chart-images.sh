@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 registry=${IMAGE_REGISTRY:-ghcr.io}
 owner=${IMAGE_OWNER:-${GITHUB_REPOSITORY_OWNER:-cagojeiger}}
-attempts=${IMAGE_WAIT_ATTEMPTS:-36}
+attempts=${IMAGE_WAIT_ATTEMPTS:-240}
 delay=${IMAGE_WAIT_DELAY_SECONDS:-10}
 
 for command in docker helm jq; do
