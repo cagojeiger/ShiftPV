@@ -244,13 +244,23 @@ jobs:
           echo "kind-e2e groups: ${RESULT}"
           test "${RESULT}" = success
 
-  kind-mobility-e2e:
-    name: kind-mobility-e2e
+  # The scenario groups are independent of each other (see the grouping comment
+  # in test/e2e/kind/mobility/run.sh), so they run as one cluster per job
+  # instead of one ~20 minute serialized sweep. Matrix jobs cannot carry the
+  # branch-ruleset check name, which is why the `kind-mobility-e2e` aggregator
+  # below reports their result.
+  kind-mobility-e2e-group:
+    name: kind-mobility-e2e (${{ matrix.group }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [g1, g2, g3]
     env:
-      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
-      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
+      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
+      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
+      CLUSTER_NAME: shiftpv-mobility-e2e-${{ matrix.group }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -263,19 +273,36 @@ jobs:
       - name: Run closed-loop mobility E2E
         env:
           KEEP_CLUSTER: "1"
+          KIND_MOBILITY_GROUP: ${{ matrix.group }}
         run: ./test/e2e/kind/mobility/run.sh
 
       - name: Export failure diagnostics
         if: failure()
         uses: ./.github/actions/kind-teardown
         with:
-          cluster-name: shiftpv-mobility-e2e
+          cluster-name: ${{ env.CLUSTER_NAME }}
           diagnostics-dir: .tmp/ci-mobility-diagnostics
-          artifact-name: kind-mobility-e2e-diagnostics
+          artifact-name: kind-mobility-e2e-${{ matrix.group }}-diagnostics
 
       - name: Delete kind cluster
         if: always()
-        run: kind delete cluster --name shiftpv-mobility-e2e || true
+        run: kind delete cluster --name "${CLUSTER_NAME}" || true
+
+  # Keeps the check name the branch ruleset requires while the work itself runs
+  # in the group matrix above.
+  kind-mobility-e2e:
+    name: kind-mobility-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: kind-mobility-e2e-group
+    if: always()
+    steps:
+      - name: Report group result
+        env:
+          RESULT: ${{ needs.kind-mobility-e2e-group.result }}
+        run: |
+          echo "kind-mobility-e2e groups: ${RESULT}"
+          test "${RESULT}" = success
 
   # The eight restart cases and the cleanup-Job retry tail are independent, so
   # they run as one shard per job instead of one ~36 minute serialized sweep.

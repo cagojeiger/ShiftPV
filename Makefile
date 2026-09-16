@@ -1,4 +1,4 @@
-.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template linux-mount-integration kind-e2e kind-upgrade-e2e v04-model v04-kubernetes-primitives v04-filesystem-primitives
+.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template linux-mount-integration kind-e2e kind-mobility-e2e kind-upgrade-e2e v04-model v04-kubernetes-primitives v04-filesystem-primitives
 
 CONTROLLER_VERSION_FILE ?= versions/controller
 NODE_VERSION_FILE ?= versions/node
@@ -97,6 +97,11 @@ linux-mount-integration:
 # KIND_E2E_GROUP=g1|g2|g3, which this target passes through when it is set.
 kind-e2e:
 	./test/e2e/kind/run.sh
+
+# Runs every closed-loop mobility scenario on one cluster. CI shards the same
+# script with KIND_MOBILITY_GROUP=g1|g2|g3, passed through when it is set.
+kind-mobility-e2e:
+	./test/e2e/kind/mobility/run.sh
 
 # Installs the artifact-lock release, upgrades in place to this checkout, and
 # checks the documented StorageClass replacement. Needs Docker and kind.
