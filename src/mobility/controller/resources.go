@@ -498,20 +498,35 @@ func validServiceAccountProjection(volume corev1.Volume) bool {
 	for _, source := range volume.Projected.Sources {
 		switch {
 		case source.ServiceAccountToken != nil:
-			projection := source.ServiceAccountToken
-			token = projection.Path == "token" && projection.Audience == "" && projection.ExpirationSeconds != nil && *projection.ExpirationSeconds > 0
+			token = validTokenProjection(source.ServiceAccountToken)
 		case source.ConfigMap != nil:
-			projection := source.ConfigMap
-			rootCA = projection.Name == "kube-root-ca.crt" && len(projection.Items) == 1 && projection.Items[0].Key == "ca.crt" && projection.Items[0].Path == "ca.crt"
+			rootCA = validRootCAProjection(source.ConfigMap)
 		case source.DownwardAPI != nil:
-			projection := source.DownwardAPI
-			namespace = len(projection.Items) == 1 && projection.Items[0].Path == "namespace" && projection.Items[0].FieldRef != nil &&
-				projection.Items[0].FieldRef.APIVersion == "v1" && projection.Items[0].FieldRef.FieldPath == "metadata.namespace"
+			namespace = validNamespaceProjection(source.DownwardAPI)
 		default:
 			return false
 		}
 	}
 	return token && rootCA && namespace
+}
+
+// validTokenProjection reports whether the projected token is the short-lived
+// API-server audience token the helper identity contract expects.
+func validTokenProjection(projection *corev1.ServiceAccountTokenProjection) bool {
+	return projection.Path == "token" && projection.Audience == "" && projection.ExpirationSeconds != nil && *projection.ExpirationSeconds > 0
+}
+
+// validRootCAProjection reports whether the projected ConfigMap is exactly the
+// cluster root CA bundle at its usual path.
+func validRootCAProjection(projection *corev1.ConfigMapProjection) bool {
+	return projection.Name == "kube-root-ca.crt" && len(projection.Items) == 1 && projection.Items[0].Key == "ca.crt" && projection.Items[0].Path == "ca.crt"
+}
+
+// validNamespaceProjection reports whether the downward API projects exactly the
+// Pod's own namespace.
+func validNamespaceProjection(projection *corev1.DownwardAPIProjection) bool {
+	return len(projection.Items) == 1 && projection.Items[0].Path == "namespace" && projection.Items[0].FieldRef != nil &&
+		projection.Items[0].FieldRef.APIVersion == "v1" && projection.Items[0].FieldRef.FieldPath == "metadata.namespace"
 }
 
 func sameSourceVolumeMounts(current, expected []corev1.VolumeMount, serviceAccountVolume string) bool {

@@ -320,34 +320,52 @@ func (r *Reconciler) observePreconditions(ctx context.Context, move volumeapi.Mo
 	// diagnostics must not mask CopyFailed/PromotionFailed/CleanupFailed later.
 	preflight := move.Status.Phase == "" || move.Status.Phase == string(fsm.PhasePending)
 	if preflight && !preconditions && result.FSM.UnsafeReason == "" {
-		switch {
-		case result.Consumer == nil:
-			result.FSM.UnsafeReason = "ControlledConsumerMissing"
-		case metav1.GetControllerOf(result.Consumer) == nil:
-			result.FSM.UnsafeReason = "BarePodUnsupported"
-		case len(result.CandidateNodes) == 0:
-			result.FSM.UnsafeReason = "DestinationUnavailable"
-		case !sourceCordoned:
-			result.FSM.UnsafeReason = "SourceNotCordoned"
+		if reason := unmetPreconditionReason(result, sourceCordoned); reason != "" {
+			result.FSM.UnsafeReason = reason
 		}
 	}
 	result.FSM.PreconditionsValid = preconditions
 	if preEviction(move) && result.Consumer != nil && sourceHealthy {
-		reason, err := r.preflight(ctx, result)
-		if err != nil {
-			return err
+		return r.deferOnPreflight(ctx, result, preconditions)
+	}
+	return nil
+}
+
+// unmetPreconditionReason names the first unmet eligibility precondition, or
+// "" when none of the diagnosable ones is the cause.
+func unmetPreconditionReason(result *observation, sourceCordoned bool) string {
+	switch {
+	case result.Consumer == nil:
+		return "ControlledConsumerMissing"
+	case metav1.GetControllerOf(result.Consumer) == nil:
+		return "BarePodUnsupported"
+	case len(result.CandidateNodes) == 0:
+		return "DestinationUnavailable"
+	case !sourceCordoned:
+		return "SourceNotCordoned"
+	}
+	return ""
+}
+
+// deferOnPreflight runs preflight on a transaction that has not evicted yet and
+// records the deferral it reports. A failing precondition with no preflight
+// reason of its own still defers, under the eligibility reason already
+// diagnosed or the generic one.
+func (r *Reconciler) deferOnPreflight(ctx context.Context, result *observation, preconditions bool) error {
+	reason, err := r.preflight(ctx, result)
+	if err != nil {
+		return err
+	}
+	if reason == "" && !preconditions {
+		reason = result.FSM.UnsafeReason
+		if reason == "" {
+			reason = "PreconditionFailed"
 		}
-		if reason == "" && !preconditions {
-			reason = result.FSM.UnsafeReason
-			if reason == "" {
-				reason = "PreconditionFailed"
-			}
-		}
-		if reason != "" {
-			result.FSM.PreconditionsValid = false
-			result.FSM.PreflightDeferred = true
-			result.FSM.UnsafeReason = reason
-		}
+	}
+	if reason != "" {
+		result.FSM.PreconditionsValid = false
+		result.FSM.PreflightDeferred = true
+		result.FSM.UnsafeReason = reason
 	}
 	return nil
 }
