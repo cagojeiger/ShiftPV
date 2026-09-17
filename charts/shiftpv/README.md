@@ -283,6 +283,11 @@ capacity, Volume/Move phase, mobility deferral, CSI 오류·latency를 함께 �
 authority가 아니며, ShiftPV는 이 신호만으로 data를 삭제하거나 finalizer를 해제하지 않는다. 판단은
 언제나 CR journal과 현재 node evidence로 다시 확인한다.
 
+`severity`는 두 단계다. `ShiftPVObservationFailed`와 `ShiftPVObservationStale`은 controller나 node의
+관측 자체가 멈췄다는 뜻이므로 `critical`이다. 이때는 나머지 metric이 최신이 아니고, 다른 alert가
+조용하다는 사실도 근거가 되지 못한다. 나머지 네 alert는 관측이 살아 있는 상태에서 운영자 판단을
+요구하는 review/inventory 신호이므로 `warning`이며, ShiftPV가 data를 보존한 채 멈춰 기다린다.
+
 ### ShiftPVObservationFailed
 
 `shiftpv_metrics_snapshot_success == 0`이 5분 지속됐다. 해당 source의 최신 observation snapshot이

@@ -6,7 +6,7 @@ groups:
         expr: shiftpv_metrics_snapshot_success{shiftpv="true"} == 0
         for: 5m
         labels:
-          severity: warning
+          severity: critical
         annotations:
           summary: ShiftPV observation is failing
           description: >-
@@ -30,7 +30,7 @@ groups:
           )
         for: 5m
         labels:
-          severity: warning
+          severity: critical
         annotations:
           summary: ShiftPV observation is stale
           description: >-

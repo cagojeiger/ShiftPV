@@ -26,7 +26,7 @@ tests:
       - eval_time: 6m
         alertname: ShiftPVObservationFailed
         exp_alerts:
-          - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", source: metadata}
+          - exp_labels: {namespace: shiftpv-system, severity: critical, shiftpv: "true", source: metadata}
             exp_annotations:
               summary: "ShiftPV observation is failing"
               description: "The latest completed ShiftPV observation failed for five minutes (source=metadata, shiftpv_metrics_snapshot_success=0)."
@@ -34,7 +34,7 @@ tests:
       - eval_time: 6m
         alertname: ShiftPVObservationStale
         exp_alerts:
-          - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", source: metadata}
+          - exp_labels: {namespace: shiftpv-system, severity: critical, shiftpv: "true", source: metadata}
             exp_annotations:
               summary: "ShiftPV observation is stale"
               description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=metadata)."
@@ -103,12 +103,12 @@ tests:
       - eval_time: 6m
         alertname: ShiftPVObservationStale
         exp_alerts:
-          - exp_labels: {instance: controller, namespace: shiftpv-system, severity: warning, shiftpv: "true"}
+          - exp_labels: {instance: controller, namespace: shiftpv-system, severity: critical, shiftpv: "true"}
             exp_annotations:
               summary: "ShiftPV observation is stale"
               description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=(absent) instance=controller)."
               runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationstale"
-          - exp_labels: {severity: warning, shiftpv: "true"}
+          - exp_labels: {severity: critical, shiftpv: "true"}
             exp_annotations:
               summary: "ShiftPV observation is stale"
               description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=(absent))."
@@ -119,7 +119,7 @@ tests:
       - eval_time: 6m
         alertname: ShiftPVObservationStale
         exp_alerts:
-          - exp_labels: {severity: warning, shiftpv: "true"}
+          - exp_labels: {severity: critical, shiftpv: "true"}
             exp_annotations:
               summary: "ShiftPV observation is stale"
               description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=(absent))."
@@ -139,7 +139,7 @@ tests:
       - eval_time: 8m
         alertname: ShiftPVObservationStale
         exp_alerts:
-          - exp_labels: {component: node, namespace: shiftpv-system, node: worker-a, release: shiftpv, severity: warning, shiftpv: "true", source: filesystem}
+          - exp_labels: {component: node, namespace: shiftpv-system, node: worker-a, release: shiftpv, severity: critical, shiftpv: "true", source: filesystem}
             exp_annotations:
               summary: "ShiftPV observation is stale"
               description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=filesystem component=node node=worker-a)."
