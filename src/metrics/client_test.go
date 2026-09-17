@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,12 +18,16 @@ import (
 func TestObservationClientBudgetAndInventory(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
+	persistentVolumeQueries := []url.Values{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		calls++
 		if r.UserAgent() != "shiftpv-metrics" {
 			t.Errorf("user-agent %q", r.UserAgent())
+		}
+		if strings.HasSuffix(r.URL.Path, "/persistentvolumes") {
+			persistentVolumeQueries = append(persistentVolumeQueries, r.URL.Query())
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"apiVersion":"v1","kind":"List","metadata":{},"items":[]}`)
@@ -44,8 +50,19 @@ func TestObservationClientBudgetAndInventory(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 5 {
+	if calls != 6 {
 		t.Fatalf("snapshot made %d API calls", calls)
+	}
+	// The cluster-wide PersistentVolume read runs every interval, so it must be
+	// served from the watch cache and paged rather than quorum-read whole.
+	if len(persistentVolumeQueries) != 1 {
+		t.Fatalf("snapshot made %d PersistentVolume calls", len(persistentVolumeQueries))
+	}
+	if got := persistentVolumeQueries[0].Get("resourceVersion"); got != "0" {
+		t.Fatalf("PersistentVolume list resourceVersion %q is a quorum read", got)
+	}
+	if got := persistentVolumeQueries[0].Get("limit"); got != "500" {
+		t.Fatalf("PersistentVolume list limit %q is unbounded", got)
 	}
 	if _, err := New().NewController(&rest.Config{Host: ":invalid"}, time.Second, time.Minute); err == nil {
 		t.Fatal("invalid metrics config accepted")

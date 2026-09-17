@@ -40,6 +40,16 @@ wait_query 'sum(shiftpv_csi_requests_total{method="NodePublishVolume",code="OK"}
 wait_query 'sum(max_over_time(shiftpv_moves{phase="Copying"}[15m])) > 0'
 wait_query 'sum(max_over_time(shiftpv_pool_reserved_bytes[15m])) > 0'
 
+# count(), not absent(), because absent() answers with an empty vector exactly
+# when the family is present, which this harness reads as a failed assertion.
+wait_query 'count(shiftpv_persistent_volumes) > 0'
+wait_query 'sum(max_over_time(shiftpv_persistent_volumes{phase="Bound"}[15m])) > 0'
+
+bound_persistent_volumes=$(kubectl get pv -o json |
+  jq '[.items[] | select(.spec.csi.driver == "csi.shiftpv.io" and .status.phase == "Bound")] | length')
+# or vector(0) keeps the assertion answerable when no driver PersistentVolume is left.
+wait_query "sum(shiftpv_persistent_volumes{phase=\"Bound\"} or vector(0)) == ${bound_persistent_volumes}"
+
 for component in controller node; do
   kubectl get --raw "/api/v1/namespaces/shiftpv-system/services/shiftpv-${component}-metrics:8080/proxy/metrics" |
     kubectl -n shiftpv-system exec -i deployment/metrics-test -- promtool check metrics

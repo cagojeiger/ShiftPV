@@ -73,6 +73,19 @@ groups:
             {{ $value }} durable cleanup contract(s) in state {{ $labels.state }} are
             preserving data pending operator action.
           runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvcleanupneedsreview
+      - alert: ShiftPVReleasedVolumes
+        expr: shiftpv_persistent_volumes{shiftpv="true",phase="Released"} > 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV PersistentVolumes are waiting for a reclaim decision
+          description: >-
+            {{ $value }} Released ShiftPV PersistentVolume(s) on pool {{ $labels.pool }} kept
+            their data after their claims were deleted and nothing reclaims them automatically;
+            shiftpv_persistent_volumes_released_bytes{pool="{{ $labels.pool }}"} reports the held
+            capacity.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvreleasedvolumes
       - alert: ShiftPVCopyNeedsReview
         expr: shiftpv_copy_observations{shiftpv="true",state=~"OrphanPreserved|Missing|NeedsReview"} > 0
         for: 5m

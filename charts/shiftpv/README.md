@@ -271,7 +271,8 @@ metrics:
 ```
 
 기본 Alert는 metrics snapshot 실패·staleness, invalid Pool accounting, invalid/truncated inventory,
-cleanup `NeedsReview`, orphan/missing/unsafe copy observation을 알린다. Dashboard는 이 신호와 Pool
+cleanup `NeedsReview`, orphan/missing/unsafe copy observation, 그리고 회수 판단을 기다리는 `Released`
+PersistentVolume을 알린다. Dashboard는 이 신호와 Pool
 capacity, Volume/Move phase, mobility deferral, CSI 오류·latency를 함께 보여 준다. 복구/삭제 판단은
 반드시 CR journal과 현재 node evidence로 다시 확인한다.
 [Metrics contract](../../docs/spec/metrics.md)에 bounded-cardinality 규칙이 있다.
@@ -285,8 +286,8 @@ authority가 아니며, ShiftPV는 이 신호만으로 data를 삭제하거나 f
 
 `severity`는 두 단계다. `ShiftPVObservationFailed`와 `ShiftPVObservationStale`은 controller나 node의
 관측 자체가 멈췄다는 뜻이므로 `critical`이다. 이때는 나머지 metric이 최신이 아니고, 다른 alert가
-조용하다는 사실도 근거가 되지 못한다. 나머지 네 alert는 관측이 살아 있는 상태에서 운영자 판단을
-요구하는 review/inventory 신호이므로 `warning`이며, ShiftPV가 data를 보존한 채 멈춰 기다린다.
+조용하다는 사실도 근거가 되지 못한다. 나머지 다섯 alert는 관측이 살아 있는 상태에서 운영자 판단을
+요구하는 review/inventory/reclaim 신호이므로 `warning`이며, ShiftPV가 data를 보존한 채 멈춰 기다린다.
 
 ### ShiftPVObservationFailed
 
@@ -365,6 +366,34 @@ kubectl -n shiftpv-system get jobs -l app.kubernetes.io/instance=shiftpv
 지금까지 관측된 대표 원인은 운영자가 node의 data directory를 직접 지워, intent 없이 path만 사라진
 경우다. [GC and review](#gc-and-review)의 대조 절차를 따른다. ShiftPV는 `NeedsReview` journal을
 자동으로 해제하지 않으며, finalizer 강제 제거 절차도 지원하지 않는다.
+
+### ShiftPVReleasedVolumes
+
+`shiftpv_persistent_volumes{phase="Released"} > 0`이 6시간 지속됐다. `Retain` StorageClass의 PVC가
+삭제돼 PV가 `Released`로 남았다는 뜻이다. Data와 `ShiftPVVolume`은 그대로 보존되며, ShiftPV도 PV
+controller도 이 상태를 자동으로 정리하지 않는다. 즉 capacity hold가 계속 유지된 채 운영자의 회수 판단을
+기다린다. `description`의 `pool`은 해당 copy를 들고 있는 Pool이고(`unknown`은 volume handle에 대응하는
+`ShiftPVVolume`이 없다는 뜻이다), 붙잡힌 용량은 `shiftpv_persistent_volumes_released_bytes`에서 읽는다.
+
+```bash
+kubectl get pv -o json | jq -r '
+  .items[]
+  | select(.spec.csi.driver == "csi.shiftpv.io" and .status.phase == "Released")
+  | [.metadata.name, .spec.capacity.storage, .spec.persistentVolumeReclaimPolicy,
+     .spec.csi.volumeHandle, (.spec.claimRef.namespace + "/" + .spec.claimRef.name)]
+  | @tsv'
+```
+
+지금까지 관측된 대표 원인은 두 가지다. Namespace를 지웠다가 같은 이름으로 다시 만들어 PVC UID가
+바뀐 경우와, workload를 재구성하면서 PVC 이름을 바꾼 경우다. 둘 다 PV는 옛 `claimRef`를 가리키는
+`Released`로 남는다.
+
+판단은 `claimRef`가 가리키던 data가 여전히 필요한지 하나뿐이다.
+
+- 계속 쓴다: 그 PV를 다시 bind할 수 있게 `claimRef`를 정리하고 새 PVC를 연결한다. 이 alert는
+  PV가 `Bound`가 되면 해소된다.
+- 폐기한다: [Retain volume 회수](#retain-volume-회수)의 절차를 그대로 따른다. 그 절의 reclaim policy
+  변경이 유일하게 지원하는 삭제 경로이며, node에서 directory를 직접 지우지 않는다.
 
 ### ShiftPVCopyNeedsReview
 

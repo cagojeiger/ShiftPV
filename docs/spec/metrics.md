@@ -39,10 +39,13 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 | `shiftpv_cleanup_requests` | `state` | Volume/Move에 내장된 cleanup journal 수 |
 | `shiftpv_copy_observations` | `pool`, `state` | Pool inventory copy를 API authority와 대조한 Pool별 분류 수 |
 | `shiftpv_mobility_deferred_volumes` | `reason` | 마지막 완료된 cordon discovery의 보류 사유별 Volume 수 |
+| `shiftpv_persistent_volumes` | `phase`, `pool` | `csi.shiftpv.io`가 provision한 PersistentVolume 수를 PV phase와 현재 copy를 든 Pool별로 집계 |
+| `shiftpv_persistent_volumes_released_bytes` | `pool` | `Released` PersistentVolume의 요청 capacity 합계 |
 | `shiftpv_csi_requests_total` | `method`, `code` | 지원하는 CSI lifecycle RPC 완료 횟수 |
 | `shiftpv_csi_request_duration_seconds` | `method` | 지원하는 CSI lifecycle RPC 처리 시간 |
 
-`pool`과 `node`는 등록된 Pool 집합으로 제한한다. Phase, state, source, method, code와 reason은 코드에
+`pool`과 `node`는 등록된 Pool 집합으로 제한한다. PersistentVolume series의 `pool`은 volume handle로 찾은
+`ShiftPVVolume`의 현재 copy가 속한 Pool이며, 대응하는 Volume이 없으면 `unknown`으로 접는다. Phase, state, source, method, code와 reason은 코드에
 고정된 집합 밖의 값을 `Unknown`으로 접는다. Volume UID, Move UID, copy ID, operation/executor ID,
 filesystem path, Pod UID, 오류 문자열과 timestamp를 label로 사용하지 않는다.
 
@@ -67,8 +70,8 @@ API receipt만 있고 absence가 없거나 absence만 있고 receipt가 없는 �
 
 기본 dashboard는 collection 상태, Pool readiness/inventory, Pool별 aggregate hold와 filesystem 여유,
 Volume/active Move phase, mobility deferral, CSI rate/error/latency를 분리해 보여 준다. 기본 alert rules는
-snapshot 실패·staleness, invalid Pool accounting, invalid/truncated inventory, cleanup `NeedsReview`, 그리고
-orphan/missing/unsafe copy observation을 경고한다.
+snapshot 실패·staleness, invalid Pool accounting, invalid/truncated inventory, cleanup `NeedsReview`,
+orphan/missing/unsafe copy observation, 그리고 회수 판단을 기다리는 `Released` PersistentVolume을 경고한다.
 
 현재 metric에는 개별 hold owner/role, cleanup reason class, journal별 age가 label로 노출되지 않는다.
 상세 원인은 해당 Volume/Move status, Event와 log에서 확인한다.

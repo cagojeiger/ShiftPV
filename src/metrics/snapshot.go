@@ -54,6 +54,8 @@ var definitions = []struct {
 	{"cleanup_requests", "Durable cleanup intents by observed lifecycle state; Unknown means invalid metadata.", []string{"state"}},
 	{"copy_observations", "Node-observed copy placements classified against API authority.", []string{"pool", "state"}},
 	{"mobility_deferred_volumes", "Volumes deferred during the last completed cordon discovery.", []string{"reason"}},
+	{"persistent_volumes", "Driver-owned PersistentVolumes by phase and by the Pool holding the current copy.", []string{"phase", "pool"}},
+	{"persistent_volumes_released_bytes", "Requested capacity of Released driver-owned PersistentVolumes awaiting an operator reclaim decision.", []string{"pool"}},
 }
 
 func (c *Cache) Describe(ch chan<- *prometheus.Desc) {

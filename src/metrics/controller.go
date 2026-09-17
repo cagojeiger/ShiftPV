@@ -3,8 +3,10 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
@@ -23,12 +25,17 @@ type CleanupInventory interface {
 	List(context.Context) ([]cleanupapi.Cleanup, error)
 }
 
+type PersistentVolumeInventory interface {
+	List(context.Context) ([]corev1.PersistentVolume, error)
+}
+
 type Controller struct {
-	Exporter   *Exporter
-	Inventory  Inventory
-	Cleanups   CleanupInventory
-	Interval   time.Duration
-	StaleAfter time.Duration
+	Exporter          *Exporter
+	Inventory         Inventory
+	Cleanups          CleanupInventory
+	PersistentVolumes PersistentVolumeInventory
+	Interval          time.Duration
+	StaleAfter        time.Duration
 }
 
 func (c *Controller) Run(ctx context.Context) {
@@ -87,6 +94,15 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 	}
 	values = append(values, cleanupValues...)
 	values = append(values, copyObservationSamples(pools, volumes, moves, cleanupContracts)...)
+	var persistentVolumes []corev1.PersistentVolume
+	if c.PersistentVolumes != nil {
+		if persistentVolumes, err = c.PersistentVolumes.List(ctx); err != nil {
+			return err
+		}
+	}
+	// Emitted even with no inventory: an absent series cannot be told from a
+	// Released count of zero, and ShiftPVReleasedVolumes reads absence as calm.
+	values = append(values, persistentVolumeSamples(persistentVolumes, volumes)...)
 	c.Exporter.Cache.update("metadata", values, true)
 	return nil
 }
@@ -160,6 +176,56 @@ func (c *Controller) cleanupPhaseSamples(ctx context.Context) ([]sample, []clean
 		values = append(values, sample{"cleanup_requests", float64(cleanupCounts[state]), []string{state}})
 	}
 	return values, cleanupContracts, nil
+}
+
+// persistentVolumeSamples counts driver-owned PersistentVolumes by phase and by
+// the Pool that holds the volume's current copy, and sums the capacity that
+// Released volumes hold for an operator reclaim decision. A volume handle that
+// no live ShiftPVVolume claims counts as pool "unknown". PersistentVolume names
+// and claim references stay out of the label set.
+//
+// Pool "unknown" is always present so the family exists even with no
+// driver-owned PersistentVolume at all, which keeps a zero count distinct from
+// a series that never arrived.
+func persistentVolumeSamples(persistentVolumes []corev1.PersistentVolume, volumes map[string]volumeapi.State) []sample {
+	counts := map[string]map[string]int{"unknown": {}}
+	released := map[string]int64{}
+	for _, persistentVolume := range persistentVolumes {
+		if persistentVolume.Spec.CSI == nil || persistentVolume.Spec.CSI.Driver != volume.DriverName {
+			continue
+		}
+		pool := persistentVolumePool(persistentVolume.Spec.CSI.VolumeHandle, volumes)
+		phase := bounded(string(persistentVolume.Status.Phase), persistentVolumePhases)
+		if counts[pool] == nil {
+			counts[pool] = map[string]int{}
+			released[pool] = 0
+		}
+		counts[pool][phase]++
+		if phase == "Released" {
+			released[pool] += persistentVolume.Spec.Capacity.Storage().Value()
+		}
+	}
+	pools := make([]string, 0, len(counts))
+	for pool := range counts {
+		pools = append(pools, pool)
+	}
+	sort.Strings(pools)
+	var values []sample
+	for _, pool := range pools {
+		for _, phase := range persistentVolumePhases {
+			values = append(values, sample{"persistent_volumes", float64(counts[pool][phase]), []string{phase, pool}})
+		}
+		values = append(values, sample{"persistent_volumes_released_bytes", float64(released[pool]), []string{pool}})
+	}
+	return values
+}
+
+func persistentVolumePool(volumeHandle string, volumes map[string]volumeapi.State) string {
+	state, exists := volumes[volumeHandle]
+	if !exists || state.CurrentCopy == nil || state.CurrentCopy.PoolName == "" {
+		return "unknown"
+	}
+	return state.CurrentCopy.PoolName
 }
 
 func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, staleAfter time.Duration) []sample {

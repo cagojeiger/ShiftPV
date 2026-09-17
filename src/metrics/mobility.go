@@ -2,6 +2,7 @@ package metrics
 
 var volumePhases = []string{"Pending", "Ready", "Deleting", "Moving", "Blocked", "Unknown"}
 var movePhases = []string{"Pending", "Locking", "Evicting", "WaitingForUnpublish", "WaitingForReplacement", "WaitingForDestination", "WaitingForCapacity", "Copying", "Promoting", "Committing", "ReleasingDestination", "WaitingForDestinationPublish", "CleaningSource", "Completing", "Succeeded", "Blocked", "Unknown"}
+var persistentVolumePhases = []string{"Pending", "Available", "Bound", "Released", "Failed", "Unknown"}
 var deferredReasons = []string{
 	"SourceUnavailable", "SourceNotCordoned", "VolumeBindingMissing", "VolumeBindingMismatch", "OwnerMismatch", "AdmissionNotEnabled",
 	"MultipleConsumers", "ControlledConsumerMissing", "BarePodUnsupported", "DestinationUnavailable", "ConsumerUnavailable",

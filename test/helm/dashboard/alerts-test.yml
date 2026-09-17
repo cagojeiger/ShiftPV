@@ -145,6 +145,29 @@ tests:
               description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=filesystem component=node node=worker-a)."
               runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationstale"
 
+  - interval: 5m
+    input_series:
+      - series: 'shiftpv_persistent_volumes{shiftpv="true",namespace="shiftpv-system",phase="Released",pool="pool-a"}'
+        values: '2+0x100'
+      - series: 'shiftpv_persistent_volumes{shiftpv="true",namespace="shiftpv-system",phase="Bound",pool="pool-a"}'
+        values: '3+0x100'
+      - series: 'shiftpv_persistent_volumes{shiftpv="true",namespace="shiftpv-system",phase="Released",pool="pool-b"}'
+        values: '0+0x100'
+      - series: 'shiftpv_persistent_volumes_released_bytes{shiftpv="true",namespace="shiftpv-system",pool="pool-a"}'
+        values: '26843545600+0x100'
+    alert_rule_test:
+      - eval_time: 5h55m
+        alertname: ShiftPVReleasedVolumes
+        exp_alerts: []
+      - eval_time: 6h5m
+        alertname: ShiftPVReleasedVolumes
+        exp_alerts:
+          - exp_labels: {namespace: shiftpv-system, phase: Released, pool: pool-a, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: "ShiftPV PersistentVolumes are waiting for a reclaim decision"
+              description: "2 Released ShiftPV PersistentVolume(s) on pool pool-a kept their data after their claims were deleted and nothing reclaims them automatically; shiftpv_persistent_volumes_released_bytes{pool=\"pool-a\"} reports the held capacity."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvreleasedvolumes"
+
   - interval: 1m
     input_series:
       - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",release="shiftpv",component="controller",pod="controller-old",instance="10.0.0.1:8080",source="metadata"}'
