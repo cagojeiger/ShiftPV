@@ -2,13 +2,21 @@ package docs_test
 
 import (
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"testing"
 )
 
 // forbiddenHistoricalTerms lists the removed or historical identifiers that
-// must not reappear in the durable 0.4 documentation surface.
-var forbiddenHistoricalTerms = []string{"ShiftPVCleanup", "reservation ConfigMap", "0.3.1"}
+// must not reappear in the durable 0.4 documentation surface. The retired
+// standalone API is matched at a word boundary so that current identifiers
+// which merely start with the same letters — the ShiftPVCleanupNeedsReview
+// alert the chart still ships — are not mistaken for it.
+var forbiddenHistoricalTerms = []*regexp.Regexp{
+	regexp.MustCompile(`ShiftPVCleanups?\b`),
+	regexp.MustCompile(`reservation ConfigMap`),
+	regexp.MustCompile(`0\.3\.1`),
+}
 
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
