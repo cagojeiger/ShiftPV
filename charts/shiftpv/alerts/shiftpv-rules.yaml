@@ -9,7 +9,11 @@ groups:
           severity: warning
         annotations:
           summary: ShiftPV observation is failing
-          description: The latest completed ShiftPV observation for this source failed for five minutes.
+          description: >-
+            The latest completed ShiftPV observation failed for five minutes
+            (source={{ $labels.source }}{{ with $labels.component }} component={{ . }}{{ end }}{{ with $labels.node }} node={{ . }}{{ end }}{{ with $labels.instance }} instance={{ . }}{{ end }},
+            shiftpv_metrics_snapshot_success={{ $value }}).
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationfailed
       - alert: ShiftPVObservationStale
         expr: |
           time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true"} > 300
@@ -29,7 +33,11 @@ groups:
           severity: warning
         annotations:
           summary: ShiftPV observation is stale
-          description: A ShiftPV source is failing, stale, or missing from the current scrape targets.
+          description: >-
+            A ShiftPV observation source is failing, stale, or missing from the current
+            scrape targets
+            ({{ with $labels.source }}source={{ . }}{{ else }}source=(absent){{ end }}{{ with $labels.component }} component={{ . }}{{ end }}{{ with $labels.node }} node={{ . }}{{ end }}{{ with $labels.instance }} instance={{ . }}{{ end }}).
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationstale
       - alert: ShiftPVPoolAccountingInvalid
         expr: shiftpv_pool_accounting_valid{shiftpv="true"} == 0
         for: 5m
@@ -37,7 +45,11 @@ groups:
           severity: warning
         annotations:
           summary: ShiftPV Pool accounting is invalid
-          description: The Pool capacity accounting state cannot be used for admission decisions.
+          description: >-
+            Pool {{ $labels.pool }} on node {{ $labels.node }} cannot use its capacity
+            accounting state for admission decisions
+            (shiftpv_pool_accounting_valid={{ $value }}).
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvpoolaccountinginvalid
       - alert: ShiftPVPoolInventoryUnsafe
         expr: shiftpv_pool_inventory_valid{shiftpv="true"} == 0 or shiftpv_pool_inventory_truncated{shiftpv="true"} == 1
         for: 5m
@@ -45,7 +57,11 @@ groups:
           severity: warning
         annotations:
           summary: ShiftPV Pool copy inventory is incomplete
-          description: The Pool inventory is invalid or exceeded its fixed scan bound, so absence is not proven.
+          description: >-
+            The inventory of Pool {{ $labels.pool }} on node {{ $labels.node }}
+            {{ if eq $value 0.0 }}is invalid (shiftpv_pool_inventory_valid=0){{ else }}exceeded its fixed scan bound (shiftpv_pool_inventory_truncated=1){{ end }},
+            so absence is not proven.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvpoolinventoryunsafe
       - alert: ShiftPVCleanupNeedsReview
         expr: shiftpv_cleanup_requests{shiftpv="true",state="NeedsReview"} > 0
         for: 5m
@@ -53,7 +69,10 @@ groups:
           severity: warning
         annotations:
           summary: ShiftPV cleanup needs operator review
-          description: At least one durable cleanup contract is preserving data pending operator action.
+          description: >-
+            {{ $value }} durable cleanup contract(s) in state {{ $labels.state }} are
+            preserving data pending operator action.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvcleanupneedsreview
       - alert: ShiftPVCopyNeedsReview
         expr: shiftpv_copy_observations{shiftpv="true",state=~"OrphanPreserved|Missing|NeedsReview"} > 0
         for: 5m
@@ -61,4 +80,8 @@ groups:
           severity: warning
         annotations:
           summary: ShiftPV copy placement needs review
-          description: A copy is orphan-preserved, missing from its expected placement, or has an unsafe identity observation.
+          description: >-
+            {{ $value }} copy observation(s) in state {{ $labels.state }} on pool
+            {{ $labels.pool }}: the copy is orphan-preserved, missing from its expected
+            placement, or carries an unsafe identity observation.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvcopyneedsreview

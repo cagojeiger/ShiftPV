@@ -37,7 +37,7 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 | `shiftpv_volumes` | `phase` | 고정 enum phase별 Volume 수 |
 | `shiftpv_moves` | `phase` | live Volume이 `activeMove`로 참조하는 Move와 미정산 `Completing` Move 수 |
 | `shiftpv_cleanup_requests` | `state` | Volume/Move에 내장된 cleanup journal 수 |
-| `shiftpv_copy_observations` | `state` | Pool inventory copy를 API authority와 대조한 분류 수 |
+| `shiftpv_copy_observations` | `pool`, `state` | Pool inventory copy를 API authority와 대조한 Pool별 분류 수 |
 | `shiftpv_mobility_deferred_volumes` | `reason` | 마지막 완료된 cordon discovery의 보류 사유별 Volume 수 |
 | `shiftpv_csi_requests_total` | `method`, `code` | 지원하는 CSI lifecycle RPC 완료 횟수 |
 | `shiftpv_csi_request_duration_seconds` | `method` | 지원하는 CSI lifecycle RPC 처리 시간 |

@@ -20,41 +20,62 @@ tests:
         values: '1+0x6 0+0x5'
       - series: 'shiftpv_cleanup_requests{shiftpv="true",namespace="shiftpv-system",state="NeedsReview"}'
         values: '1+0x6 0+0x5'
-      - series: 'shiftpv_copy_observations{shiftpv="true",namespace="shiftpv-system",state="OrphanPreserved"}'
+      - series: 'shiftpv_copy_observations{shiftpv="true",namespace="shiftpv-system",pool="pool-a",state="OrphanPreserved"}'
         values: '1+0x6 0+0x5'
     alert_rule_test:
       - eval_time: 6m
         alertname: ShiftPVObservationFailed
         exp_alerts:
           - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", source: metadata}
-            exp_annotations: {summary: "ShiftPV observation is failing", description: "The latest completed ShiftPV observation for this source failed for five minutes."}
+            exp_annotations:
+              summary: "ShiftPV observation is failing"
+              description: "The latest completed ShiftPV observation failed for five minutes (source=metadata, shiftpv_metrics_snapshot_success=0)."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationfailed"
       - eval_time: 6m
         alertname: ShiftPVObservationStale
         exp_alerts:
           - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", source: metadata}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
+            exp_annotations:
+              summary: "ShiftPV observation is stale"
+              description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=metadata)."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationstale"
       - eval_time: 6m
         alertname: ShiftPVPoolAccountingInvalid
         exp_alerts:
           - exp_labels: {namespace: shiftpv-system, node: worker-a, pool: pool-a, severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV Pool accounting is invalid", description: "The Pool capacity accounting state cannot be used for admission decisions."}
+            exp_annotations:
+              summary: "ShiftPV Pool accounting is invalid"
+              description: "Pool pool-a on node worker-a cannot use its capacity accounting state for admission decisions (shiftpv_pool_accounting_valid=0)."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvpoolaccountinginvalid"
       - eval_time: 6m
         alertname: ShiftPVPoolInventoryUnsafe
         exp_alerts:
           - exp_labels: {namespace: shiftpv-system, node: worker-a, pool: pool-a, severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV Pool copy inventory is incomplete", description: "The Pool inventory is invalid or exceeded its fixed scan bound, so absence is not proven."}
+            exp_annotations:
+              summary: "ShiftPV Pool copy inventory is incomplete"
+              description: "The inventory of Pool pool-a on node worker-a is invalid (shiftpv_pool_inventory_valid=0), so absence is not proven."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvpoolinventoryunsafe"
           - exp_labels: {namespace: shiftpv-system, node: worker-b, pool: pool-b, severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV Pool copy inventory is incomplete", description: "The Pool inventory is invalid or exceeded its fixed scan bound, so absence is not proven."}
+            exp_annotations:
+              summary: "ShiftPV Pool copy inventory is incomplete"
+              description: "The inventory of Pool pool-b on node worker-b exceeded its fixed scan bound (shiftpv_pool_inventory_truncated=1), so absence is not proven."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvpoolinventoryunsafe"
       - eval_time: 6m
         alertname: ShiftPVCleanupNeedsReview
         exp_alerts:
           - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", state: NeedsReview}
-            exp_annotations: {summary: "ShiftPV cleanup needs operator review", description: "At least one durable cleanup contract is preserving data pending operator action."}
+            exp_annotations:
+              summary: "ShiftPV cleanup needs operator review"
+              description: "1 durable cleanup contract(s) in state NeedsReview are preserving data pending operator action."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvcleanupneedsreview"
       - eval_time: 6m
         alertname: ShiftPVCopyNeedsReview
         exp_alerts:
-          - exp_labels: {namespace: shiftpv-system, severity: warning, shiftpv: "true", state: OrphanPreserved}
-            exp_annotations: {summary: "ShiftPV copy placement needs review", description: "A copy is orphan-preserved, missing from its expected placement, or has an unsafe identity observation."}
+          - exp_labels: {namespace: shiftpv-system, pool: pool-a, severity: warning, shiftpv: "true", state: OrphanPreserved}
+            exp_annotations:
+              summary: "ShiftPV copy placement needs review"
+              description: "1 copy observation(s) in state OrphanPreserved on pool pool-a: the copy is orphan-preserved, missing from its expected placement, or carries an unsafe identity observation."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvcopyneedsreview"
       - eval_time: 8m
         alertname: ShiftPVObservationFailed
         exp_alerts: []
@@ -83,9 +104,15 @@ tests:
         alertname: ShiftPVObservationStale
         exp_alerts:
           - exp_labels: {instance: controller, namespace: shiftpv-system, severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
+            exp_annotations:
+              summary: "ShiftPV observation is stale"
+              description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=(absent) instance=controller)."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationstale"
           - exp_labels: {severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
+            exp_annotations:
+              summary: "ShiftPV observation is stale"
+              description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=(absent))."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationstale"
 
   - interval: 1m
     alert_rule_test:
@@ -93,7 +120,10 @@ tests:
         alertname: ShiftPVObservationStale
         exp_alerts:
           - exp_labels: {severity: warning, shiftpv: "true"}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
+            exp_annotations:
+              summary: "ShiftPV observation is stale"
+              description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=(absent))."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationstale"
 
   - interval: 1m
     input_series:
@@ -110,7 +140,10 @@ tests:
         alertname: ShiftPVObservationStale
         exp_alerts:
           - exp_labels: {component: node, namespace: shiftpv-system, node: worker-a, release: shiftpv, severity: warning, shiftpv: "true", source: filesystem}
-            exp_annotations: {summary: "ShiftPV observation is stale", description: "A ShiftPV source is failing, stale, or missing from the current scrape targets."}
+            exp_annotations:
+              summary: "ShiftPV observation is stale"
+              description: "A ShiftPV observation source is failing, stale, or missing from the current scrape targets (source=filesystem component=node node=worker-a)."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvobservationstale"
 
   - interval: 1m
     input_series:

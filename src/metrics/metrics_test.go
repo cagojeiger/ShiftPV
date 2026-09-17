@@ -486,5 +486,5 @@ func TestCopyObservationsClassifyAuthorityWithoutDeletingOrphans(t *testing.T) {
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	contains(t, output(t, c.Exporter), `shiftpv_copy_observations{state="Current"} 1`, `shiftpv_copy_observations{state="OrphanPreserved"} 1`, `shiftpv_copy_observations{state="NeedsReview"} 1`)
+	contains(t, output(t, c.Exporter), `shiftpv_copy_observations{pool="pool-a",state="Current"} 1`, `shiftpv_copy_observations{pool="pool-a",state="OrphanPreserved"} 1`, `shiftpv_copy_observations{pool="pool-a",state="NeedsReview"} 1`)
 }
