@@ -158,22 +158,20 @@ StorageClass가 없으므로 `storageClassName`을 생략한 PVC는 그 사이 P
 
 ### Retain volume 회수
 
-`shiftpv-retain`의 PV를 삭제해도 `ShiftPVVolume`과 node의 data directory는 남는다. ShiftPV는 data를
-자동으로 폐기하는 경로를 두지 않으므로 운영자가 다음 순서로 직접 회수한다. `ShiftPVVolume`은
-`shiftpv.io/volume-protection` finalizer와 lifecycle webhook이 보호하므로 controller ServiceAccount로
-impersonate해서 지운다.
+`shiftpv-retain`의 PVC를 삭제하면 PV는 `Released`로 남고 `ShiftPVVolume`과 node의 data directory도
+보존된다. 그 data를 폐기하기로 결정했으면 PV의 reclaim policy를 `Delete`로 바꾸는 것으로 끝난다. PV
+controller가 PV를 삭제하고 CSI `DeleteVolume`이 ShiftPV의 일반 cleanup 경로(cleanup Job, copy marker와
+placement marker 제거, receipt 기록, `ShiftPVVolume` 삭제)를 그대로 태운다.
 
 ```bash
-kubectl delete pv <pv-name>
-kubectl get shiftpvvolume <volume-id> -o jsonpath='{.status.currentCopy.nodeName} {.status.currentCopy.poolName}'
-kubectl patch shiftpvvolume <volume-id> --type=merge -p '{"metadata":{"finalizers":[]}}' \
-  --as=system:serviceaccount:shiftpv-system:shiftpv-controller
-kubectl delete shiftpvvolume <volume-id> --as=system:serviceaccount:shiftpv-system:shiftpv-controller
-# node에서: rm -rf <pool mountPath>/volumes/<volume-id>
+kubectl get pv <pv-name> -o jsonpath='{.status.phase} {.spec.csi.volumeHandle}{"\n"}'   # Released 확인
+kubectl patch pv <pv-name> -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
+kubectl get pv <pv-name>; kubectl get shiftpvvolume <volume-id>                        # 둘 다 NotFound가 되면 완료
 ```
 
-Pool `mountPath`는 `kubectl get shiftpvpool <pool> -o jsonpath='{.spec.mountPath}'`로 확인한다. directory를
-지우지 않으면 Pool inventory가 해당 copy를 unknown storage로 계속 보고한다.
+`ShiftPVVolume`의 finalizer를 직접 떼거나 node에서 directory를 `rm`하지 않는다. data directory만 지우면
+`.shiftpv/`의 copy marker가 남아 Pool inventory가 그 copy를 `Missing`으로 보고하고
+`ShiftPVCopyNeedsReview`가 발생한다.
 
 ## Planned mobility
 
