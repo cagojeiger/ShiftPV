@@ -35,8 +35,8 @@ func TestTarget04DocsDoNotRetainRemovedDurableResources(t *testing.T) {
 			t.Fatalf("read %s: %v", relative, err)
 		}
 		for _, forbidden := range forbiddenHistoricalTerms {
-			if strings.Contains(string(content), forbidden) {
-				t.Errorf("%s retains removed or historical term %q", relative, forbidden)
+			if match := forbidden.FindString(string(content)); match != "" {
+				t.Errorf("%s retains removed or historical term %q", relative, match)
 			}
 		}
 	}

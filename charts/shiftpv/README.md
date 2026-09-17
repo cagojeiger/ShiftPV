@@ -276,6 +276,120 @@ capacity, Volume/Move phase, mobility deferral, CSI 오류·latency를 함께 �
 반드시 CR journal과 현재 node evidence로 다시 확인한다.
 [Metrics contract](../../docs/spec/metrics.md)에 bounded-cardinality 규칙이 있다.
 
+## 알림 대응
+
+각 alert의 `description`은 문제를 식별하는 label(`source`, `pool`, `node`, `state`)과 현재 값을 담고,
+`runbook_url`은 아래 해당 항목을 가리킨다. 모든 항목의 공통 전제는 같다. Alert는 관측 신호이지
+authority가 아니며, ShiftPV는 이 신호만으로 data를 삭제하거나 finalizer를 해제하지 않는다. 판단은
+언제나 CR journal과 현재 node evidence로 다시 확인한다.
+
+`severity`는 두 단계다. `ShiftPVObservationFailed`와 `ShiftPVObservationStale`은 controller나 node의
+관측 자체가 멈췄다는 뜻이므로 `critical`이다. 이때는 나머지 metric이 최신이 아니고, 다른 alert가
+조용하다는 사실도 근거가 되지 못한다. 나머지 네 alert는 관측이 살아 있는 상태에서 운영자 판단을
+요구하는 review/inventory 신호이므로 `warning`이며, ShiftPV가 data를 보존한 채 멈춰 기다린다.
+
+### ShiftPVObservationFailed
+
+`shiftpv_metrics_snapshot_success == 0`이 5분 지속됐다. 해당 source의 최신 observation snapshot이
+실패했다는 뜻이며, data가 손상됐다는 뜻은 아니다. 이 alert가 떠 있는 동안 Pool/copy 관련 나머지
+metric은 최신이 아니므로 다른 alert의 부재를 근거로 삼으면 안 된다.
+
+```bash
+kubectl -n shiftpv-system get pods -l app.kubernetes.io/instance=shiftpv -o wide
+kubectl -n shiftpv-system logs deployment/shiftpv-controller --tail=100
+kubectl -n shiftpv-system logs daemonset/shiftpv-node -c shiftpv-node --tail=100
+```
+
+주요 원인은 API 접근 실패, Pool directory 접근 실패, plugin 재시작이다. 조치는 `source`/`node`가
+가리키는 Pod를 정상으로 되돌리는 것뿐이다. Snapshot 실패 자체로 provisioning이나 cleanup 결정이
+바뀌지는 않는다.
+
+### ShiftPVObservationStale
+
+Snapshot 시각이 5분 이상 밀렸거나, scrape target이 사라졌거나, `up == 0`이다. `description`의
+`source=(absent)`는 series 자체가 사라져 `absent()` 분기가 발화한 경우다.
+
+```bash
+kubectl -n shiftpv-system get endpoints -l app.kubernetes.io/instance=shiftpv
+kubectl -n shiftpv-system get servicemonitor -l app.kubernetes.io/instance=shiftpv
+kubectl -n shiftpv-system get pods -l app.kubernetes.io/instance=shiftpv -o wide
+```
+
+주요 원인은 Pod 재시작/축출, ServiceMonitor 또는 Prometheus 설정 변경, node 장애다. Rolling update
+중에는 새 Pod가 scrape되기 시작하면 스스로 해소된다. Node가 내려간 경우 ShiftPV는 해당 node의
+journal과 finalizer를 제거하지 않고 기다린다.
+
+### ShiftPVPoolAccountingInvalid
+
+`description`의 Pool이 capacity hold 회계를 admission 판단에 쓸 수 없는 상태다. 이 Pool은 신규
+allocation을 fail closed로 거부한다.
+
+```bash
+kubectl get shiftpvpool <pool> -o jsonpath='{.spec.capacity.limit}{"\n"}'
+kubectl get shiftpvvolumes -o json | jq -r '.items[] | select(.status.currentCopy.poolName=="<pool>") | .metadata.name'
+kubectl get shiftpvmoves -o yaml
+```
+
+주요 원인은 `spec.capacity.limit` 표기 오류와, hold를 집계할 수 없는 Volume/Move journal이다. 표기를
+고치거나 모순 journal을 해결한다. ShiftPV는 회계를 추정으로 재구성해 통과시키지 않는다.
+
+### ShiftPVPoolInventoryUnsafe
+
+`description`의 Pool inventory가 invalid이거나 고정 scan bound를 넘겨 truncated다. 즉 "없음"이
+증명되지 않았다. Absence proof를 요구하는 cleanup 완료와 Pool 삭제가 이 상태에서 멈춘다.
+
+```bash
+kubectl get shiftpvpool <pool> \
+  -o jsonpath='{.status.inventory.valid} {.status.inventory.truncated} {.status.inventory.generation}{"\n"}'
+kubectl get shiftpvpool <pool> -o json | jq '.status.inventory.copies | length'
+```
+
+주요 원인은 등록된 directory에 ShiftPV가 만들지 않은 항목이 많아 scan budget을 넘긴 경우와 directory
+접근 실패다. Pool directory는 ShiftPV 전용으로 유지한다. 이 상태에서 자동 삭제는 일어나지 않는다.
+
+### ShiftPVCleanupNeedsReview
+
+Cleanup journal이 `NeedsReview`로 멈췄다. Cleanup phase는 `Pending` → `Running` → `Verifying` →
+`ConfirmingAbsence` → `Completed`이며, 어느 단계에서든 receipt나 absence proof가 durable intent와
+어긋나면 `NeedsReview`로 남고 data를 보존한 채 멈춘다.
+
+```bash
+for kind in shiftpvvolumes shiftpvmoves; do
+  kubectl get "${kind}" -o json | jq -r \
+    '.items[] | select(.status.cleanup.status.phase=="NeedsReview") | .metadata.name'
+done
+kubectl get shiftpvvolume <volume-id> -o jsonpath='{.status.cleanup}' | jq .
+kubectl -n shiftpv-system get jobs -l app.kubernetes.io/instance=shiftpv
+```
+
+지금까지 관측된 대표 원인은 운영자가 node의 data directory를 직접 지워, intent 없이 path만 사라진
+경우다. [GC and review](#gc-and-review)의 대조 절차를 따른다. ShiftPV는 `NeedsReview` journal을
+자동으로 해제하지 않으며, finalizer 강제 제거 절차도 지원하지 않는다.
+
+### ShiftPVCopyNeedsReview
+
+`description`의 Pool inventory에서 `state`가 `OrphanPreserved`, `Missing`, `NeedsReview`인 copy
+observation이 발견됐다. 세 state의 의미가 서로 다르므로 먼저 `state`를 읽는다.
+
+- `OrphanPreserved`: API authority가 설명하지 못하는 copy다. Unknown storage로 report-only이며 ShiftPV는
+  삭제하지 않는다.
+- `Missing`: intent는 남아 있는데 path가 없다. 대표 원인은 수동 directory 삭제 뒤 남은 stale copy
+  marker다. [Retain volume 회수](#retain-volume-회수) 절차에서 `volumes/<volume-id>`만 지우고
+  `.shiftpv/copy-<copy-id>.json`과 `.shiftpv/placements/placement-<copy-id>.json`을 남기면 이 상태가
+  된다. 그 절에 적힌 순서를 끝까지 따르면 marker도 함께 정리된다.
+- `NeedsReview`: identity를 읽을 수 없거나 inventory 자체가 invalid/truncated다.
+
+```bash
+kubectl get shiftpvpool <pool> -o json | jq '
+  .status.inventory.copies[]
+  | select(.present == false or (.problem // "") != "")'
+kubectl get shiftpvvolume <volume-id> -o jsonpath='{.status.currentCopy}' | jq .
+# node에서: ls -la <pool mountPath>/.shiftpv <pool mountPath>/volumes
+```
+
+안전한 조치는 copy identity(Pool UID, Volume UID, copy ID)를 CR journal과 실제 marker로 대조한 뒤,
+소유자가 없다고 확인된 marker만 지우는 것이다. 이 alert만 근거로 data directory를 지우지 않는다.
+
 ## Pool removal
 
 Pool 삭제는 신규 allocation과 destination selection을 먼저 막는다. Finalizer는 다음 조건이 모두

@@ -198,24 +198,27 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 
 func copyObservationSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, cleanups []cleanupapi.Cleanup) []sample {
 	authority := copyAuthority(volumes, moves, cleanups)
-	counts := map[string]int{}
+	var values []sample
+	// One series per Pool: the operator needs to know which Pool holds the
+	// reviewed copies. Volume and copy IDs stay out of the label set.
 	for _, pool := range pools {
+		counts := map[string]int{}
 		if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.Truncated {
 			counts["NeedsReview"]++
 		}
-		if pool.Status.Inventory == nil {
-			continue
+		if pool.Status.Inventory != nil {
+			for _, observed := range pool.Status.Inventory.Copies {
+				counts[observationState(observed, authority)]++
+			}
 		}
-		for _, observed := range pool.Status.Inventory.Copies {
-			counts[observationState(observed, authority)]++
+		for _, state := range copyObservationStates {
+			values = append(values, sample{"copy_observations", float64(counts[state]), []string{pool.Name, state}})
 		}
-	}
-	var values []sample
-	for _, state := range []string{"Current", "InFlight", "CleanupTarget", "OrphanPreserved", "Missing", "NeedsReview"} {
-		values = append(values, sample{"copy_observations", float64(counts[state]), []string{state}})
 	}
 	return values
 }
+
+var copyObservationStates = []string{"Current", "InFlight", "CleanupTarget", "OrphanPreserved", "Missing", "NeedsReview"}
 
 // copyAuthority maps every copy identity the API still vouches for to the
 // reason it is expected on disk. Later claims deliberately win over earlier

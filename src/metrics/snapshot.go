@@ -52,7 +52,7 @@ var definitions = []struct {
 	{"volumes", "Current Volume objects by phase.", []string{"phase"}},
 	{"moves", "Moves referenced by a live Volume activeMove plus unfinished Completing journals, by phase.", []string{"phase"}},
 	{"cleanup_requests", "Durable cleanup intents by observed lifecycle state; Unknown means invalid metadata.", []string{"state"}},
-	{"copy_observations", "Node-observed copy placements classified against API authority.", []string{"state"}},
+	{"copy_observations", "Node-observed copy placements classified against API authority.", []string{"pool", "state"}},
 	{"mobility_deferred_volumes", "Volumes deferred during the last completed cordon discovery.", []string{"reason"}},
 }
 

@@ -34,8 +34,8 @@ func TestMobilityContractContainsTargetSafetyBoundary(t *testing.T) {
 		}
 	}
 	for _, forbidden := range forbiddenHistoricalTerms {
-		if strings.Contains(contract, forbidden) {
-			t.Errorf("0.4 mobility contract retains removed or historical term %q", forbidden)
+		if match := forbidden.FindString(contract); match != "" {
+			t.Errorf("0.4 mobility contract retains removed or historical term %q", match)
 		}
 	}
 }

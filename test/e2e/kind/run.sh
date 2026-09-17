@@ -111,6 +111,10 @@ run_orphan_preservation() {
 		"${ROOT_DIR}/test/e2e/kind/orphan-cleanup.sh"
 }
 
+run_retain_reclaim() {
+	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/retain-reclaim.sh"
+}
+
 run_volume_delete_cleanup() {
 	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/volume-delete-cleanup.sh"
 }
@@ -156,11 +160,15 @@ fi
 # equal wall clock once the ~170 s cluster setup that every group pays for is
 # included, and only reuses orderings the focused entry points already prove:
 #
-#   g1  directory-pool (262 s) + metrics (10 s) + pool-capacity (138 s)
+#   g1  directory-pool (262 s) + metrics (10 s) + retain-reclaim (~70 s)
+#       + pool-capacity (138 s)
 #       The metrics assertions count the CSI calls, the observed Copying move
 #       and the settled reserved-byte gauge that directory-pool produces, and
 #       require exactly the two base Pools, so those two stay adjacent and in
-#       order. pool-capacity only ever runs behind them today.
+#       order. retain-reclaim runs behind the metrics check, which leaves no
+#       capacity hold, and reuses the live Prometheus to prove
+#       shiftpv_copy_observations{state="Missing"} stays zero across the
+#       reclaim. pool-capacity only ever runs behind them today.
 #   g2  volume-delete-cleanup (138 s) + the release lifecycle (257 s:
 #       uninstall guard, break-glass reinstall, forced controller/node restarts,
 #       fsGroup, StorageClass coexistence) + filesystem-faults (77 s)
@@ -201,6 +209,7 @@ if [[ "${DIRECTORY_POOL_ONLY:-0}" == "1" ]]; then
 fi
 
 if group_selected g1; then
+	run_retain_reclaim
 	run_pool_capacity
 fi
 if group_selected g3; then
