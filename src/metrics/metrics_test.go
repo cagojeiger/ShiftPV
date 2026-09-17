@@ -18,6 +18,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
@@ -417,7 +419,7 @@ func TestDedicatedMetricFamilyContract(t *testing.T) {
 	e.ObserveDiscovery(nil, nil)
 	_, _ = e.intercept(context.Background(), nil, &grpc.UnaryServerInfo{FullMethod: "/csi.v1.Controller/CreateVolume"}, func(context.Context, any) (any, error) { return nil, status.Error(codes.Code(1000), "unknown code") })
 	families, err := e.Registry.Gather()
-	if err != nil || len(families) != 18 {
+	if err != nil || len(families) != 20 {
 		t.Fatalf("families=%d err=%v", len(families), err)
 	}
 	for _, family := range families {
@@ -487,4 +489,90 @@ func TestCopyObservationsClassifyAuthorityWithoutDeletingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	contains(t, output(t, c.Exporter), `shiftpv_copy_observations{pool="pool-a",state="Current"} 1`, `shiftpv_copy_observations{pool="pool-a",state="OrphanPreserved"} 1`, `shiftpv_copy_observations{pool="pool-a",state="NeedsReview"} 1`)
+}
+
+type persistentVolumeInventory struct {
+	items []corev1.PersistentVolume
+	err   error
+}
+
+func (i persistentVolumeInventory) List(context.Context) ([]corev1.PersistentVolume, error) {
+	return i.items, i.err
+}
+
+func driverPersistentVolume(name, handle, phase, capacity string) corev1.PersistentVolume {
+	return corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity:               corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(capacity)},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: volume.DriverName, VolumeHandle: handle}},
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.PersistentVolumePhase(phase)},
+	}
+}
+
+func TestPersistentVolumePhasesAndPoolAttribution(t *testing.T) {
+	c, inv := fixture()
+	bound := volume.CopyIdentity{InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid", VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", VolumeUID: "volume-uid", CopyID: "current", NodeName: "a", Role: volume.RoleServing}
+	released := bound
+	released.VolumeID = "shiftpv-fedcba9876543210fedcba9876543210"
+	released.PoolName = "pool-b"
+	inv.volumes = map[string]volumeapi.State{
+		bound.VolumeID:    {UID: bound.VolumeUID, CapacityBytes: 64, Phase: volumeapi.PhaseReady, OwnerNode: "a", CurrentCopy: &bound},
+		released.VolumeID: {UID: "released-uid", CapacityBytes: 64, Phase: volumeapi.PhaseReady, OwnerNode: "b", CurrentCopy: &released},
+	}
+	inv.moves = nil
+	foreign := driverPersistentVolume("foreign", "other-handle", "Released", "5Gi")
+	foreign.Spec.CSI.Driver = "csi.example.com"
+	c.PersistentVolumes = persistentVolumeInventory{items: []corev1.PersistentVolume{
+		driverPersistentVolume("bound", bound.VolumeID, "Bound", "1Gi"),
+		driverPersistentVolume("released", released.VolumeID, "Released", "25Gi"),
+		driverPersistentVolume("detached", "shiftpv-00000000000000000000000000000000", "Released", "10Gi"),
+		foreign,
+	}}
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	body := output(t, c.Exporter)
+	contains(t, body,
+		`shiftpv_persistent_volumes{phase="Bound",pool="pool-a"} 1`,
+		`shiftpv_persistent_volumes{phase="Released",pool="pool-a"} 0`,
+		`shiftpv_persistent_volumes{phase="Released",pool="pool-b"} 1`,
+		`shiftpv_persistent_volumes{phase="Released",pool="unknown"} 1`,
+		`shiftpv_persistent_volumes_released_bytes{pool="pool-a"} 0`,
+		`shiftpv_persistent_volumes_released_bytes{pool="pool-b"} 2.68435456e+10`,
+		`shiftpv_persistent_volumes_released_bytes{pool="unknown"} 1.073741824e+10`)
+	if strings.Contains(body, `driver="csi.example.com"`) || strings.Contains(body, "foreign") {
+		t.Fatalf("foreign driver PersistentVolume counted:\n%s", body)
+	}
+	c.PersistentVolumes = persistentVolumeInventory{err: errors.New("persistent volume inventory unavailable")}
+	if err := c.Refresh(context.Background()); err == nil {
+		t.Fatal("PersistentVolume inventory failure was hidden")
+	}
+	contains(t, output(t, c.Exporter), `shiftpv_metrics_snapshot_success{source="metadata"} 0`)
+}
+
+// An absent series and a Released count of zero read the same way in
+// ShiftPVReleasedVolumes, so the family must be emitted with or without an
+// inventory to observe.
+func TestPersistentVolumeFamilyIsAlwaysEmitted(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		inventory PersistentVolumeInventory
+	}{
+		{"empty", persistentVolumeInventory{}},
+		{"unset", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := fixture()
+			c.PersistentVolumes = tc.inventory
+			if err := c.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			contains(t, output(t, c.Exporter),
+				`shiftpv_persistent_volumes{phase="Bound",pool="unknown"} 0`,
+				`shiftpv_persistent_volumes{phase="Released",pool="unknown"} 0`,
+				`shiftpv_persistent_volumes_released_bytes{pool="unknown"} 0`)
+		})
+	}
 }
