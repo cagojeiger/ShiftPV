@@ -29,7 +29,7 @@ func (f *fakeBinder) Publish(source, target string) error {
 	return f.publishErr
 }
 
-func (f *fakeBinder) Unpublish(string) error { return nil }
+func (f *fakeBinder) Unpublish(string, string) error { return nil }
 
 func (f *fakeBinder) HasPublishedTarget(string, string) (bool, error) {
 	f.inspected++

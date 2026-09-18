@@ -3,6 +3,7 @@
 package mount
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,9 +39,9 @@ func TestLinuxMountIntegrationPublishAndUnpublish(t *testing.T) {
 	requireLinuxMountIntegration(t)
 
 	root := t.TempDir()
-	source := filepath.Join(root, "source")
+	source := filepath.Join(root, "pool", "volumes", testVolumeID)
 	target := filepath.Join(root, "target")
-	if err := os.Mkdir(source, 0o750); err != nil {
+	if err := os.MkdirAll(source, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	sentinel := filepath.Join(source, "sentinel")
@@ -73,7 +74,15 @@ func TestLinuxMountIntegrationPublishAndUnpublish(t *testing.T) {
 	if err := binder.Publish(source, target); err != nil {
 		t.Fatalf("idempotent publish: %v", err)
 	}
-	if err := binder.Unpublish(target); err != nil {
+	otherVolumeID := "shiftpv-11111111111111111111111111111111"
+	if err := binder.Unpublish(otherVolumeID, target); !errors.Is(err, ErrTargetVolumeMismatch) {
+		t.Fatalf("different volume unpublish error = %v", err)
+	}
+	mounted, err = binder.Mounter.IsMountPoint(target)
+	if err != nil || !mounted {
+		t.Fatalf("different volume request changed mount: mounted=%v err=%v", mounted, err)
+	}
+	if err := binder.Unpublish(testVolumeID, target); err != nil {
 		t.Fatalf("unpublish real bind mount: %v", err)
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
@@ -114,11 +123,11 @@ func TestLinuxMountIntegrationKeepsRemainingPublishReference(t *testing.T) {
 	requireLinuxMountIntegration(t)
 
 	root := t.TempDir()
-	source := filepath.Join(root, "source")
+	source := filepath.Join(root, "pool", "volumes", testVolumeID)
 	targetRoot := filepath.Join(root, "pods")
 	targetA := filepath.Join(targetRoot, "pod-a", "mount")
 	targetB := filepath.Join(targetRoot, "pod-b", "mount")
-	if err := os.Mkdir(source, 0o750); err != nil {
+	if err := os.MkdirAll(source, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(targetRoot, 0o750); err != nil {
@@ -127,8 +136,8 @@ func TestLinuxMountIntegrationKeepsRemainingPublishReference(t *testing.T) {
 
 	binder := NewBinder(targetRoot)
 	t.Cleanup(func() {
-		_ = binder.Unpublish(targetA)
-		_ = binder.Unpublish(targetB)
+		_ = binder.Unpublish(testVolumeID, targetA)
+		_ = binder.Unpublish(testVolumeID, targetB)
 	})
 	if err := binder.Publish(source, targetA); err != nil {
 		t.Fatalf("publish first target: %v", err)
@@ -136,14 +145,14 @@ func TestLinuxMountIntegrationKeepsRemainingPublishReference(t *testing.T) {
 	if err := binder.Publish(source, targetB); err != nil {
 		t.Fatalf("publish second target: %v", err)
 	}
-	if err := binder.Unpublish(targetA); err != nil {
+	if err := binder.Unpublish(testVolumeID, targetA); err != nil {
 		t.Fatalf("unpublish first target: %v", err)
 	}
 	published, err := binder.HasPublishedTarget(source, targetRoot)
 	if err != nil || !published {
 		t.Fatalf("second target was not observed: published=%v err=%v", published, err)
 	}
-	if err := binder.Unpublish(targetB); err != nil {
+	if err := binder.Unpublish(testVolumeID, targetB); err != nil {
 		t.Fatalf("unpublish second target: %v", err)
 	}
 	published, err = binder.HasPublishedTarget(source, targetRoot)
@@ -226,7 +235,7 @@ func runPermissionFailureHelper(t *testing.T) {
 	if mounted {
 		t.Fatalf("failed publish left a mount at %q", target)
 	}
-	if err := binder.Unpublish(target); err != nil {
+	if err := binder.Unpublish(testVolumeID, target); err != nil {
 		t.Fatalf("clean failed publish target: %v", err)
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {

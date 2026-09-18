@@ -17,6 +17,7 @@ import (
 
 	controllercsi "github.com/project-jelly/ShiftPV/src/csi/controller"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -111,6 +112,7 @@ func (f *fakeVolumeRegistry) ReconcilePublished(_ context.Context, _ string, nod
 type fakeBinder struct {
 	publishedSource string
 	publishedTarget string
+	unpublishedID   string
 	unpublished     string
 	publishErr      error
 	unpublishErr    error
@@ -123,7 +125,8 @@ func (f *fakeBinder) Publish(source, target string) error {
 	f.publishedTarget = target
 	return f.publishErr
 }
-func (f *fakeBinder) Unpublish(target string) error {
+func (f *fakeBinder) Unpublish(volumeID, target string) error {
+	f.unpublishedID = volumeID
 	f.unpublished = target
 	return f.unpublishErr
 }
@@ -481,8 +484,24 @@ func TestNodeUnpublishValidatesAndDelegates(t *testing.T) {
 	if _, err := service.NodeUnpublishVolume(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	if binder.unpublished != request.TargetPath {
-		t.Fatalf("unexpected target: %q", binder.unpublished)
+	if binder.unpublishedID != request.VolumeId || binder.unpublished != request.TargetPath {
+		t.Fatalf("unexpected unpublish: volume=%q target=%q", binder.unpublishedID, binder.unpublished)
+	}
+}
+
+func TestNodeUnpublishRejectsDifferentMountedVolume(t *testing.T) {
+	binder := &fakeBinder{unpublishErr: shiftmount.ErrTargetVolumeMismatch}
+	service := configuredService(t, binder)
+	request := &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "shiftpv-0123456789abcdef0123456789abcdef",
+		TargetPath: "/var/lib/kubelet/pods/uid/volumes/csi/mount",
+	}
+	_, err := service.NodeUnpublishVolume(context.Background(), request)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("mismatched mount code=%s err=%v", status.Code(err), err)
+	}
+	if service.Volumes.(*fakeVolumeRegistry).reconcileCalls.Load() != 0 {
+		t.Fatal("mismatched mount reached publication reconciliation")
 	}
 }
 

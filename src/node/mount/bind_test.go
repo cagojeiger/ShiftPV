@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+const testVolumeID = "shiftpv-0123456789abcdef0123456789abcdef"
+
 type fakeMounter struct {
 	mounted    bool
 	mounts     int
@@ -20,7 +22,7 @@ type fakeMounter struct {
 
 func TestNewBinderHasMounter(t *testing.T) {
 	root := t.TempDir()
-	if binder := NewBinder(root); binder == nil || binder.Mounter == nil || binder.TargetRoot != root {
+	if binder := NewBinder(root); binder == nil || binder.Mounter == nil || binder.TargetRoot != root || binder.MountInfoPath == "" {
 		t.Fatal("NewBinder returned an unconfigured binder")
 	}
 }
@@ -130,7 +132,8 @@ func TestUnpublishUnmountsAndRemovesTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	mounter := &fakeMounter{mounted: true}
-	if err := (&Binder{Mounter: mounter, TargetRoot: filepath.Dir(target)}).Unpublish(target); err != nil {
+	mountInfo := writeTestMountInfo(t, target, "/pool/volumes/"+testVolumeID)
+	if err := (&Binder{Mounter: mounter, TargetRoot: filepath.Dir(target), MountInfoPath: mountInfo}).Unpublish(testVolumeID, target); err != nil {
 		t.Fatal(err)
 	}
 	if mounter.unmounts != 1 {
@@ -144,7 +147,7 @@ func TestUnpublishUnmountsAndRemovesTarget(t *testing.T) {
 func TestUnpublishIsIdempotentForMissingTarget(t *testing.T) {
 	root := t.TempDir()
 	binder := &Binder{Mounter: &fakeMounter{inspectErr: os.ErrNotExist}, TargetRoot: root}
-	if err := binder.Unpublish(filepath.Join(root, "missing")); err != nil {
+	if err := binder.Unpublish(testVolumeID, filepath.Join(root, "missing")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -154,8 +157,9 @@ func TestUnpublishPreservesTargetOnUnmountFailure(t *testing.T) {
 	if err := os.Mkdir(target, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	binder := &Binder{Mounter: &fakeMounter{mounted: true, unmountErr: errors.New("busy")}, TargetRoot: filepath.Dir(target)}
-	if err := binder.Unpublish(target); err == nil {
+	mountInfo := writeTestMountInfo(t, target, "/pool/volumes/"+testVolumeID)
+	binder := &Binder{Mounter: &fakeMounter{mounted: true, unmountErr: errors.New("busy")}, TargetRoot: filepath.Dir(target), MountInfoPath: mountInfo}
+	if err := binder.Unpublish(testVolumeID, target); err == nil {
 		t.Fatal("expected unmount failure")
 	}
 	if _, err := os.Stat(target); err != nil {
@@ -244,10 +248,39 @@ func TestUnpublishRejectsSymlinkedTargetAncestor(t *testing.T) {
 	mounter := &fakeMounter{mounted: true}
 	binder := &Binder{Mounter: mounter, TargetRoot: targetRoot}
 	target := filepath.Join(targetRoot, "pod-uid", "volumes", "csi", "mount")
-	if err := binder.Unpublish(target); err == nil {
+	if err := binder.Unpublish(testVolumeID, target); err == nil {
 		t.Fatal("expected symlinked target ancestor to fail")
 	}
 	if mounter.unmounts != 0 {
 		t.Fatalf("unsafe target reached unmount: unmounts=%d", mounter.unmounts)
 	}
+}
+
+func TestUnpublishRejectsDifferentMountedVolume(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.Mkdir(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	other := "shiftpv-11111111111111111111111111111111"
+	mounter := &fakeMounter{mounted: true}
+	binder := &Binder{
+		Mounter: mounter, TargetRoot: filepath.Dir(target),
+		MountInfoPath: writeTestMountInfo(t, target, "/pool/volumes/"+other),
+	}
+	if err := binder.Unpublish(testVolumeID, target); !errors.Is(err, ErrTargetVolumeMismatch) {
+		t.Fatalf("mismatched mount error = %v", err)
+	}
+	if mounter.unmounts != 0 {
+		t.Fatalf("different volume reached unmount: %d", mounter.unmounts)
+	}
+}
+
+func writeTestMountInfo(t *testing.T, target, root string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "mountinfo")
+	line := "42 21 8:1 " + root + " " + target + " rw,relatime - ext4 /dev/sda1 rw\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

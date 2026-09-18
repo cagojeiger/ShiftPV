@@ -7,7 +7,11 @@ import (
 	"path/filepath"
 
 	mountutils "k8s.io/mount-utils"
+
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
+
+var ErrTargetVolumeMismatch = errors.New("target mount does not belong to the requested volume")
 
 type Interface interface {
 	Mount(source, target, fstype string, options []string) error
@@ -17,12 +21,13 @@ type Interface interface {
 }
 
 type Binder struct {
-	Mounter    Interface
-	TargetRoot string
+	Mounter       Interface
+	TargetRoot    string
+	MountInfoPath string
 }
 
 func NewBinder(targetRoot string) *Binder {
-	return &Binder{Mounter: mountutils.New(""), TargetRoot: targetRoot}
+	return &Binder{Mounter: mountutils.New(""), TargetRoot: targetRoot, MountInfoPath: "/proc/self/mountinfo"}
 }
 
 func (b *Binder) Publish(source, target string) error {
@@ -56,7 +61,10 @@ func (b *Binder) Publish(source, target string) error {
 	return nil
 }
 
-func (b *Binder) Unpublish(target string) error {
+func (b *Binder) Unpublish(volumeID, target string) error {
+	if err := volume.ValidateID(volumeID); err != nil {
+		return err
+	}
 	if err := secureTargetPath(b.TargetRoot, target, false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -71,6 +79,9 @@ func (b *Binder) Unpublish(target string) error {
 		return fmt.Errorf("inspect target mount: %w", err)
 	}
 	if mounted {
+		if err := verifyMountedVolume(b.MountInfoPath, target, volumeID); err != nil {
+			return err
+		}
 		if err := b.Mounter.Unmount(target); err != nil {
 			return fmt.Errorf("unmount target %q: %w", target, err)
 		}
