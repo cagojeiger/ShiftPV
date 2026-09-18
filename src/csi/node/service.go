@@ -122,7 +122,10 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	}
 	unlock := s.lockPublication(req.GetVolumeId())
 	defer unlock()
-	if err := s.Binder.Unpublish(req.GetTargetPath()); err != nil {
+	if err := s.Binder.Unpublish(req.GetVolumeId(), req.GetTargetPath()); err != nil {
+		if errors.Is(err, shiftmount.ErrTargetVolumeMismatch) {
+			return nil, status.Errorf(codes.FailedPrecondition, "unmount target: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "unmount target: %v", err)
 	}
 	target, reconcile, err := s.unpublishTarget(ctx, req.GetVolumeId())

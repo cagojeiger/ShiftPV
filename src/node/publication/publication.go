@@ -32,7 +32,7 @@ var (
 // only publishes and inspects.
 type Binder interface {
 	Publish(source, target string) error
-	Unpublish(target string) error
+	Unpublish(volumeID, target string) error
 	HasPublishedTarget(source, targetRoot string) (bool, error)
 }
 
