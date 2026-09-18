@@ -48,7 +48,7 @@ func TestLinuxMountIntegrationPublishAndUnpublish(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binder := NewBinder()
+	binder := NewBinder(root)
 	t.Cleanup(func() {
 		mounted, err := binder.Mounter.IsMountPoint(target)
 		if err == nil && mounted {
@@ -84,6 +84,32 @@ func TestLinuxMountIntegrationPublishAndUnpublish(t *testing.T) {
 	}
 }
 
+func TestLinuxMountIntegrationRejectsSymlinkedTargetAncestor(t *testing.T) {
+	requireLinuxMountIntegration(t)
+
+	root := t.TempDir()
+	targetRoot := filepath.Join(root, "pods")
+	source := filepath.Join(root, "source")
+	outside := t.TempDir()
+	if err := os.Mkdir(targetRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(source, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(targetRoot, "pod-uid")); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(targetRoot, "pod-uid", "volumes", "csi", "mount")
+	if err := NewBinder(targetRoot).Publish(source, target); err == nil {
+		t.Fatal("symlinked target ancestor unexpectedly reached the mount operation")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "volumes")); !os.IsNotExist(err) {
+		t.Fatalf("publish escaped target root: %v", err)
+	}
+}
+
 func TestLinuxMountIntegrationKeepsRemainingPublishReference(t *testing.T) {
 	requireLinuxMountIntegration(t)
 
@@ -95,8 +121,11 @@ func TestLinuxMountIntegrationKeepsRemainingPublishReference(t *testing.T) {
 	if err := os.Mkdir(source, 0o750); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(targetRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
 
-	binder := NewBinder()
+	binder := NewBinder(targetRoot)
 	t.Cleanup(func() {
 		_ = binder.Unpublish(targetA)
 		_ = binder.Unpublish(targetB)
@@ -161,7 +190,7 @@ func TestLinuxMountIntegrationPermissionFailure(t *testing.T) {
 		t.Fatalf("permission helper failed: %v\n%s", err, output)
 	}
 
-	mounted, err := NewBinder().Mounter.IsMountPoint(target)
+	mounted, err := NewBinder(root).Mounter.IsMountPoint(target)
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("inspect failed target: %v", err)
 	}
@@ -186,7 +215,7 @@ func runPermissionFailureHelper(t *testing.T) {
 	if source == "" || target == "" {
 		t.Fatal("permission helper paths are not configured")
 	}
-	binder := NewBinder()
+	binder := NewBinder(filepath.Dir(target))
 	if err := binder.Publish(source, target); err == nil {
 		t.Fatal("unprivileged bind mount unexpectedly succeeded")
 	}

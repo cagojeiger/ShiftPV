@@ -44,7 +44,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	binder := shiftmount.NewBinder()
+	binder := shiftmount.NewBinder(*targetRoot)
 	nodeService := &nodecsi.Service{
 		NodeName:   *nodeName,
 		HostRoot:   *hostRoot,
