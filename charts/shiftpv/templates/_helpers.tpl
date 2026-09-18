@@ -99,13 +99,16 @@ Takes a dict of "runAsUser" and an optional "runAsNonRoot"; the node plugin
 sidecars share the privileged plugin's uid instead of running as nonroot.
 */}}
 {{- define "shiftpv.containerSecurityContext" -}}
+{{- if not (hasKey . "runAsUser") -}}
+{{- fail "containerSecurityContext needs runAsUser" -}}
+{{- end -}}
 allowPrivilegeEscalation: false
 capabilities:
   drop: ["ALL"]
 {{- if .runAsNonRoot }}
 runAsNonRoot: true
 {{- end }}
-runAsUser: {{ .runAsUser }}
+runAsUser: {{ get . "runAsUser" }}
 {{- end }}
 
 {{/*
