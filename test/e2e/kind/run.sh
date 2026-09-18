@@ -85,6 +85,56 @@ install_shiftpv() {
 	kubectl wait --for=condition=Ready shiftpvpool --all --timeout=2m
 }
 
+assert_shiftpv_release_removed() {
+	local namespaced cluster_scoped deadline
+	deadline=$((SECONDS + 60))
+	while true; do
+		namespaced=$(kubectl -n shiftpv-system get \
+			deployments,daemonsets,replicasets,pods,services,jobs,serviceaccounts,roles,rolebindings,configmaps,secrets \
+			-l app.kubernetes.io/instance=shiftpv \
+			-o name)
+		cluster_scoped=$(kubectl get \
+			clusterroles,clusterrolebindings,storageclasses,csidrivers \
+			-l app.kubernetes.io/instance=shiftpv \
+			-o name)
+		if [[ -z "${namespaced}" && -z "${cluster_scoped}" ]]; then
+			break
+		fi
+		if ((SECONDS >= deadline)); then
+			break
+		fi
+		sleep 1
+	done
+
+	if [[ -n "${namespaced}" || -n "${cluster_scoped}" ]]; then
+		echo "Helm uninstall left ShiftPV release resources:" >&2
+		printf '%s\n%s\n' "${namespaced}" "${cluster_scoped}" | sed '/^$/d' >&2
+		exit 1
+	fi
+	for resource in \
+		job/shiftpv-uninstall-guard \
+		configmap/shiftpv-uninstall-permit \
+		secret/shiftpv-webhook-tls; do
+		if kubectl -n shiftpv-system get "${resource}" >/dev/null 2>&1; then
+			echo "Helm uninstall left ${resource}" >&2
+			exit 1
+		fi
+	done
+
+	if kubectl get mutatingwebhookconfiguration shiftpv-mobility >/dev/null 2>&1; then
+		echo "Helm uninstall left the ShiftPV mobility webhook" >&2
+		exit 1
+	fi
+	if kubectl get validatingwebhookconfiguration shiftpv-lifecycle >/dev/null 2>&1; then
+		echo "Helm uninstall left the ShiftPV lifecycle webhook" >&2
+		exit 1
+	fi
+	if helm status shiftpv --namespace shiftpv-system >/dev/null 2>&1; then
+		echo "Helm uninstall left the ShiftPV release installed" >&2
+		exit 1
+	fi
+}
+
 run_mobility_filesystem_faults() {
 	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
 		WORKER_A_POOL="${WORKER_A_POOL}" WORKER_B_POOL="${WORKER_B_POOL}" \
@@ -243,12 +293,13 @@ if group_selected g2; then
 	fi
 
 	# Pool registration alone is safe to retain. With no PVC/PV/Volume/Move, the
-	# hook must allow a normal uninstall and delete its successful Job.
-	helm uninstall shiftpv --namespace shiftpv-system --timeout 2m
-	if kubectl -n shiftpv-system get job shiftpv-uninstall-guard >/dev/null 2>&1; then
-	  echo "successful uninstall guard Job was not deleted" >&2
-	  exit 1
-	fi
+	# hook must allow a normal uninstall. CRDs and Pool registration remain by
+	# design, while every release-owned workload, RBAC object, storage object,
+	# webhook and successful hook Job must be gone before reinstall.
+	helm uninstall shiftpv --namespace shiftpv-system --wait --timeout 2m
+	assert_shiftpv_release_removed
+	kubectl get customresourcedefinition/shiftpvpools.shiftpv.io >/dev/null
+	kubectl get shiftpvpool/worker-a shiftpvpool/worker-b >/dev/null
 	install_shiftpv true
 
 	DEFAULT_CLASS=$(kubectl get storageclass shiftpv \
