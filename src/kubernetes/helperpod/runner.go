@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 
@@ -126,23 +127,40 @@ func (r *Runner) runForResult(ctx context.Context, nodeName, volumeID string, co
 		return "", fmt.Errorf("helper Pod configuration is incomplete")
 	}
 
-	zero := int64(0)
-	pod, err := r.Client.CoreV1().Pods(r.Namespace).Create(ctx, r.helperPod(nodeName, volumeID, poolRoot, command), metav1.CreateOptions{})
+	desired := r.helperPod(nodeName, volumeID, poolRoot, command)
+	pods := r.Client.CoreV1().Pods(r.Namespace)
+	pod, err := pods.Create(ctx, desired, metav1.CreateOptions{})
 	if err != nil {
 		return "", fmt.Errorf("create helper Pod: %w", classifyKubernetesAPIError(err))
 	}
+	if pod.UID == "" {
+		return "", fmt.Errorf("helper Pod has no UID")
+	}
+	uid := pod.UID
+	zero := int64(0)
 	defer func() {
-		_ = r.Client.CoreV1().Pods(r.Namespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{GracePeriodSeconds: &zero})
+		_ = pods.Delete(context.Background(), pod.Name, metav1.DeleteOptions{
+			GracePeriodSeconds: &zero,
+			Preconditions:      &metav1.Preconditions{UID: &uid},
+		})
 	}()
+	desired.Name = pod.Name
+	desired.Namespace = r.Namespace
+	if err := sameResultPod(desired, pod, uid); err != nil {
+		return "", err
+	}
 
 	result := ""
 	err = wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, r.Timeout, true, func(pollCtx context.Context) (bool, error) {
-		current, getErr := r.Client.CoreV1().Pods(r.Namespace).Get(pollCtx, pod.Name, metav1.GetOptions{})
+		current, getErr := pods.Get(pollCtx, pod.Name, metav1.GetOptions{})
 		if getErr != nil {
 			if apierrors.IsNotFound(getErr) {
 				return false, nil
 			}
 			return false, classifyKubernetesAPIError(getErr)
+		}
+		if err := sameResultPod(desired, current, uid); err != nil {
+			return false, err
 		}
 		switch current.Status.Phase {
 		case corev1.PodSucceeded:
@@ -160,6 +178,50 @@ func (r *Runner) runForResult(ctx context.Context, nodeName, volumeID string, co
 		return "", fmt.Errorf("wait for helper Pod on node %q: %w", nodeName, err)
 	}
 	return result, nil
+}
+
+// sameResultPod binds a short-lived stat/du result to the exact Pod
+// incarnation and execution shape that the Runner created. Pod names are
+// reusable, so a name-only watch could otherwise accept a replacement Pod's
+// termination message as trusted capacity or usage data.
+func sameResultPod(expected, current *corev1.Pod, uid types.UID) error {
+	if expected == nil || current == nil || uid == "" || current.UID != uid {
+		return fmt.Errorf("helper Pod identity changed")
+	}
+	if firstDifference(resultPodShapeChecks(expected, current)) != "" {
+		return fmt.Errorf("helper Pod identity or execution shape changed")
+	}
+	for key, value := range expected.Labels {
+		if current.Labels[key] != value {
+			return fmt.Errorf("helper Pod label changed")
+		}
+	}
+	if firstDifference(helperPodCommandChecks(expected, current)) != "" {
+		return fmt.Errorf("helper Pod command changed")
+	}
+	if !helperPoolMountBound(expected, current) {
+		return fmt.Errorf("helper Pod Pool mount changed")
+	}
+	return nil
+}
+
+func resultPodShapeChecks(expected, current *corev1.Pod) []fieldCheck {
+	return []fieldCheck{
+		{"metadata.deletionTimestamp", func() bool { return current.DeletionTimestamp == nil }},
+		{"metadata.name", func() bool { return current.Name == expected.Name }},
+		{"metadata.namespace", func() bool { return current.Namespace == expected.Namespace }},
+		{"spec.nodeName", func() bool { return current.Spec.NodeName == expected.Spec.NodeName }},
+		{"spec.serviceAccountName", func() bool {
+			return current.Spec.ServiceAccountName == expected.Spec.ServiceAccountName
+		}},
+		{"spec.restartPolicy", func() bool { return current.Spec.RestartPolicy == corev1.RestartPolicyNever }},
+		{"spec.hostNetwork", func() bool { return !current.Spec.HostNetwork }},
+		{"spec.hostPID", func() bool { return !current.Spec.HostPID }},
+		{"spec.hostIPC", func() bool { return !current.Spec.HostIPC }},
+		{"spec.containers", func() bool { return len(current.Spec.Containers) == 1 }},
+		{"spec.initContainers", func() bool { return len(current.Spec.InitContainers) == 0 }},
+		{"spec.ephemeralContainers", func() bool { return len(current.Spec.EphemeralContainers) == 0 }},
+	}
 }
 
 func (r *Runner) helperPod(nodeName, volumeID, poolRoot string, command []string) *corev1.Pod {
