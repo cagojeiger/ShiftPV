@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -108,6 +109,79 @@ func TestVolumeUsageReturnsQuiescedDirectoryBytes(t *testing.T) {
 	command := created.pod.Spec.Containers[0].Command
 	if len(command) != 5 || command[4] != "/pool/volumes/"+testVolumeID {
 		t.Fatalf("command = %#v", command)
+	}
+}
+
+func TestRunForResultRejectsReplacementPod(t *testing.T) {
+	client, created := clientWithPodTerminationMessage(t, "100 25 4096 12\n")
+	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		replacement := created.pod.DeepCopy()
+		replacement.UID = "replacement-uid"
+		return true, replacement, nil
+	})
+	runner := validRunner(client)
+
+	if _, err := runner.StatFS(context.Background(), "worker-a"); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("replacement helper accepted: %v", err)
+	}
+}
+
+func TestRunForResultRejectsChangedExecutionSpec(t *testing.T) {
+	client, created := clientWithPodTerminationMessage(t, "100 25 4096 12\n")
+	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		changed := created.pod.DeepCopy()
+		changed.Spec.Containers[0].Command = []string{"sh", "-c", "printf forged > /dev/termination-log"}
+		return true, changed, nil
+	})
+	runner := validRunner(client)
+
+	if _, err := runner.StatFS(context.Background(), "worker-a"); err == nil || !strings.Contains(err.Error(), "command changed") {
+		t.Fatalf("changed helper accepted: %v", err)
+	}
+}
+
+func TestRunForResultDeletesOnlyCreatedUID(t *testing.T) {
+	client, _ := clientWithPodTerminationMessage(t, "100 25 4096 12\n")
+	var deletedUID *types.UID
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		options := action.(k8stesting.DeleteAction).GetDeleteOptions()
+		if options.Preconditions != nil {
+			deletedUID = options.Preconditions.UID
+		}
+		return true, nil, nil
+	})
+	runner := validRunner(client)
+
+	if _, err := runner.StatFS(context.Background(), "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	if deletedUID == nil || *deletedUID != types.UID("helper-uid") {
+		t.Fatalf("helper delete UID precondition = %v", deletedUID)
+	}
+}
+
+func TestSameResultPodRejectsChangedSecurityBoundary(t *testing.T) {
+	runner := validRunner(fake.NewClientset())
+	expected := runner.helperPod("worker-a", testVolumeID, "/mnt/shiftpv", []string{"sh", "-c", "true"})
+	expected.Name, expected.Namespace, expected.UID = "helper-1", runner.Namespace, "helper-uid"
+
+	tests := map[string]func(*corev1.Pod){
+		"node": func(pod *corev1.Pod) { pod.Spec.NodeName = "worker-b" },
+		"host path": func(pod *corev1.Pod) {
+			pod.Spec.Volumes[0].HostPath.Path = "/other"
+		},
+		"security context": func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].SecurityContext.RunAsUser = int64Ptr(1000)
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			current := expected.DeepCopy()
+			mutate(current)
+			if err := sameResultPod(expected, current, expected.UID); err == nil {
+				t.Fatal("changed helper accepted")
+			}
+		})
 	}
 }
 

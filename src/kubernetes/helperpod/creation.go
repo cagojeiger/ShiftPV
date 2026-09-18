@@ -181,10 +181,10 @@ func creationPodDifference(expected, current *corev1.Pod) (string, error) {
 			return "metadata.annotations[" + key + "]", fmt.Errorf("creation helper Pod annotation changed")
 		}
 	}
-	if field := firstDifference(creationPodCommandChecks(expected, current)); field != "" {
+	if field := firstDifference(helperPodCommandChecks(expected, current)); field != "" {
 		return field, fmt.Errorf("creation helper Pod command changed")
 	}
-	if !creationPoolMountBound(expected, current) {
+	if !helperPoolMountBound(expected, current) {
 		return "spec.volumes[pool]", fmt.Errorf("creation helper Pod Pool mount changed")
 	}
 	return "", nil
@@ -215,9 +215,9 @@ func creationPodShapeChecks(expected, current *corev1.Pod) []fieldCheck {
 	}
 }
 
-// creationPodCommandChecks compares what the container would actually run: the
+// helperPodCommandChecks compares what the container would actually run: the
 // recorded operation command with no injected argument or environment.
-func creationPodCommandChecks(expected, current *corev1.Pod) []fieldCheck {
+func helperPodCommandChecks(expected, current *corev1.Pod) []fieldCheck {
 	want, got := expected.Spec.Containers[0], current.Spec.Containers[0]
 	return []fieldCheck{
 		{"spec.containers[0].name", func() bool { return got.Name == want.Name }},
@@ -233,10 +233,10 @@ func creationPodCommandChecks(expected, current *corev1.Pod) []fieldCheck {
 	}
 }
 
-// creationPoolMountBound reports whether the Pod still mounts exactly the
+// helperPoolMountBound reports whether the Pod still mounts exactly the
 // approved Pool root at the helper's mount path, with no subpath narrowing or
 // redirecting it.
-func creationPoolMountBound(expected, current *corev1.Pod) bool {
+func helperPoolMountBound(expected, current *corev1.Pod) bool {
 	got := current.Spec.Containers[0]
 	for _, podVolume := range current.Spec.Volumes {
 		if podVolume.Name != "pool" || !reflect.DeepEqual(podVolume.HostPath, expected.Spec.Volumes[0].HostPath) {
