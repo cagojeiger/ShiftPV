@@ -121,6 +121,9 @@ func TestLinuxMountIntegrationKeepsRemainingPublishReference(t *testing.T) {
 	if err := os.Mkdir(source, 0o750); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(targetRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
 
 	binder := NewBinder(targetRoot)
 	t.Cleanup(func() {
