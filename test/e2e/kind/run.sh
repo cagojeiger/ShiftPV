@@ -86,15 +86,25 @@ install_shiftpv() {
 }
 
 assert_shiftpv_release_removed() {
-	local namespaced cluster_scoped
-	namespaced=$(kubectl -n shiftpv-system get \
-		deployments,daemonsets,replicasets,pods,services,jobs,serviceaccounts,roles,rolebindings,configmaps,secrets \
-		-l app.kubernetes.io/instance=shiftpv \
-		-o name)
-	cluster_scoped=$(kubectl get \
-		clusterroles,clusterrolebindings,storageclasses,csidrivers \
-		-l app.kubernetes.io/instance=shiftpv \
-		-o name)
+	local namespaced cluster_scoped deadline
+	deadline=$((SECONDS + 60))
+	while true; do
+		namespaced=$(kubectl -n shiftpv-system get \
+			deployments,daemonsets,replicasets,pods,services,jobs,serviceaccounts,roles,rolebindings,configmaps,secrets \
+			-l app.kubernetes.io/instance=shiftpv \
+			-o name)
+		cluster_scoped=$(kubectl get \
+			clusterroles,clusterrolebindings,storageclasses,csidrivers \
+			-l app.kubernetes.io/instance=shiftpv \
+			-o name)
+		if [[ -z "${namespaced}" && -z "${cluster_scoped}" ]]; then
+			break
+		fi
+		if ((SECONDS >= deadline)); then
+			break
+		fi
+		sleep 1
+	done
 
 	if [[ -n "${namespaced}" || -n "${cluster_scoped}" ]]; then
 		echo "Helm uninstall left ShiftPV release resources:" >&2
