@@ -1,6 +1,7 @@
 package mount
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,11 +17,12 @@ type Interface interface {
 }
 
 type Binder struct {
-	Mounter Interface
+	Mounter    Interface
+	TargetRoot string
 }
 
-func NewBinder() *Binder {
-	return &Binder{Mounter: mountutils.New("")}
+func NewBinder(targetRoot string) *Binder {
+	return &Binder{Mounter: mountutils.New(""), TargetRoot: targetRoot}
 }
 
 func (b *Binder) Publish(source, target string) error {
@@ -31,8 +33,8 @@ func (b *Binder) Publish(source, target string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("source path %q is not a directory", source)
 	}
-	if err := os.MkdirAll(target, 0o750); err != nil {
-		return fmt.Errorf("create target directory: %w", err)
+	if err := secureTargetPath(b.TargetRoot, target, true); err != nil {
+		return fmt.Errorf("secure target directory: %w", err)
 	}
 	mounted, err := b.Mounter.IsMountPoint(target)
 	if err != nil {
@@ -55,6 +57,12 @@ func (b *Binder) Publish(source, target string) error {
 }
 
 func (b *Binder) Unpublish(target string) error {
+	if err := secureTargetPath(b.TargetRoot, target, false); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("secure target directory: %w", err)
+	}
 	mounted, err := b.Mounter.IsMountPoint(target)
 	if os.IsNotExist(err) {
 		return nil
