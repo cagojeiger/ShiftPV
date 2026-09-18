@@ -440,7 +440,7 @@ func TestRecoveryRollbackAcceptsOnlyFreshExactAbsence(t *testing.T) {
 }
 
 func TestRecoveryRollbackPreservesAmbiguousArtifactsForReview(t *testing.T) {
-	for _, scenario := range []string{"both transaction copies", "problem observation", "conflicting copy", "published transaction"} {
+	for _, scenario := range []string{"both transaction copies", "problem observation", "conflicting copy", "published conflict", "published incoming", "published destination"} {
 		t.Run(scenario, func(t *testing.T) {
 			r, repo, incoming, destination := rollbackRecoveryFixture(t, nil)
 			switch scenario {
@@ -448,12 +448,14 @@ func TestRecoveryRollbackPreservesAmbiguousArtifactsForReview(t *testing.T) {
 				repo.pools[1].Status.Inventory.Copies = []volumeapi.CopyObservation{{Identity: &incoming, Present: true}, {Identity: &destination, Present: true}}
 			case "problem observation":
 				repo.pools[1].Status.Inventory.Copies = []volumeapi.CopyObservation{{Marker: "path:volumes/unknown", Present: true, Problem: "UnrecordedPath"}}
-			case "conflicting copy":
+			case "conflicting copy", "published conflict":
 				conflict := destination
 				conflict.CopyID = "foreign-copy"
-				repo.pools[1].Status.Inventory.Copies = []volumeapi.CopyObservation{{Identity: &conflict, Present: true}}
-			case "published transaction":
+				repo.pools[1].Status.Inventory.Copies = []volumeapi.CopyObservation{{Identity: &conflict, Present: true, Published: scenario == "published conflict"}}
+			case "published incoming":
 				repo.pools[1].Status.Inventory.Copies = []volumeapi.CopyObservation{{Identity: &incoming, Present: true, Published: true}}
+			case "published destination":
+				repo.pools[1].Status.Inventory.Copies = []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: true}}
 			}
 			move := repo.moves[0]
 			err := r.reconcileRecovery(context.Background(), move)

@@ -236,9 +236,6 @@ func rollbackPresentArtifact(move volumeapi.Move, destination *volumeapi.Pool) (
 		if identity.Validate() != nil || identity.PoolName != destination.Name || identity.PoolUID != destination.UID || identity.NodeName != destination.NodeName {
 			return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination inventory contains an invalid copy identity")
 		}
-		if observed.Published {
-			return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination inventory contains a published artifact")
-		}
 		switch identity {
 		case *move.Status.IncomingCopy:
 			incomingPresent = true
@@ -249,6 +246,11 @@ func rollbackPresentArtifact(move volumeapi.Move, destination *volumeapi.Pool) (
 				(identity.Role == volume.RoleIncoming && identity.CopyID == move.Status.IncomingCopy.CopyID) {
 				return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination inventory contains a conflicting volume artifact")
 			}
+			// Other healthy volumes on the same Pool are outside this rollback.
+			continue
+		}
+		if observed.Published {
+			return volume.CopyIdentity{}, false, needsRecoveryCleanupReview("destination inventory contains a published artifact")
 		}
 	}
 	if incomingPresent && destinationPresent {
