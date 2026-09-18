@@ -1,0 +1,39 @@
+name: Chart Render Diff
+
+on:
+  pull_request:
+    paths:
+      - charts/**
+      - build/ci/chart-render-diff.sh
+      - test/e2e/kind/values.yaml
+      - .github/workflows/chart-render-diff.yaml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chart-render-diff-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chart-render-diff:
+    name: chart-render-diff
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Helm
+        uses: ./.github/actions/install-k8s-tools
+        with:
+          kind: "false"
+          kubectl: "false"
+
+      - name: Compare chart renders with the pull request base
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: make chart-render-diff BASE_REF="${BASE_REF}"

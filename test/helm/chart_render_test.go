@@ -2,6 +2,8 @@ package helm
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +14,36 @@ import (
 // the "test-shiftpv" fullname prefix. Names that come from values instead of the
 // release (the StorageClass, the CSI driver) stay unprefixed.
 const fullname = "test-shiftpv"
+
+func TestContainerSecurityContextRequiresRunAsUserKey(t *testing.T) {
+	chartDir := filepath.Join(t.TempDir(), "shiftpv")
+	if err := os.CopyFS(chartDir, os.DirFS("../../charts/shiftpv")); err != nil {
+		t.Fatalf("copy chart fixture: %v", err)
+	}
+	deploymentPath := filepath.Join(chartDir, "templates", "controller", "deployment.yaml")
+	raw, err := os.ReadFile(deploymentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withUser := `(dict "runAsNonRoot" true "runAsUser" 65532)`
+	withoutUser := `(dict "runAsNonRoot" true)`
+	changed := strings.Replace(string(raw), withUser, withoutUser, 1)
+	if changed == string(raw) {
+		t.Fatalf("controller deployment has no security context invocation to exercise")
+	}
+	if err := os.WriteFile(deploymentPath, []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command("helm", "template", "test", chartDir, "--namespace", "storage", "--kube-version", "1.35.8")
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("render without runAsUser unexpectedly succeeded")
+	}
+	if !strings.Contains(string(output), "containerSecurityContext needs runAsUser") {
+		t.Fatalf("render failed without the missing-key diagnostic: %v\n%s", err, output)
+	}
+}
 
 type renderedObject struct {
 	Kind     string `json:"kind"`
