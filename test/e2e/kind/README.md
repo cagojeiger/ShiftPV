@@ -37,7 +37,7 @@ control-plane
 | Node outage | source and destination stop/start before and after owner commit |
 | Filesystem fault | partial copy, ENOSPC, inode exhaustion, read-only, checksum mismatch |
 | GC | parent-owned cleanup only; unknown orphan report-only and Pool removal blocked |
-| Removal | mounted, retained, moving, deleting, hold, stale inventory and API error all fail closed |
+| Removal | mounted, retained, moving, deleting, hold, stale inventory and API error all fail closed; successful Helm removal leaves no release-owned workload, RBAC, storage or webhook object |
 
 Every scenario checks API state, actual paths and mounts, capacity holds, logs/events, restart count and final
 fixture cleanup. One successful Move or checksum is not sufficient.
