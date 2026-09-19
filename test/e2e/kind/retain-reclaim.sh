@@ -4,8 +4,8 @@ set -euo pipefail
 # Proves the documented Retain reclaim path end to end: a `shiftpv-retain` PVC
 # outlives its claim, the operator flips the released PV to `Delete`, and the
 # node is left with no volume directory, no copy or placement marker and no
-# lock. A leftover marker is exactly what makes the scanner report a Missing
-# copy observation, so this scenario also asserts that signal stays silent.
+# lock. A leftover marker is exactly what makes the scanner report a persistent
+# Missing copy observation, so this scenario also asserts that signal settles.
 
 : "${ROOT_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 # shellcheck source=test/e2e/kind/node-path.sh
@@ -104,18 +104,31 @@ wait_for_clean_inventory() {
 }
 
 # Only meaningful in the group that also installs the metrics stack; elsewhere
-# the inventory assertion above carries the same evidence.
-assert_no_missing_copy_observation() {
-	local result
+# the inventory assertion above carries the same evidence. Reclaim retires and
+# purges the data directory before it removes the copy marker, so a scanner may
+# report a short-lived Missing observation during that authorized transaction.
+# The alert has a five-minute `for` window; the release gate instead proves the
+# settled signal returns to zero and stays there across two fresh scrapes.
+wait_for_settled_copy_observation() {
+	local deadline=$((SECONDS + 120)) result stable=0
 	kubectl -n shiftpv-system get deployment/metrics-test >/dev/null 2>&1 || return 0
-	result=$(kubectl -n shiftpv-system exec deployment/metrics-test -- \
-		promtool query instant http://localhost:9090 \
-		"sum(max_over_time(shiftpv_copy_observations{pool=\"${POOL}\",state=\"Missing\"}[5m]))")
-	if [[ "${result}" != *"=> 0 "* ]]; then
-		echo "shiftpv_copy_observations{state=\"Missing\"} was not zero across the reclaim: ${result}" >&2
-		return 1
-	fi
-	printf '%s\n' "shiftpv_copy_observations Missing: ${result}"
+	while ((SECONDS < deadline)); do
+		result=$(kubectl -n shiftpv-system exec deployment/metrics-test -- \
+			promtool query instant http://localhost:9090 \
+			"sum(shiftpv_copy_observations{pool=\"${POOL}\",state=\"Missing\"})")
+		if [[ "${result}" == *"=> 0 "* ]]; then
+			((++stable))
+			if ((stable >= 2)); then
+				printf '%s\n' "shiftpv_copy_observations Missing settled: ${result}"
+				return
+			fi
+		else
+			stable=0
+		fi
+		sleep 15
+	done
+	echo "shiftpv_copy_observations{state=\"Missing\"} did not settle at zero: ${result}" >&2
+	return 1
 }
 
 for command in docker kubectl jq; do
@@ -186,7 +199,7 @@ kubectl wait --for=delete "shiftpvvolume/${VOLUME_ID}" --timeout=2m
 PV_NAME=
 assert_node_storage_reclaimed
 wait_for_clean_inventory
-assert_no_missing_copy_observation
+wait_for_settled_copy_observation
 
 trap - EXIT
 cleanup
